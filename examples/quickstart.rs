@@ -16,17 +16,23 @@ use std::time::Duration;
 
 use godark::{GodarkClient, GodarkError, OrderType, Side, TimeInForce};
 
+#[path = "common.rs"]
+mod common;
+
 #[tokio::main]
 async fn main() -> Result<(), GodarkError> {
+    common::load_dotenv();
+
     // Resolve credentials in order of precedence:
     //   1. CLI args:  `quickstart <ID> <SECRET>`
-    //   2. Bare static token via `GODARK_API_KEY` (localnet `test-key-1`)
+    //   2. Bare static token via `GODARK_API_KEY` / `GDX_API_KEY` (localnet `test-key-1`)
     //   3. RFC 6749 client_credentials via `GODARK_API_KEY_ID` + `GODARK_API_SECRET`
+    //      (or the `GDX_*` aliases).
     let cli_id = env::args().nth(1).filter(|s| !s.is_empty());
     let cli_secret = env::args().nth(2).filter(|s| !s.is_empty());
-    let bare_token = env::var("GODARK_API_KEY").ok().filter(|s| !s.is_empty());
-    let env_id = env::var("GODARK_API_KEY_ID").ok().filter(|s| !s.is_empty());
-    let env_secret = env::var("GODARK_API_SECRET").ok().filter(|s| !s.is_empty());
+    let bare_token = common::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]);
+    let env_id = common::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]);
+    let env_secret = common::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]);
 
     let mut builder = GodarkClient::builder();
     builder = match (cli_id, cli_secret, bare_token, env_id, env_secret) {

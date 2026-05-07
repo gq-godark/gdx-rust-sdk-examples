@@ -18,6 +18,12 @@ publish = false
 description = "Sample programs that consume the published `godark` Rust crate."
 license = "MIT"
 
+# Disable Cargo's auto-discovery of example binaries — we list each entry
+# explicitly under `[[example]]` below, and the per-tree helper module
+# `examples/common.rs` is included via `#[path = "common.rs"]` rather than
+# being a binary of its own.
+autoexamples = false
+
 [dependencies]
 godark = "0.1"
 
@@ -25,6 +31,11 @@ godark = "0.1"
 # the SDK's own example deps so the same source files build unchanged).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 serde_json = "1"
+
+# Tiny `.env` loader so the examples honor a sibling `.env` file the way the
+# C++ examples do. OS environment variables still win, matching python-dotenv
+# and the JS `dotenv` package.
+dotenvy = "0.15"
 
 # --- Local SDK fallback (for SDK developers only) ----------------------
 #

@@ -16,27 +16,24 @@ use std::time::Duration;
 use godark::{GodarkError, MarketDataClient, TransportConfig};
 use serde_json::Value;
 
+#[path = "common.rs"]
+mod common;
+
 const DEFAULT_EDGE_URL: &str = "wss://api.godark-dex.com";
 const STREAM_SECS: u64 = 30;
 
 fn tls_skip_verify() -> bool {
-    for var in ["GDX_TLS_SKIP_VERIFY", "GODARK_TLS_SKIP_VERIFY"] {
-        if let Ok(v) = std::env::var(var) {
-            if matches!(v.trim(), "1" | "true" | "TRUE" | "yes") {
-                return true;
-            }
-        }
-    }
-    false
+    common::env_first(&["GODARK_TLS_SKIP_VERIFY", "GDX_TLS_SKIP_VERIFY"])
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), GodarkError> {
+    common::load_dotenv();
+
     // Base URL for the edge (gomarket WebSocket is derived inside the client).
-    let base_url = std::env::var("GDX_EDGE_URL")
-        .ok()
-        .or_else(|| std::env::var("GODARK_EDGE_URL").ok())
-        .filter(|s| !s.trim().is_empty())
+    let base_url = common::env_first(&["GODARK_EDGE_URL", "GDX_EDGE_URL"])
         .unwrap_or_else(|| DEFAULT_EDGE_URL.to_string());
 
     let transport = TransportConfig {

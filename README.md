@@ -40,15 +40,34 @@ cargo run --example quickstart --release
 | `full_trader_example` | `examples/full_trader_example.rs` | Larger demo: callbacks, MD client, place/modify/cancel, queued-update drain. |
 | `full_trader_rest` | `examples/full_trader_rest.rs` | REST-only `GodarkRestClient`: session + encrypted place + cancel (`GDX_REST_URL`, keys). |
 
-### Environment quick reference
+### Configure (`.env`)
 
-- **Trading (most WS examples):** `GODARK_API_KEY_ID`, `GODARK_API_SECRET`,
-  optional `GODARK_EDGE_URL` / `GDX_EDGE_URL`.
-- **REST (`full_trader_rest`):** `GDX_REST_URL`, `GDX_API_KEY_ID` /
-  `GDX_API_SECRET` (falls back to legacy static key `test-key-1` for
-  localnet).
-- **Market data:** `GODARK_EDGE_URL` or `GDX_EDGE_URL`; optional
-  `GDX_TLS_SKIP_VERIFY` / `GODARK_TLS_SKIP_VERIFY`.
+Each binary calls a small `dotenvy::dotenv()` helper on startup so a
+sibling `.env` file is honored automatically. Copy the template and fill
+in the values you need:
+
+```bash
+cp .env.example .env
+$EDITOR .env       # set GODARK_API_KEY_ID, GODARK_API_SECRET, GODARK_EDGE_URL...
+```
+
+OS environment variables always win over `.env` (matching python-dotenv,
+the JS `dotenv` package, and the C++ examples), so `KEY=value cargo run`
+still overrides whatever is in the file.
+
+The same `.env` configures every example:
+
+- **Credentials:** `GODARK_API_KEY_ID` + `GODARK_API_SECRET`, or a single
+  bare `GODARK_API_KEY` (localnet `test-key-1`). `GDX_*` aliases are
+  honored as a fallback.
+- **WebSocket endpoint:** `GODARK_EDGE_URL` (e.g. `ws://localhost:4000`
+  for localnet; defaults to `wss://api.godark-dex.com`).
+- **REST endpoint:** auto-derived from `GODARK_EDGE_URL`
+  (`ws[s]://...` → `http[s]://...`); override with `GODARK_REST_URL`
+  when REST and WebSocket live on different hosts.
+- **Resting price:** `GODARK_TEST_LIMIT_PRICE` for environments that cap
+  mark deviation (localnet caps at 1000 bps).
+- **TLS dev bypass:** `GODARK_TLS_SKIP_VERIFY=1` (or `GDX_*`).
 
 ## Layout
 

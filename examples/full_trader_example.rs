@@ -36,51 +36,37 @@ use std::time::Duration;
 use godark::{GodarkClient, MarketDataClient, OrderType, Side, TimeInForce, TransportConfig};
 use serde_json::Value;
 
+#[path = "common.rs"]
+mod common;
+
 const SYMBOL: &str = "BTC-USDC-PERP";
 
 const DEFAULT_API_KEY_ID: &str = "YOUR_API_KEY_ID";
 const DEFAULT_API_SECRET: &str = "YOUR_API_SECRET";
 
 fn edge_url() -> String {
-    std::env::var("GDX_EDGE_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("GODARK_EDGE_URL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
+    common::env_first(&["GODARK_EDGE_URL", "GDX_EDGE_URL"])
         .unwrap_or_else(|| "wss://api.godark-dex.com".into())
 }
 
 fn api_key_id() -> String {
-    std::env::var("GODARK_API_KEY_ID")
-        .ok()
-        .or_else(|| std::env::var("GDX_API_KEY_ID").ok())
-        .filter(|s| !s.trim().is_empty())
+    common::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"])
         .unwrap_or_else(|| DEFAULT_API_KEY_ID.into())
 }
 
 fn api_secret() -> String {
-    std::env::var("GODARK_API_SECRET")
-        .ok()
-        .or_else(|| std::env::var("GDX_API_SECRET").ok())
-        .filter(|s| !s.trim().is_empty())
+    common::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"])
         .unwrap_or_else(|| DEFAULT_API_SECRET.into())
 }
 
 /// Optional bare static token (e.g. localnet `test-key-1`). Takes precedence
 /// over id/secret when set, mirroring the cpp examples.
 fn api_key_bare() -> Option<String> {
-    std::env::var("GODARK_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("GDX_API_KEY").ok())
-        .filter(|s| !s.trim().is_empty())
+    common::env_first(&["GODARK_API_KEY", "GDX_API_KEY"])
 }
 
 fn tls_skip_verify() -> bool {
-    std::env::var("GDX_TLS_SKIP_VERIFY")
-        .or_else(|_| std::env::var("GODARK_TLS_SKIP_VERIFY"))
+    common::env_first(&["GODARK_TLS_SKIP_VERIFY", "GDX_TLS_SKIP_VERIFY"])
         .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
         .unwrap_or(false)
 }
@@ -101,6 +87,8 @@ fn transport_config() -> TransportConfig {
 
 #[tokio::main]
 async fn main() {
+    common::load_dotenv();
+
     let sep = "=".repeat(60);
     println!("{sep}");
     println!("  GoDark SDK — Complete Trader Example (Rust)");
@@ -219,7 +207,7 @@ async fn main() {
             ack
         }
         Err(e) => {
-            eprintln!("BUY failed: {e}");
+            common::print_godark_error("[full]", "place_order BUY", &e);
             md.disconnect().await;
             client.disconnect().await;
             return;
@@ -237,7 +225,7 @@ async fn main() {
         .await
     {
         Ok(ack) => println!("Modified: order_id={}", ack.order_id),
-        Err(e) => eprintln!("Modify rejected (order may have filled): {e}"),
+        Err(e) => common::print_godark_error("[full]", "modify_order", &e),
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -268,10 +256,10 @@ async fn main() {
                 Ok(cancel_ack) => {
                     println!("SELL cancelled: order_id={}", cancel_ack.order_id)
                 }
-                Err(e) => eprintln!("Cancel SELL failed: {e}"),
+                Err(e) => common::print_godark_error("[full]", "cancel_order SELL", &e),
             }
         }
-        Err(e) => eprintln!("Sell/cancel flow: {e}"),
+        Err(e) => common::print_godark_error("[full]", "place_order SELL", &e),
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;

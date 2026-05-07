@@ -2,3 +2,11 @@ target/
 Cargo.lock.bak
 *.log
 .DS_Store
+
+# Local env files (use `.env.example` as the template).
+.env
+.env.local
+**/.env
+**/.env.local
+!.env.example
+!**/.env.example

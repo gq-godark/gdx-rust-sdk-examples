@@ -18,12 +18,8 @@ use std::time::Instant;
 
 use godark::{GodarkClient, GodarkError, OrderType, Side, TimeInForce, TransportConfig};
 
-fn env_first(primary: &str, fallback: &str) -> Option<String> {
-    env::var(primary)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| env::var(fallback).ok().filter(|s| !s.trim().is_empty()))
-}
+#[path = "common.rs"]
+mod common;
 
 fn print_usage() {
     eprintln!(
@@ -62,11 +58,11 @@ enum Credentials {
 }
 
 fn credentials() -> Result<Credentials, ExitCode> {
-    if let Some(token) = env_first("GODARK_API_KEY", "GDX_API_KEY") {
+    if let Some(token) = common::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]) {
         return Ok(Credentials::Bare(token));
     }
-    let id = env_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID");
-    let secret = env_first("GODARK_API_SECRET", "GDX_API_SECRET");
+    let id = common::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]);
+    let secret = common::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]);
     match (id, secret) {
         (Some(i), Some(s)) => Ok(Credentials::KeySecret(i, s)),
         _ => {
@@ -79,7 +75,7 @@ fn credentials() -> Result<Credentials, ExitCode> {
     }
 }
 
-fn map_early_error(e: GodarkError) -> ExitCode {
+fn map_early_error(operation: &str, e: GodarkError) -> ExitCode {
     let code: u8 = match &e {
         GodarkError::Config(_) => 1,
         GodarkError::Authentication(_)
@@ -91,12 +87,14 @@ fn map_early_error(e: GodarkError) -> ExitCode {
         | GodarkError::Proto(_) => 2,
         GodarkError::Order { .. } => 3,
     };
-    eprintln!("[e2e] Error: {e}");
+    common::print_godark_error("[e2e]", operation, &e);
     ExitCode::from(code)
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    common::load_dotenv();
+
     let args = match parse_args() {
         Ok(a) => a,
         Err(()) => return ExitCode::from(1),
@@ -128,7 +126,7 @@ async fn main() -> ExitCode {
     };
     let config = match builder.build() {
         Ok(c) => c,
-        Err(e) => return map_early_error(e),
+        Err(e) => return map_early_error("build", e),
     };
 
     let mut client = GodarkClient::new(config);
@@ -145,7 +143,7 @@ async fn main() -> ExitCode {
     eprintln!("[e2e] Connecting (GODARK_EDGE_URL / GDX_EDGE_URL or default) …");
 
     if let Err(e) = client.connect().await {
-        return map_early_error(e);
+        return map_early_error("connect", e);
     }
 
     let ms_connect = t0.elapsed().as_millis();
@@ -163,7 +161,7 @@ async fn main() -> ExitCode {
 
     if let Err(e) = client.subscribe(&["orders", "positions"]).await {
         client.disconnect().await;
-        return map_early_error(e);
+        return map_early_error("subscribe", e);
     }
 
     const SYMBOL: &str = "BTC-USDC-PERP";
@@ -193,7 +191,7 @@ async fn main() -> ExitCode {
     {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("[e2e] place_order: {e}");
+            common::print_godark_error("[e2e]", "place_order", &e);
             client.disconnect().await;
             return ExitCode::from(3);
         }
@@ -206,7 +204,7 @@ async fn main() -> ExitCode {
 
     eprintln!("[e2e] Cancelling order …");
     if let Err(e) = client.cancel_order(&ack.order_id, SYMBOL).await {
-        eprintln!("[e2e] cancel_order: {e}");
+        common::print_godark_error("[e2e]", "cancel_order", &e);
         client.disconnect().await;
         return ExitCode::from(4);
     }
