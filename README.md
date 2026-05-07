@@ -1,65 +1,134 @@
-# GoDark Rust examples
+# GoDark Rust Examples (Darkpool MM Distribution)
 
-Sample programs that consume the **`godark`** crate from a **Cargo registry**
-only. There is **no** Git or source dependency on any SDK source tree:
-configure a Cargo registry (e.g. [crates.io](https://crates.io) or a private
-registry such as [Cloudsmith](https://cloudsmith.io) / Artifactory) that
-publishes a matching `godark` version and run `cargo build --examples`.
+This repository is a self-contained, market-maker-facing distribution for
+GoDark's Rust SDK. It includes:
 
-This repo is the Rust counterpart of [`gdx-cpp-sdk-examples`](https://github.com/gq-godark/gdx-cpp-sdk-examples)
-and ships the same set of binaries.
+- two minimal darkpool trading examples (`quickstart` + `full_trader_example`)
+- the full `godark` SDK source vendored under `sdk/` — no private registry
+  required, no `protoc` required (pre-generated protobuf bindings ship with
+  the SDK)
+- a simple `.env` workflow (no shell `export` required)
+- a `scripts/package.sh` that produces a portable Linux x86_64 binary tarball
+  for downstream MMs who don't want to install a Rust toolchain
 
-## Prerequisites
+## Two ways to use
+
+### A — Pre-built binaries (no Rust toolchain required)
+
+```bash
+# unzip the distribution archive provided to you
+unzip godark-rust-examples-linux-x86_64.zip
+cd godark-rust-examples-linux-x86_64/
+
+cp .env.example .env
+$EDITOR .env       # set GODARK_API_KEY_ID, GODARK_API_SECRET
+
+./quickstart
+./full_trader_example
+```
+
+#### Platform requirements
+
+| Item        | Requirement                                                                   |
+|-------------|-------------------------------------------------------------------------------|
+| OS / arch   | Linux x86_64 (built on Ubuntu 24.04, glibc ≥ 2.18)                            |
+| TLS runtime | `libssl.so.3` + `libcrypto.so.3` (`apt install libssl3` on Debian/Ubuntu)     |
+| Other       | `libstdc++` / `libgcc_s` / `libm` / `libc` (standard system libraries)        |
+
+> **macOS / Windows / aarch64?** Build from source (next section).
+
+### B — Build from source
+
+#### Prerequisites
 
 - Rust ≥ 1.79 (`rustup install stable`)
 - Cargo (bundled with the toolchain)
-- Network access to your Cargo registry (or a `[patch.crates-io]` block — see
-  the comment in `Cargo.toml`)
+- Network access to `crates.io` for the standard runtime crates that the SDK
+  pulls in (`tokio`, `prost`, `serde`, `reqwest`, etc.). The `godark` SDK
+  itself is vendored under `sdk/`; you do not need access to any private
+  registry.
 
-## Build
-
-From the **repository root**:
-
-```bash
-cargo build --examples --release
-```
-
-To run a specific example:
+#### Build
 
 ```bash
-cargo run --example quickstart --release
+cargo build --release --examples
 ```
 
-## Binaries (all crates.io / public API)
+Built binaries land in `target/release/examples/`. Or run a single example
+directly:
 
-| Target | Source | What it does |
-|--------|--------|--------------|
-| `quickstart` | `examples/quickstart.rs` | Minimal connect → limit buy → cancel. Needs `GODARK_API_KEY_ID` + `GODARK_API_SECRET` (or pass them as CLI args). |
-| `e2e_trading_smoke` | `examples/e2e_trading_smoke.rs` | Scripted E2E check with `--auth-only`; exit codes for CI. |
-| `market_data_example` | `examples/market_data_example.rs` | Public gomarket order book + trades (no keys). |
-| `full_trader_example` | `examples/full_trader_example.rs` | Larger demo: callbacks, MD client, place/modify/cancel, queued-update drain. |
-| `full_trader_rest` | `examples/full_trader_rest.rs` | REST-only `GodarkRestClient`: session + encrypted place + cancel (`GDX_REST_URL`, keys). |
+```bash
+cargo run --release --example quickstart
+cargo run --release --example full_trader_example
+```
 
-### Environment quick reference
+## Testnet onboarding
 
-- **Trading (most WS examples):** `GODARK_API_KEY_ID`, `GODARK_API_SECRET`,
-  optional `GODARK_EDGE_URL` / `GDX_EDGE_URL`.
-- **REST (`full_trader_rest`):** `GDX_REST_URL`, `GDX_API_KEY_ID` /
-  `GDX_API_SECRET` (falls back to legacy static key `test-key-1` for
-  localnet).
-- **Market data:** `GODARK_EDGE_URL` or `GDX_EDGE_URL`; optional
-  `GDX_TLS_SKIP_VERIFY` / `GODARK_TLS_SKIP_VERIFY`.
+Before running the examples, complete this setup flow:
+
+1. Open the testnet frontend: `https://app.godark-dex.com`
+2. Create an account using email sign-up.
+3. Fund your testnet account using the faucet: `https://faucet.godark-dex.com`
+4. In the frontend, go to **Settings → API Key Management** and click
+   **Create API Key**.
+5. Use the generated key id and secret for your local `.env`.
+
+## Configure credentials
+
+Copy `.env.example` to `.env` and fill in your API credentials:
+
+```bash
+cp .env.example .env
+```
+
+Required keys:
+
+- `GODARK_API_KEY_ID`
+- `GODARK_API_SECRET`
+
+Optional:
+
+- `GODARK_EDGE_URL` (defaults to `wss://api.godark-dex.com`)
+
+The OS environment always wins over `.env`.
+
+## Examples
+
+| Target | Source | Purpose |
+|--------|--------|---------|
+| `quickstart` | `examples/quickstart.rs` | Minimal connect → place limit sell → cancel; demonstrates the symbolic `OrderError::error_code` reason on rejection. |
+| `full_trader_example` | `examples/full_trader_example.rs` | Full darkpool trading flow with all 6 sequencer push callbacks (`positions_snapshot`, `system_health`, `balance_update`, `margin_alert`, `funding_rate`, `settlement`), order placement, modify, cancel, and queued-update drain. |
+
+Order-type support in this MM distribution is limited to `MARKET` and `LIMIT`.
+
+## Packaging for Market Makers
+
+Create a clean distributable archive of the two pre-built binaries:
+
+```bash
+./scripts/package.sh
+```
+
+This creates `godark-rust-examples-linux-x86_64.tar.gz` containing:
+
+- `quickstart`
+- `full_trader_example`
+- `.env.example`
+- `README.md`
+- `SDK_REFERENCE.md`
+
+Internal files (`scripts/`, `sdk/`, `target/`, `.git/`) are not included.
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
-| `Cargo.toml` | Requires `godark = "0.1"` from a Cargo registry; declares each example as a `[[example]]` target |
-| `examples/*.rs` | Sources for each binary, identical to the SDK's own in-tree examples |
-| `.gitignore` | Excludes `target/` and other build artefacts |
-
-## `Cargo.toml`
-
-Edit the `godark` version line in `Cargo.toml` to match what your Cargo
-registry provides. Local SDK developers can swap the registry dep for a
-`[patch.crates-io]` path entry — see the comment block in `Cargo.toml`.
+| `examples/quickstart.rs` | Minimal connect / place / cancel example |
+| `examples/full_trader_example.rs` | Reference bot flow with all 6 push callbacks |
+| `examples/dotenv.rs` | Tiny shared helper (`load_dotenv` + symbolic error printer) |
+| `Cargo.toml` | Examples crate; depends on the vendored `godark` via `path = "sdk"` |
+| `sdk/` | Vendored `godark` SDK source (with pre-generated protobuf bindings under `sdk/src/generated/`) |
+| `.env.example` | Credential template for local `.env` |
+| `SDK_REFERENCE.md` | API usage reference for trading integration |
+| `scripts/refresh_sdk.sh` | Internal script for refreshing `sdk/` from a sibling SDK checkout |
+| `scripts/package.sh` | Produces the binary tarball shipped to MMs |

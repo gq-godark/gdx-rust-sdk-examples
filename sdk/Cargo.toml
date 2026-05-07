@@ -1,0 +1,47 @@
+[package]
+name = "godark"
+version = "0.1.0"
+edition = "2021"
+description = "Rust SDK for GoDark DEX — encrypted trading over WebSocket"
+readme = "README.md"
+documentation = "https://docs.rs/godark"
+license = "MIT"
+repository = "https://github.com/gq-godark/gdx-sdk"
+authors = ["GoDark"]
+keywords = ["godark", "dex", "trading", "websocket", "crypto"]
+categories = ["api-bindings", "cryptography"]
+# Pre-generated protobuf bindings are committed under `src/generated/`, so
+# this vendored copy of `godark` does NOT regenerate them at build time -
+# consumers do not need `protoc` or `prost-build`. Ship only the library
+# target; the SDK's own examples and integration tests are excluded from
+# this distribution.
+autoexamples = false
+autotests = false
+autobenches = false
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+native-tls = "0.2"
+futures-util = { version = "0.3", features = ["sink"] }
+
+# Serialization
+prost = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Crypto (versions match gdx-core; x25519-dalek v1 had RUSTSEC-2021-0121)
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+aes-gcm = { version = "0.10", features = ["std"] }
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.9"
+
+# Observability + errors
+tracing = "0.1"
+thiserror = "2"
