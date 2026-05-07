@@ -1,0 +1,58 @@
+# gdx-rust-sdk-examples
+#
+# Sample programs that consume the published `godark` crate ONLY. There is
+# *no* git or path dependency on any SDK source tree; configure a Cargo
+# registry (crates.io, or a private registry like Cloudsmith / Artifactory)
+# that publishes the matching `godark` version, then `cargo run --example
+# <name>`.
+#
+# Edit the `godark` version below to match the version your registry
+# publishes — the `gdx-cpp-sdk-examples` analogue is the
+# `godark/0.1.0@gq/stable` line in `conanfile.txt`.
+
+[package]
+name = "gdx-rust-sdk-examples"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Sample programs that consume the published `godark` Rust crate."
+license = "MIT"
+
+[dependencies]
+godark = "0.1"
+
+# Async runtime + helpers used by the example sources (kept aligned with
+# the SDK's own example deps so the same source files build unchanged).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde_json = "1"
+
+# --- Local SDK fallback (for SDK developers only) ----------------------
+#
+# When iterating on the SDK locally, append a [patch.crates-io] section to
+# this file pointing at your in-tree clone, e.g.
+#
+#   [patch.crates-io]
+#   godark = { path = "../new-sdks/gdx-rust-sdk" }
+#
+# Production users do NOT need this — the registry dep above is the only
+# entry point, mirroring the cpp examples that never depend on SDK source.
+
+[[example]]
+name = "quickstart"
+path = "examples/quickstart.rs"
+
+[[example]]
+name = "e2e_trading_smoke"
+path = "examples/e2e_trading_smoke.rs"
+
+[[example]]
+name = "market_data_example"
+path = "examples/market_data_example.rs"
+
+[[example]]
+name = "full_trader_example"
+path = "examples/full_trader_example.rs"
+
+[[example]]
+name = "full_trader_rest"
+path = "examples/full_trader_rest.rs"
