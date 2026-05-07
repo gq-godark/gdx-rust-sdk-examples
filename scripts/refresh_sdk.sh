@@ -41,6 +41,8 @@ mkdir -p "$DEST"
 #   - examples/, tests/, scripts/, deny.toml    (SDK-internal tooling)
 #   - CHANGELOG.md, .gitignore, .gitkeep        (not relevant to consumers)
 #   - build.rs, gdx-proto/                      (consumer uses pre-generated bindings)
+#   - src/market_data.rs, src/rest_client.rs,   (REST + gomarket WS surfaces are
+#     src/rest_transport.rs                     not used by either MM example)
 rsync -a \
   --exclude='target/' \
   --exclude='.git/' \
@@ -55,10 +57,14 @@ rsync -a \
   --exclude='.gitkeep' \
   --exclude='gdx-proto' \
   --exclude='build.rs' \
+  --exclude='src/market_data.rs' \
+  --exclude='src/rest_client.rs' \
+  --exclude='src/rest_transport.rs' \
   "$SRC/" "$DEST/"
 
 # Strip the SDK's own [[example]] / [dev-dependencies] / [build-dependencies]
-# blocks from the vendored Cargo.toml and add the autoexamples/autotests/
+# blocks from the vendored Cargo.toml, drop the `reqwest` line (only the
+# trimmed REST modules used it), and add the autoexamples/autotests/
 # autobenches = false trio under [package]. This matches the layout shipped
 # in this repo.
 python3 - "$DEST/Cargo.toml" <<'PY'
@@ -68,6 +74,7 @@ text = p.read_text()
 text = re.sub(r"\n\[build-dependencies\][\s\S]*?(?=\n\[|$)", "", text)
 text = re.sub(r"\n\[dev-dependencies\][\s\S]*?(?=\n\[|$)", "", text)
 text = re.sub(r"\n\[\[example\]\][\s\S]*?(?=\n\[|$)", "", text)
+text = re.sub(r"\nreqwest\s*=.*\n", "\n", text)
 text = text.rstrip() + "\n"
 inject = (
     "# Pre-generated protobuf bindings are committed under `src/generated/`, so\n"

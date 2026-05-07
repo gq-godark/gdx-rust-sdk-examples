@@ -41,7 +41,7 @@ async fn main() {
                 "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
                  (or provide them in .env)."
             );
-            return;
+            std::process::exit(1);
         }
     };
     let api_secret = match std::env::var("GODARK_API_SECRET") {
@@ -51,7 +51,7 @@ async fn main() {
                 "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
                  (or provide them in .env)."
             );
-            return;
+            std::process::exit(1);
         }
     };
     let base_url =
@@ -80,7 +80,7 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Config error: {e}");
-            return;
+            std::process::exit(1);
         }
     };
 
@@ -107,7 +107,7 @@ async fn main() {
     println!("Connecting...");
     if let Err(e) = client.connect().await {
         eprintln!("Failed to connect: {e}");
-        return;
+        std::process::exit(1);
     }
 
     let user = client
@@ -119,7 +119,7 @@ async fn main() {
     if let Err(e) = client.subscribe(&["orders", "positions"]).await {
         eprintln!("Subscribe failed: {e}");
         client.disconnect().await;
-        return;
+        std::process::exit(1);
     }
     println!("Subscribed to order + position updates");
 
@@ -176,7 +176,7 @@ async fn main() {
         Err(e) => {
             dotenv::print_order_error("BUY rejected", &e);
             client.disconnect().await;
-            return;
+            std::process::exit(1);
         }
     };
 
