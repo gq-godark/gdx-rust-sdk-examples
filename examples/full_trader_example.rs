@@ -116,6 +116,20 @@ async fn main() {
 
     let mut order_rx = client.take_order_receiver().expect("order receiver");
     let mut position_rx = client.take_position_receiver().expect("position receiver");
+    let mut positions_snapshot_rx = client
+        .take_positions_snapshot_receiver()
+        .expect("positions snapshot receiver");
+    let mut system_health_rx = client
+        .take_system_health_receiver()
+        .expect("system health receiver");
+    let mut balance_rx = client.take_balance_receiver().expect("balance receiver");
+    let mut margin_alert_rx = client
+        .take_margin_alert_receiver()
+        .expect("margin alert receiver");
+    let mut funding_rate_rx = client
+        .take_funding_rate_receiver()
+        .expect("funding rate receiver");
+    let mut settlement_rx = client.take_settlement_receiver().expect("settlement receiver");
     let mut error_rx = client.take_error_receiver().expect("error receiver");
 
     // ── 1. Connect & authenticate ──────────────────────────────────
@@ -146,6 +160,26 @@ async fn main() {
             "POS    side={:?}  size={}  entry={}",
             pos.side, pos.size, pos.entry_price
         );
+    }
+    // Drain the initial PositionsSnapshot the sequencer pushes right after
+    // the trading session is established.
+    while let Ok(snap) = positions_snapshot_rx.try_recv() {
+        println!(
+            "SNAP   source={:?}  rows={}  ts={}",
+            snap.source,
+            snap.rows.len(),
+            snap.server_timestamp
+        );
+        for row in &snap.rows {
+            println!(
+                "  ↳ symbol={}  side={:?}  size={}  entry={}  mark={}",
+                row.symbol_id,
+                row.side,
+                row.size,
+                row.entry_price,
+                row.mark_price.as_deref().unwrap_or("—")
+            );
+        }
     }
 
     // ── 3. Start market data feed (no auth needed) ─────────────────
@@ -282,6 +316,58 @@ async fn main() {
         Err(_) => println!("Original BUY already filled or cancelled"),
     }
 
+    // Drain any sequencer pushes that arrived during the session.
+    let mut snap_count = 0usize;
+    while let Ok(snap) = positions_snapshot_rx.try_recv() {
+        snap_count += 1;
+        println!(
+            "SNAP   source={:?}  rows={}  ts={}",
+            snap.source,
+            snap.rows.len(),
+            snap.server_timestamp
+        );
+    }
+    let mut health_count = 0usize;
+    while let Ok(h) = system_health_rx.try_recv() {
+        health_count += 1;
+        println!(
+            "HEALTH nodes={}  accepting={}  ready={}  degraded={}",
+            h.total_nodes, h.accepting_orders, h.ready, h.degraded
+        );
+    }
+    let mut balance_count = 0usize;
+    while let Ok(b) = balance_rx.try_recv() {
+        balance_count += 1;
+        println!(
+            "BAL    user={}  shielded_raw={}  ts={}",
+            b.user_uuid, b.shielded_balance_raw, b.timestamp
+        );
+    }
+    let mut margin_count = 0usize;
+    while let Ok(a) = margin_alert_rx.try_recv() {
+        margin_count += 1;
+        println!(
+            "MARGIN owner={}  symbol={}  tier={}  ratio_bps={}  recovered={}",
+            a.owner, a.symbol_id, a.tier, a.margin_ratio_bps, a.recovered
+        );
+    }
+    let mut funding_count = 0usize;
+    while let Ok(f) = funding_rate_rx.try_recv() {
+        funding_count += 1;
+        println!(
+            "FUND   symbol={}  current={}  predicted={}",
+            f.symbol_id, f.current_rate, f.predicted_rate
+        );
+    }
+    let mut settle_count = 0usize;
+    while let Ok(s) = settlement_rx.try_recv() {
+        settle_count += 1;
+        println!(
+            "SETTLE batch={}  status={:?}  tx={}",
+            s.batch_id, s.status, s.tx_signature
+        );
+    }
+
     // Drain any errors that arrived during the session.
     let mut error_count = 0usize;
     while let Ok(e) = error_rx.try_recv() {
@@ -292,6 +378,11 @@ async fn main() {
     // ── 9. Summary ─────────────────────────────────────────────────
     println!("{sep}");
     println!("  Session complete");
+    println!(
+        "  Pushes: snapshots={snap_count}  health={health_count}  \
+         balance={balance_count}  margin={margin_count}  \
+         funding={funding_count}  settle={settle_count}"
+    );
     println!("  Non-fatal errors received: {error_count}");
     println!("{sep}");
 
