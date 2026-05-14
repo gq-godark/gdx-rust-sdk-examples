@@ -148,8 +148,7 @@ The full upstream-change chain (proto → SDK → examples → release zip):
 
 | Secret | Used by | Purpose |
 |--------|---------|---------|
-| `GDX_RUST_SDK_TOKEN` | `release.yml` | PAT or fine-grained token with `contents:read` on `gq-godark/gdx-rust-sdk`. Lets `release.yml` check out the pinned upstream commit. |
-| `GDX_APP_ID` + `GDX_APP_PRIVATE_KEY` | `auto-bump-sdk-pin.yml` | Credentials for the `GDX_APP` GitHub App. Repo scope must include `gdx-rust-sdk-examples` and `gdx-rust-sdk`. |
+| `GDX_APP_ID` + `GDX_APP_PRIVATE_KEY` | `release.yml` + `auto-bump-sdk-pin.yml` | Credentials for the `godark-ci` GitHub App. The app must be installed on `gq-godark` with `contents:read` on `gdx-rust-sdk` (for `release.yml`'s pinned upstream checkout) and `contents:write` on `gdx-rust-sdk-examples` (for the listener's rolling-PR push). Single secret pair powers both workflows. |
 
 ## Layout
 

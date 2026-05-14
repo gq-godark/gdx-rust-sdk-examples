@@ -25,10 +25,14 @@ jobs:
   # scripts/package.sh - local edits to sdk/ cannot leak into the released
   # artifact.
   #
-  # Required secret:
-  #   GDX_RUST_SDK_TOKEN - PAT or fine-grained token with `contents:read`
-  #                        on gq-godark/gdx-rust-sdk. Used only to clone the
-  #                        upstream repo at the pinned ref.
+  # Required secrets:
+  #   GDX_APP_ID            — GitHub App id (the godark-ci app)
+  #   GDX_APP_PRIVATE_KEY   — GitHub App private key (PEM)
+  #
+  # The app must be installed on gq-godark with contents:read on
+  # gdx-rust-sdk. No gdx-proto access needed because gdx-rust-sdk commits
+  # its pre-generated proto bindings (src/generated/*.rs) — the upstream
+  # checkout doesn't need to fetch the proto submodule to build.
   # --------------------------------------------------------------------------
   build:
     name: Build Linux x86_64 zip
@@ -42,15 +46,28 @@ jobs:
       - name: Checkout examples repo
         uses: actions/checkout@v4
 
-      - name: Verify GDX_RUST_SDK_TOKEN secret is configured
+      - name: Verify GitHub App secrets are configured
         env:
-          UPSTREAM_TOKEN: ${{ secrets.GDX_RUST_SDK_TOKEN }}
+          APP_ID: ${{ secrets.GDX_APP_ID }}
+          APP_KEY: ${{ secrets.GDX_APP_PRIVATE_KEY }}
         run: |
-          if [ -z "$UPSTREAM_TOKEN" ]; then
-            echo "::error::Missing required secret GDX_RUST_SDK_TOKEN."
-            echo "::error::Create a PAT (or fine-grained token) with contents:read on gq-godark/gdx-rust-sdk and add it under repo Settings - Secrets and variables - Actions."
+          missing=()
+          [ -n "$APP_ID" ]  || missing+=(GDX_APP_ID)
+          [ -n "$APP_KEY" ] || missing+=(GDX_APP_PRIVATE_KEY)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required secret(s): ${missing[*]}"
+            echo "::error::Install the godark-ci GitHub App credentials under repo Settings -> Secrets and variables -> Actions, and ensure the app is installed on gq-godark with contents:read on gdx-rust-sdk."
             exit 1
           fi
+
+      - name: Mint GDX_APP token (scoped to upstream)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GDX_APP_ID }}
+          private-key: ${{ secrets.GDX_APP_PRIVATE_KEY }}
+          owner: gq-godark
+          repositories: gdx-rust-sdk
 
       - name: Read pinned upstream ref
         id: pin
@@ -73,8 +90,8 @@ jobs:
           repository: gq-godark/gdx-rust-sdk
           ref: ${{ steps.pin.outputs.ref }}
           path: upstream
-          token: ${{ secrets.GDX_RUST_SDK_TOKEN }}
-          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
