@@ -1,0 +1,197 @@
+name: CI / Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel in-flight runs of the same PR (so updates don't pile up runners), but
+# never cancel a push-to-main run - releases are precious.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # --------------------------------------------------------------------------
+  # build: pre-built example binaries packaged into a Linux x86_64 zip.
+  #
+  # The binaries are built from a fresh checkout of gq-godark/gdx-rust-sdk at
+  # the commit recorded in sdk/UPSTREAM_REF. The vendored sdk/ tree is
+  # verified bit-equal to that upstream checkout by a parity check inside
+  # scripts/package.sh - local edits to sdk/ cannot leak into the released
+  # artifact.
+  #
+  # Required secret:
+  #   GDX_RUST_SDK_TOKEN - PAT or fine-grained token with `contents:read`
+  #                        on gq-godark/gdx-rust-sdk. Used only to clone the
+  #                        upstream repo at the pinned ref.
+  # --------------------------------------------------------------------------
+  build:
+    name: Build Linux x86_64 zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      bundle_name: ${{ steps.ver.outputs.bundle_name }}
+      pinned_ref: ${{ steps.pin.outputs.ref }}
+    steps:
+      - name: Checkout examples repo
+        uses: actions/checkout@v4
+
+      - name: Verify GDX_RUST_SDK_TOKEN secret is configured
+        env:
+          UPSTREAM_TOKEN: ${{ secrets.GDX_RUST_SDK_TOKEN }}
+        run: |
+          if [ -z "$UPSTREAM_TOKEN" ]; then
+            echo "::error::Missing required secret GDX_RUST_SDK_TOKEN."
+            echo "::error::Create a PAT (or fine-grained token) with contents:read on gq-godark/gdx-rust-sdk and add it under repo Settings - Secrets and variables - Actions."
+            exit 1
+          fi
+
+      - name: Read pinned upstream ref
+        id: pin
+        run: |
+          if [ ! -f sdk/UPSTREAM_REF ]; then
+            echo "::error::sdk/UPSTREAM_REF missing - run scripts/refresh_sdk.sh and commit it."
+            exit 1
+          fi
+          ref="$(tr -d '[:space:]' < sdk/UPSTREAM_REF)"
+          if [ -z "$ref" ]; then
+            echo "::error::sdk/UPSTREAM_REF is empty"
+            exit 1
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Pinned upstream ref: ${ref}"
+
+      - name: Checkout pinned upstream gdx-rust-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: gq-godark/gdx-rust-sdk
+          ref: ${{ steps.pin.outputs.ref }}
+          path: upstream
+          token: ${{ secrets.GDX_RUST_SDK_TOKEN }}
+          fetch-depth: 0
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install zip
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zip
+
+      - name: Compute version + bundle name
+        id: ver
+        run: |
+          base="$(grep -m1 '^version' upstream/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
+          if [ -z "$base" ]; then
+            echo "::error::Could not parse version from upstream/Cargo.toml"
+            exit 1
+          fi
+          version="v${base}-build.${{ github.run_number }}"
+          bundle_name="gdx-rust-sdk-examples-${version}-linux-x86_64"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "bundle_name=${bundle_name}" >> "$GITHUB_OUTPUT"
+          echo "Building ${bundle_name}.zip (godark==${base} from upstream pin ${{ steps.pin.outputs.ref }})"
+
+      - name: Build release zip via scripts/package.sh
+        env:
+          UPSTREAM_SRC: ${{ github.workspace }}/upstream
+        run: bash scripts/package.sh ${{ steps.ver.outputs.bundle_name }}
+
+      - name: Recipient smoke (file + ldd on the unzipped binaries)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/recip
+          unzip -q ${{ steps.ver.outputs.bundle_name }}.zip -d /tmp/recip
+          cd /tmp/recip/${{ steps.ver.outputs.bundle_name }}
+
+          echo "=== file ==="
+          file ./quickstart
+          file ./full_trader_example
+
+          echo "=== ldd ==="
+          ldd ./quickstart
+          ldd ./full_trader_example
+
+          # Verify both binaries are ELF Linux x86_64 and have no unresolved
+          # dynamic dependencies. Recipients only need standard system libs
+          # (libssl, libcrypto, libstdc++, libgcc_s, libm, libc, ld-linux).
+          for bin in ./quickstart ./full_trader_example; do
+            if ! file "$bin" | grep -E 'ELF 64-bit LSB .*x86-64' >/dev/null; then
+              echo "::error::$bin is not an ELF 64-bit Linux x86_64 binary"
+              exit 1
+            fi
+            if ldd "$bin" 2>&1 | grep -E '(not found|missing)' >/dev/null; then
+              echo "::error::$bin has unresolved dynamic dependencies"
+              ldd "$bin"
+              exit 1
+            fi
+          done
+
+          echo "Smoke OK: both binaries are well-formed Linux x86_64 ELFs with resolvable deps."
+
+      - name: Upload zip as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.bundle_name }}
+          path: ${{ steps.ver.outputs.bundle_name }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # --------------------------------------------------------------------------
+  # release: tag + GitHub release attached to the zip.
+  # Only on push to main, after build passes.
+  # --------------------------------------------------------------------------
+  release:
+    name: Create GitHub release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download zip from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.bundle_name }}
+          path: ./release-asset
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.version }}
+          name: ${{ needs.build.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: ./release-asset/${{ needs.build.outputs.bundle_name }}.zip
+          body: |
+            **Automated release** built from commit `${{ github.sha }}`.
+
+            Binaries built from upstream `gq-godark/gdx-rust-sdk` at pinned ref
+            `${{ needs.build.outputs.pinned_ref }}`.
+
+            ## Install
+
+            1. Download `${{ needs.build.outputs.bundle_name }}.zip` from the
+               assets below.
+            2. Unzip and follow `README.md` inside the bundle:
+
+               ```bash
+               unzip ${{ needs.build.outputs.bundle_name }}.zip
+               cd ${{ needs.build.outputs.bundle_name }}
+               cp .env.example .env   # then fill in your testnet creds
+               ./quickstart
+               ```
+
+            See `README.md` and `SDK_REFERENCE.md` inside the bundle for the
+            full integration docs.
