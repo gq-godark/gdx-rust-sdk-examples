@@ -2,12 +2,9 @@ name: Auto-bump SDK pin
 
 # Listener: triggered by gdx-rust-sdk notify-examples.yml (repository_dispatch)
 # or manually. Clones gdx-rust-sdk at the dispatched SHA, runs
-# scripts/refresh_sdk.sh, opens a rolling PR if any drift.
-#
-# The upstream gdx-rust-sdk repo commits its `src/generated/*.rs` protobuf
-# bindings, so this listener does NOT need to install Rust or run
-# `cargo build` to regenerate them - refresh_sdk.sh just rsyncs whatever
-# already exists in the upstream tree.
+# scripts/refresh_sdk.sh, opens a rolling PR if any drift. No Rust toolchain
+# required — upstream commits its pre-generated proto bindings, so the
+# refresh is a pure rsync.
 
 on:
   repository_dispatch:

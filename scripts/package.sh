@@ -120,16 +120,9 @@ fi
 echo "Upstream verified at pin: $PINNED_REF ($upstream_head_sha)"
 
 # ---- parity check: vendored sdk/src must match upstream src ---------------
-# Exclusions match the deliberate drops in scripts/refresh_sdk.sh - the SDK's
-# REST + standalone market-data surfaces are not used by either MM example
-# and are intentionally excluded from the vendored copy.
-#
-# lib.rs is also excluded from the recursive bit-equality check because the
-# vendored copy has its `pub mod market_data;` / `pub mod rest_client;` /
-# `pub mod rest_transport;` declarations stripped (otherwise the crate
-# wouldn't compile - the matching .rs files are excluded above). We
-# re-derive that trim from upstream's lib.rs separately and compare,
-# so any non-trim drift in lib.rs is still caught.
+# Excludes mirror the rsync drops in refresh_sdk.sh, plus lib.rs (which has
+# its decls for those modules trimmed by refresh_sdk.sh — checked separately
+# below against a re-derived trim so non-trim edits still fail parity).
 PARITY_EXCLUDES=(
   --exclude='market_data.rs'
   --exclude='rest_client.rs'
@@ -147,10 +140,7 @@ if ! diff -r --brief "${PARITY_EXCLUDES[@]}" \
   exit 1
 fi
 
-# lib.rs parity check: trim upstream's lib.rs the same way refresh_sdk.sh
-# does, then bit-compare against the vendored copy. This guards against
-# silent edits to vendored lib.rs (e.g. adding a `pub mod evil;` referring
-# to a smuggled-in source file) that the recursive diff above would miss.
+# lib.rs parity: apply refresh_sdk.sh's trim to upstream and bit-compare.
 EXPECTED_LIB_RS="$(mktemp)"
 python3 - "$UPSTREAM_SRC/src/lib.rs" > "$EXPECTED_LIB_RS" <<'PY'
 import re, sys, pathlib

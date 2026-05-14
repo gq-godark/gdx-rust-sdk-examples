@@ -114,22 +114,15 @@ text = re.sub(r"(\[package\][\s\S]*?)(\n\[)", lambda m: m.group(1).rstrip() + "\
 p.write_text(text)
 PY
 
-# Drop the `pub mod market_data;` / `pub mod rest_client;` / `pub mod
-# rest_transport;` declarations (and their corresponding `pub use ...`
-# re-exports) from the vendored `src/lib.rs`. The rsync above excludes the
-# matching `.rs` source files, so leaving the declarations in would produce
-# a crate that fails to compile with "file not found for module".
-#
-# Idempotent: the regex tolerates the lines already being absent, and the
-# parity check in scripts/package.sh excludes `lib.rs` from the bit-equality
-# check (the trim is deterministic, so package.sh re-derives the expected
-# vendored lib.rs from upstream on the fly to verify nothing else drifted).
+# Drop `pub mod market_data/rest_client/rest_transport;` (and their
+# `pub use` re-exports) from lib.rs — the matching .rs files are excluded
+# from the rsync above; leaving the decls in would fail to compile.
+# Idempotent.
 python3 - "$DEST/src/lib.rs" <<'PY'
 import re, sys, pathlib
 p = pathlib.Path(sys.argv[1])
 text = p.read_text()
-trimmed_mods = ("market_data", "rest_client", "rest_transport")
-for mod in trimmed_mods:
+for mod in ("market_data", "rest_client", "rest_transport"):
     text = re.sub(rf"^pub mod {mod};\s*\n", "", text, flags=re.M)
     text = re.sub(rf"^pub use {mod}::[^;]+;\s*\n", "", text, flags=re.M)
 p.write_text(text)

@@ -16,24 +16,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # --------------------------------------------------------------------------
   # build: pre-built example binaries packaged into a Linux x86_64 zip.
+  # Binaries come from a fresh checkout of gq-godark/gdx-rust-sdk at the
+  # commit pinned in sdk/UPSTREAM_REF; scripts/package.sh parity-checks the
+  # vendored sdk/ against that upstream so local edits cannot leak into the
+  # released artifact.
   #
-  # The binaries are built from a fresh checkout of gq-godark/gdx-rust-sdk at
-  # the commit recorded in sdk/UPSTREAM_REF. The vendored sdk/ tree is
-  # verified bit-equal to that upstream checkout by a parity check inside
-  # scripts/package.sh - local edits to sdk/ cannot leak into the released
-  # artifact.
-  #
-  # Required secrets:
-  #   GDX_APP_ID            — GitHub App id (the godark-ci app)
-  #   GDX_APP_PRIVATE_KEY   — GitHub App private key (PEM)
-  #
-  # The app must be installed on gq-godark with contents:read on
-  # gdx-rust-sdk. No gdx-proto access needed because gdx-rust-sdk commits
-  # its pre-generated proto bindings (src/generated/*.rs) — the upstream
-  # checkout doesn't need to fetch the proto submodule to build.
-  # --------------------------------------------------------------------------
+  # Required secrets: GDX_APP_ID + GDX_APP_PRIVATE_KEY (godark-ci App with
+  # contents:read on gdx-rust-sdk).
   build:
     name: Build Linux x86_64 zip
     runs-on: ubuntu-latest
