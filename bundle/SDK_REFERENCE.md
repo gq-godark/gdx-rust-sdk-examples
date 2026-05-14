@@ -158,3 +158,72 @@ MM distribution supports placing only `Market` and `Limit` orders.
 - `Encryption(String)`
 - `Timeout(String)`
 - `Config(String)`
+
+## Example files in this distribution
+
+| Binary | Source (in upstream examples repo) | Purpose |
+|--------|------------------------------------|---------|
+| `quickstart` | `examples/quickstart.rs` | Minimal connect, place, cancel |
+| `full_trader_example` | `examples/full_trader_example.rs` | Reference bot flow with all 6 push callbacks (positions snapshot, system health, balance, margin, funding rate, settlement) |
+
+Both binaries are pre-built for Linux x86_64 and statically linked against
+the `godark` SDK at the pin recorded by the upstream
+[release tag](https://github.com/gq-godark/gdx-rust-sdk-examples/releases).
+
+## Cargo integration (your own bot)
+
+The release zip ships compiled example binaries; it does **not** include the
+`godark` Rust crate source. To build your own bot against the same SDK
+revision, depend on the upstream `gdx-rust-sdk` repository directly. Pin
+to the same commit recorded in the matching `gdx-rust-sdk-examples` release
+tag (the upstream commit is also reproducible by inspecting the binary's
+build provenance).
+
+```toml
+# Cargo.toml
+[dependencies]
+godark = { git = "https://github.com/gq-godark/gdx-rust-sdk.git", rev = "<sha>" }
+tokio  = { version = "1", features = ["rt-multi-thread", "macros"] }
+```
+
+Then in `src/main.rs`:
+
+```rust
+use godark::{GodarkClient, OrderType, Side, TimeInForce};
+
+#[tokio::main]
+async fn main() -> Result<(), godark::GodarkError> {
+    let config = GodarkClient::builder()
+        .api_key_id(std::env::var("GODARK_API_KEY_ID").unwrap())
+        .api_secret(std::env::var("GODARK_API_SECRET").unwrap())
+        .build()?;
+
+    let mut client = GodarkClient::new(config);
+    client.connect().await?;
+
+    let ack = client
+        .place_order(
+            "BTC-USDC-PERP",
+            Side::Sell,
+            OrderType::Limit,
+            0.01,
+            Some(999_999.0),
+            TimeInForce::Gtc,
+            false,
+            None,
+            None,
+        )
+        .await?;
+
+    client.cancel_order(&ack.order_id, "BTC-USDC-PERP").await?;
+    client.disconnect().await;
+    Ok(())
+}
+```
+
+Building `gdx-rust-sdk` from source requires `protoc` on `$PATH` (the
+upstream crate regenerates protobuf bindings via `prost-build`); the
+prebuilt example binaries in this distribution don't share that
+requirement because they were built ahead of time on CI.
+
+See `SDK_REFERENCE.md` for the full client API surface.
