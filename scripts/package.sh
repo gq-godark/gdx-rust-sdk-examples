@@ -20,15 +20,29 @@
 #      parity check above guarantees vendored sdk/ is bit-equal to upstream/
 #      src/ for every file actually compiled, so the resulting binaries are
 #      reproducible from the public upstream pin.
-#   6. Stages the binaries + recipient docs from bundle/ and zips them.
+#   6. Stages the binaries + example sources + vendored sdk/ + a top-level
+#      Cargo.toml + recipient docs from bundle/, then zips them. Recipients
+#      can either run the prebuilt binaries directly (no toolchain needed)
+#      or `cargo build --release --examples` from the unzipped bundle.
 #
 # Output layout:
 #   <DIST_NAME>/
-#   |-- quickstart
-#   |-- full_trader_example
+#   |-- quickstart                 (prebuilt static-ish ELF, x86_64 Linux)
+#   |-- full_trader_example        (prebuilt)
+#   |-- Cargo.toml                 (workspace manifest; godark = { path = "sdk" })
 #   |-- .env.example
-#   |-- README.md             (from bundle/README.md)
-#   `-- SDK_REFERENCE.md      (from bundle/SDK_REFERENCE.md)
+#   |-- README.md                  (from bundle/README.md)
+#   |-- SDK_REFERENCE.md           (from bundle/SDK_REFERENCE.md)
+#   |-- examples/
+#   |   |-- quickstart.rs
+#   |   |-- full_trader_example.rs
+#   |   `-- dotenv.rs
+#   `-- sdk/
+#       |-- UPSTREAM_REF           (the upstream commit the bundle was cut from)
+#       |-- Cargo.toml             (godark crate manifest)
+#       |-- README.md
+#       |-- shared/symbols.json
+#       `-- src/                   (godark crate source incl. pre-generated proto)
 #
 # Usage:
 #   bash scripts/package.sh
@@ -40,7 +54,7 @@ UPSTREAM_REPO="gq-godark/gdx-rust-sdk"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DIST_NAME="${1:-gdx-rust-sdk-examples-linux-x86_64}"
+DIST_NAME="${1:-gdx-rust-sdk-linux-x86_64}"
 
 cd "$REPO_ROOT"
 
@@ -188,11 +202,48 @@ DEST="$STAGING_DIR/$DIST_NAME"
 mkdir -p "$DEST"
 
 echo "Staging distribution at $DEST ..."
+mkdir -p "$DEST/examples" "$DEST/sdk"
+
+# Prebuilt binaries — recipients can run these directly without a Rust
+# toolchain. Built above against vendored sdk/, which the parity check
+# above guarantees is bit-equal to $UPSTREAM_SRC/src.
 cp "$QUICKSTART_BIN"                          "$DEST/quickstart"
 cp "$FULL_TRADER_BIN"                         "$DEST/full_trader_example"
+
+# MM-facing docs come from bundle/, never from the repo-root copies.
 cp "${REPO_ROOT}/.env.example"                "$DEST/.env.example"
 cp "${REPO_ROOT}/bundle/README.md"            "$DEST/README.md"
 cp "${REPO_ROOT}/bundle/SDK_REFERENCE.md"     "$DEST/SDK_REFERENCE.md"
+
+# Top-level Cargo.toml — same shape as the in-repo one (path = "sdk"
+# resolves correctly inside the unzipped bundle). Recipients can run
+# `cargo build --release --examples` against this manifest.
+cp "${REPO_ROOT}/Cargo.toml"                  "$DEST/Cargo.toml"
+
+# Example sources — recipients can read them and rebuild against the
+# bundled sdk/ for their own bot scaffolding.
+cp "${REPO_ROOT}/examples/quickstart.rs"           "$DEST/examples/"
+cp "${REPO_ROOT}/examples/full_trader_example.rs"  "$DEST/examples/"
+cp "${REPO_ROOT}/examples/dotenv.rs"               "$DEST/examples/"
+
+# Vendored godark crate — copied from $REPO_ROOT/sdk/ which the parity
+# check above already verified matches $UPSTREAM_SRC/src for every file
+# the workspace compiles. The bundle's release contract is preserved
+# because the source of truth (the commit the binaries were built from)
+# is recorded in sdk/UPSTREAM_REF below.
+cp "${REPO_ROOT}/sdk/Cargo.toml"              "$DEST/sdk/Cargo.toml"
+cp -r "${REPO_ROOT}/sdk/src"                  "$DEST/sdk/src"
+if [[ -f "${REPO_ROOT}/sdk/README.md" ]]; then
+  cp "${REPO_ROOT}/sdk/README.md"             "$DEST/sdk/README.md"
+fi
+if [[ -d "${REPO_ROOT}/sdk/shared" ]]; then
+  cp -r "${REPO_ROOT}/sdk/shared"             "$DEST/sdk/shared"
+fi
+
+# UPSTREAM_REF marker — pins recipients to the exact upstream commit
+# this bundle was built from, mirroring the java distribution and the
+# cpp distribution.
+printf '%s\n' "$PINNED_REF" > "$DEST/sdk/UPSTREAM_REF"
 
 # ---- zip ------------------------------------------------------------------
 ARCHIVE="$REPO_ROOT/${DIST_NAME}.zip"
@@ -206,17 +257,28 @@ echo "Package created: $ARCHIVE"
 LISTING="$(unzip -l "$ARCHIVE")"
 echo "$LISTING"
 
-# Recipient-only contract: no internal directories must leak.
-if echo "$LISTING" | grep -E "${DIST_NAME}/(sdk|scripts|target|examples|bundle)/" >/dev/null; then
-  echo "error: bundle contains forbidden internal directory - binary-only contract violated" >&2
+# Recipient contract: no maintainer-only directories must leak.
+# (sdk/ and examples/ are now part of the recipient-facing layout — the
+# previous binary-only contract was relaxed when we started shipping the
+# vendored crate + example sources for offline source builds.)
+if echo "$LISTING" | grep -E "${DIST_NAME}/(scripts|target|bundle|\.git)/" >/dev/null; then
+  echo "error: bundle contains forbidden internal directory" >&2
   exit 1
 fi
+# Every required path must be present.
 for required in \
   "${DIST_NAME}/quickstart" \
   "${DIST_NAME}/full_trader_example" \
   "${DIST_NAME}/README\\.md" \
   "${DIST_NAME}/SDK_REFERENCE\\.md" \
-  "${DIST_NAME}/\\.env\\.example"; do
+  "${DIST_NAME}/Cargo\\.toml" \
+  "${DIST_NAME}/\\.env\\.example" \
+  "${DIST_NAME}/examples/quickstart\\.rs" \
+  "${DIST_NAME}/examples/full_trader_example\\.rs" \
+  "${DIST_NAME}/examples/dotenv\\.rs" \
+  "${DIST_NAME}/sdk/UPSTREAM_REF" \
+  "${DIST_NAME}/sdk/Cargo\\.toml" \
+  "${DIST_NAME}/sdk/src/lib\\.rs"; do
   if ! echo "$LISTING" | grep -E "${required}" >/dev/null; then
     echo "error: bundle missing required entry: ${required}" >&2
     exit 1
@@ -224,5 +286,5 @@ for required in \
 done
 
 echo
-echo "binary-only assertion: PASSED"
+echo "bundle-shape assertion: PASSED"
 echo "built from upstream:    ${UPSTREAM_REPO}@${PINNED_REF} (${upstream_head_sha})"

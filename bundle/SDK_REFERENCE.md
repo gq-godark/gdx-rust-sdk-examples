@@ -161,29 +161,28 @@ MM distribution supports placing only `Market` and `Limit` orders.
 
 ## Example files in this distribution
 
-| Binary | Source (in upstream examples repo) | Purpose |
-|--------|------------------------------------|---------|
-| `quickstart` | `examples/quickstart.rs` | Minimal connect, place, cancel |
-| `full_trader_example` | `examples/full_trader_example.rs` | Reference bot flow with all 6 push callbacks (positions snapshot, system health, balance, margin, funding rate, settlement) |
+| File | Built binary | Purpose |
+|------|--------------|---------|
+| `examples/quickstart.rs` | `./quickstart` | Minimal connect, place, cancel |
+| `examples/full_trader_example.rs` | `./full_trader_example` | Reference bot flow with all 6 push callbacks (positions snapshot, system health, balance, margin, funding rate, settlement) |
+| `examples/dotenv.rs` | (helper) | Shared `.env` loader and symbolic-error printer used by both example mains |
 
-Both binaries are pre-built for Linux x86_64 and statically linked against
-the `godark` SDK at the pin recorded by the upstream
-[release tag](https://github.com/gq-godark/gdx-rust-sdk-examples/releases).
+Both prebuilt binaries are Linux x86_64 ELFs built against the bundled
+`sdk/` (whose pin is recorded in `sdk/UPSTREAM_REF`). To rebuild from the
+included sources, run `cargo build --release --examples` from the bundle
+root.
 
 ## Cargo integration (your own bot)
 
-The release zip ships compiled example binaries; it does **not** include the
-`godark` Rust crate source. To build your own bot against the same SDK
-revision, depend on the upstream `gdx-rust-sdk` repository directly. Pin
-to the same commit recorded in the matching `gdx-rust-sdk-examples` release
-tag (the upstream commit is also reproducible by inspecting the binary's
-build provenance).
+The bundle includes a vendored `godark` crate under `sdk/`. Depend on it
+via a path dependency from your own `Cargo.toml`:
 
 ```toml
-# Cargo.toml
+# Cargo.toml — your own bot
 [dependencies]
-godark = { git = "https://github.com/gq-godark/gdx-rust-sdk.git", rev = "<sha>" }
-tokio  = { version = "1", features = ["rt-multi-thread", "macros"] }
+godark  = { path = "path/to/this-bundle/sdk" }
+tokio   = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+dotenvy = "0.15"
 ```
 
 Then in `src/main.rs`:
@@ -193,6 +192,8 @@ use godark::{GodarkClient, OrderType, Side, TimeInForce};
 
 #[tokio::main]
 async fn main() -> Result<(), godark::GodarkError> {
+    let _ = dotenvy::dotenv();
+
     let config = GodarkClient::builder()
         .api_key_id(std::env::var("GODARK_API_KEY_ID").unwrap())
         .api_secret(std::env::var("GODARK_API_SECRET").unwrap())
@@ -221,9 +222,15 @@ async fn main() -> Result<(), godark::GodarkError> {
 }
 ```
 
-Building `gdx-rust-sdk` from source requires `protoc` on `$PATH` (the
-upstream crate regenerates protobuf bindings via `prost-build`); the
-prebuilt example binaries in this distribution don't share that
-requirement because they were built ahead of time on CI.
+To pin against the upstream `gdx-rust-sdk` repository directly instead of
+the bundled crate, use the SHA recorded in `sdk/UPSTREAM_REF`:
 
-See `SDK_REFERENCE.md` for the full client API surface.
+```toml
+godark = { git = "https://github.com/gq-godark/gdx-rust-sdk.git",
+           rev = "<contents of sdk/UPSTREAM_REF>" }
+```
+
+Note: the upstream-source path requires `protoc` on `$PATH` (`gdx-rust-sdk`
+regenerates protobuf bindings via `prost-build`). The bundled `sdk/` does
+**not** share that requirement because bindings are pre-generated under
+`sdk/src/generated/`.
