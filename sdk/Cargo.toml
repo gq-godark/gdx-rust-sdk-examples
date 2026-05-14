@@ -11,7 +11,7 @@ authors = ["GoDark"]
 keywords = ["godark", "dex", "trading", "websocket", "crypto"]
 categories = ["api-bindings", "cryptography"]
 # Pre-generated protobuf bindings are committed under `src/generated/`, so
-# this vendored copy of `godark` does NOT regenerate them at build time —
+# this vendored copy of `godark` does NOT regenerate them at build time -
 # consumers do not need `protoc` or `prost-build`. Ship only the library
 # target; the SDK's own examples and integration tests are excluded from
 # this distribution.

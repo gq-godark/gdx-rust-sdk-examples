@@ -1,96 +1,67 @@
 # GoDark Rust Examples (Darkpool MM Distribution)
 
-This repository is a self-contained, market-maker-facing distribution for
-GoDark's Rust SDK. It includes:
+Maintainer-facing repository for the GoDark Rust SDK examples. The release
+artifact (a Linux x86_64 `.zip` containing pre-built example binaries +
+recipient docs from `bundle/`) is produced by the CI release pipeline on
+every push to `main`. For the recipient-facing view of what ships in that
+zip, see [`bundle/README.md`](bundle/README.md) and
+[`bundle/SDK_REFERENCE.md`](bundle/SDK_REFERENCE.md).
+
+This repository includes:
 
 - two minimal darkpool trading examples (`quickstart` + `full_trader_example`)
-- the full `godark` SDK source vendored under `sdk/` — no private registry
-  required, no `protoc` required (pre-generated protobuf bindings ship with
-  the SDK)
+- the full `godark` SDK source vendored under `sdk/` for local dev — no
+  private registry required, no `protoc` required (pre-generated protobuf
+  bindings ship with the SDK under `sdk/src/generated/`)
 - a simple `.env` workflow (no shell `export` required)
-- a `scripts/package.sh` that produces a portable Linux x86_64 binary tarball
-  for downstream MMs who don't want to install a Rust toolchain
+- a `scripts/refresh_sdk.sh` that resyncs `sdk/` from a sibling
+  `gdx-rust-sdk` checkout and pins the upstream commit in `sdk/UPSTREAM_REF`
+- a `scripts/package.sh` that produces the Linux x86_64 `.zip` shipped to
+  MMs, built strictly from the pinned upstream `gdx-rust-sdk` commit (not
+  from the vendored copy — see *Release contract* below)
+- a `.github/workflows/release.yml` that runs `scripts/package.sh` on every
+  push and pull request, and publishes a tagged GitHub Release on every
+  merge to `main`
 
-## Two ways to use
+## Dev loop (build from source)
 
-### A — Pre-built binaries (no Rust toolchain required)
-
-```bash
-# unzip the distribution archive provided to you
-unzip godark-rust-examples-linux-x86_64.zip
-cd godark-rust-examples-linux-x86_64/
-
-cp .env.example .env
-$EDITOR .env       # set GODARK_API_KEY_ID, GODARK_API_SECRET
-
-./quickstart
-./full_trader_example
-```
-
-#### Platform requirements
-
-| Item        | Requirement                                                                   |
-|-------------|-------------------------------------------------------------------------------|
-| OS / arch   | Linux x86_64 (built on Ubuntu 24.04, glibc ≥ 2.18)                            |
-| TLS runtime | `libssl.so.3` + `libcrypto.so.3` (`apt install libssl3` on Debian/Ubuntu)     |
-| Other       | `libstdc++` / `libgcc_s` / `libm` / `libc` (standard system libraries)        |
-
-> **macOS / Windows / aarch64?** Build from source (next section).
-
-### B — Build from source
-
-#### Prerequisites
+### Prerequisites
 
 - Rust ≥ 1.79 (`rustup install stable`)
 - Cargo (bundled with the toolchain)
-- Network access to `crates.io` for the standard runtime crates that the SDK
+- Network access to `crates.io` for the standard runtime crates the SDK
   pulls in (`tokio`, `prost`, `serde`, `reqwest`, etc.). The `godark` SDK
   itself is vendored under `sdk/`; you do not need access to any private
   registry.
 
-#### Build
+### Build + run
 
 ```bash
 cargo build --release --examples
+cargo run   --release --example quickstart
+cargo run   --release --example full_trader_example
 ```
 
-Built binaries land in `target/release/examples/`. Or run a single example
-directly:
+Built binaries land in `target/release/examples/`.
 
-```bash
-cargo run --release --example quickstart
-cargo run --release --example full_trader_example
-```
-
-## Testnet onboarding
-
-Before running the examples, complete this setup flow:
-
-1. Open the testnet frontend: `https://app.godark-dex.com`
-2. Create an account using email sign-up.
-3. Fund your testnet account using the faucet: `https://faucet.godark-dex.com`
-4. In the frontend, go to **Settings → API Key Management** and click
-   **Create API Key**.
-5. Use the generated key id and secret for your local `.env`.
-
-## Configure credentials
-
-Copy `.env.example` to `.env` and fill in your API credentials:
+### Configure credentials
 
 ```bash
 cp .env.example .env
+$EDITOR .env       # set GODARK_API_KEY_ID, GODARK_API_SECRET
 ```
 
-Required keys:
+Required:
 
 - `GODARK_API_KEY_ID`
 - `GODARK_API_SECRET`
 
 Optional:
 
-- `GODARK_EDGE_URL` (defaults to `wss://api.godark-dex.com`)
+- `GODARK_EDGE_URL` — defaults to `wss://api.godark-dex.com`.
 
-The OS environment always wins over `.env`.
+The OS environment always wins over `.env`. See *Testnet onboarding* in
+[`bundle/README.md`](bundle/README.md) for the API-key minting flow.
 
 ## Examples
 
@@ -101,23 +72,84 @@ The OS environment always wins over `.env`.
 
 Order-type support in this MM distribution is limited to `MARKET` and `LIMIT`.
 
-## Packaging for Market Makers
+## Release contract
 
-Create a clean distributable archive of the two pre-built binaries:
+The release pipeline does **not** build from the vendored `sdk/` tree.
+Instead, every release build:
+
+1. Reads the pinned upstream `gdx-rust-sdk` commit from `sdk/UPSTREAM_REF`.
+2. Checks out `gq-godark/gdx-rust-sdk` at that exact ref into `./upstream/`.
+3. Diffs the vendored `sdk/src` tree against `upstream/src` and **fails
+   loudly** if they differ — this prevents hand-edits to `sdk/` from ever
+   leaking into a release.
+4. Builds the binaries by temporarily swapping the workspace's
+   `godark = { path = "sdk" }` dependency to `godark = { path = "upstream" }`,
+   so the recipient zip is byte-for-byte reproducible from a public commit
+   hash.
+5. Stages the binaries, `bundle/README.md`, `bundle/SDK_REFERENCE.md`, and
+   `.env.example` into a `gdx-rust-sdk-examples-<version>-linux-x86_64.zip`.
+
+The vendored `sdk/` therefore exists only for the local dev loop (faster
+`cargo build`, IDE go-to-definition, etc.). The source of truth for what
+ships is always `gdx-rust-sdk@<UPSTREAM_REF>`.
+
+## Refreshing `sdk/` from a sibling SDK checkout (maintainer)
 
 ```bash
-./scripts/package.sh
+./scripts/refresh_sdk.sh /path/to/gdx-rust-sdk
 ```
 
-This creates `godark-rust-examples-linux-x86_64.tar.gz` containing:
+The script:
 
-- `quickstart`
-- `full_trader_example`
-- `.env.example`
-- `README.md`
-- `SDK_REFERENCE.md`
+- refuses to run if the sibling SDK checkout is dirty (uncommitted changes)
+- rsyncs `src/` and the trimmed `Cargo.toml` into `sdk/`
+- writes the upstream HEAD commit (or tag, if HEAD is on one) to
+  `sdk/UPSTREAM_REF`
 
-Internal files (`scripts/`, `sdk/`, `target/`, `.git/`) are not included.
+Commit the resulting diff under `sdk/` together with the bumped
+`sdk/UPSTREAM_REF` so CI's parity check stays green.
+
+## Building the release zip locally (maintainer)
+
+The same script CI runs:
+
+```bash
+# Uses a sibling ../gdx-rust-sdk if present, else clones at the pinned ref:
+./scripts/package.sh
+
+# Or explicitly point at an upstream checkout:
+UPSTREAM_SRC=/path/to/gdx-rust-sdk ./scripts/package.sh gdx-rust-sdk-vX.Y.Z-linux-x86_64
+```
+
+Output lands in the repo root as
+`gdx-rust-sdk-examples-<bundle>-linux-x86_64.zip`.
+
+## CI / release pipeline
+
+Workflows under `.github/workflows/`:
+
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| `release.yml` | push + PR to `main` | Build the release zip from the pinned upstream commit, file/ldd-smoke the binaries; on push to `main`, additionally tag and publish a GitHub Release with the zip attached. |
+| `auto-bump-sdk-pin.yml` | `repository_dispatch` (from `gdx-rust-sdk/main`) or manual | Refresh `sdk/` from the dispatched upstream SHA, bump `sdk/UPSTREAM_REF`, force-push to `auto/bump-sdk-pin` and open a rolling PR if any drift. |
+
+The full upstream-change chain (proto → SDK → examples → release zip):
+
+1. A push to `gdx-proto` (`v1/devnet`) dispatches `gdx-proto-changed` to `gdx-rust-sdk`.
+2. `gdx-rust-sdk/.github/workflows/auto-regen-protos.yml` regenerates the
+   committed proto bindings and opens a rolling PR. Merging it dispatches
+   `gdx-sdk-changed` to this repo.
+3. `auto-bump-sdk-pin.yml` here refreshes `sdk/`, bumps `sdk/UPSTREAM_REF`,
+   and opens its own rolling PR.
+4. Merging that PR triggers `release.yml`, which rebuilds the bundle zip
+   from the new pin and publishes a tagged GitHub Release.
+
+## Required repository secrets
+
+| Secret | Used by | Purpose |
+|--------|---------|---------|
+| `GDX_RUST_SDK_TOKEN` | `release.yml` | PAT or fine-grained token with `contents:read` on `gq-godark/gdx-rust-sdk`. Lets `release.yml` check out the pinned upstream commit. |
+| `GDX_APP_ID` + `GDX_APP_PRIVATE_KEY` | `auto-bump-sdk-pin.yml` | Credentials for the `GDX_APP` GitHub App. Repo scope must include `gdx-rust-sdk-examples` and `gdx-rust-sdk`. |
 
 ## Layout
 
@@ -128,7 +160,13 @@ Internal files (`scripts/`, `sdk/`, `target/`, `.git/`) are not included.
 | `examples/dotenv.rs` | Tiny shared helper (`load_dotenv` + symbolic error printer) |
 | `Cargo.toml` | Examples crate; depends on the vendored `godark` via `path = "sdk"` |
 | `sdk/` | Vendored `godark` SDK source (with pre-generated protobuf bindings under `sdk/src/generated/`) |
+| `sdk/UPSTREAM_REF` | Pinned upstream `gdx-rust-sdk` commit; CI rebuilds against this exact ref |
 | `.env.example` | Credential template for local `.env` |
-| `SDK_REFERENCE.md` | API usage reference for trading integration |
-| `scripts/refresh_sdk.sh` | Internal script for refreshing `sdk/` from a sibling SDK checkout |
-| `scripts/package.sh` | Produces the binary tarball shipped to MMs |
+| `README.md` | This file (maintainer guide) |
+| `SDK_REFERENCE.md` | Maintainer-grade API reference; mirrored in trimmed form at `bundle/SDK_REFERENCE.md` |
+| `bundle/README.md` | Recipient-facing README packaged into the release zip |
+| `bundle/SDK_REFERENCE.md` | Recipient-facing API reference packaged into the release zip |
+| `scripts/refresh_sdk.sh` | Refresh `sdk/` from a sibling SDK checkout + write `sdk/UPSTREAM_REF` |
+| `scripts/package.sh` | Produce the release zip (CI + local) |
+| `.github/workflows/release.yml` | Build / smoke / publish the release zip |
+| `.github/workflows/auto-bump-sdk-pin.yml` | Refresh `sdk/` automatically on `gdx-rust-sdk` push events |

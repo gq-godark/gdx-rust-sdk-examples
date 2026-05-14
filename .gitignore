@@ -1,4 +1,9 @@
 /target/
 Cargo.lock
 .env
+# Legacy tar.gz packager output (pre-release.yml). Modern script produces .zip.
 *.tar.gz
+# Local package output from scripts/package.sh and CI bundle zips.
+*.zip
+# release.yml checks out the pinned upstream gdx-rust-sdk under ./upstream/ — never commit.
+/upstream/

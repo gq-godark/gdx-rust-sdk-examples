@@ -396,7 +396,7 @@ pub struct LiquidityPoolStatusRequest {
     #[prost(bytes = "vec", tag = "2")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// / Shield then LP-assign in one QUIC round-trip (wallet SPL → vault_stub + shield → sequencer credits + pool deposit).
+/// / Shield then LP-assign in one QUIC round-trip (wallet SPL → vault_stub + shield → sequencer submits + credits + pool deposit).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ShieldAndPoolDepositRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -409,6 +409,9 @@ pub struct ShieldAndPoolDepositRequest {
     pub tx_signature: ::prost::alloc::string::String,
     #[prost(bytes = "vec", tag = "5")]
     pub idempotency_key: ::prost::alloc::vec::Vec<u8>,
+    /// / Bincode-serialized Solana \[`Transaction`\] (wallet-signed); sequencer submits to RPC.
+    #[prost(bytes = "vec", tag = "6")]
+    pub signed_transaction: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct QueryBalanceRequest {
@@ -440,19 +443,21 @@ pub struct TierSnapshotPush {
     #[prost(message, repeated, tag = "2")]
     pub users: ::prost::alloc::vec::Vec<TierUserSnapshotRow>,
 }
-/// / Lazy recovery: edge pushes absolute shielded total after WS auth / QUIC reconnect.
+/// / Edge relays a wallet-signed shield/unshield bundle; sequencer submits to Solana then updates WAL + ledger.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BalanceSyncRequest {
+pub struct ShieldSubmitRequest {
     #[prost(bytes = "vec", tag = "1")]
     pub user_uuid: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag = "2")]
-    pub absolute_balance_raw: u64,
+    #[prost(bytes = "vec", tag = "2")]
+    pub signed_transaction: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub client_request_id: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EdgeSequencerRequest {
     #[prost(
         oneof = "edge_sequencer_request::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17"
     )]
     pub inner: ::core::option::Option<edge_sequencer_request::Inner>,
 }
@@ -489,8 +494,9 @@ pub mod edge_sequencer_request {
         QueryBalance(super::QueryBalanceRequest),
         #[prost(message, tag = "15")]
         TierSnapshotPush(super::TierSnapshotPush),
-        #[prost(message, tag = "16")]
-        BalanceSync(super::BalanceSyncRequest),
+        /// Field 16 (balance_sync) removed — sequencer-owned submission removes lazy sync.
+        #[prost(message, tag = "17")]
+        ShieldSubmit(super::ShieldSubmitRequest),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -546,6 +552,10 @@ pub struct AckMessage {
     pub node_health: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "10")]
     pub pool_ack: ::core::option::Option<PoolAck>,
+    #[prost(string, optional, tag = "11")]
+    pub shield_solana_signature: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "12")]
+    pub shielded_balance_raw: ::core::option::Option<u64>,
 }
 /// Phase 5 — liquidity pool command results (edge ↔ sequencer QUIC).
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
