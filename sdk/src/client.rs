@@ -1199,6 +1199,7 @@ fn parse_position_update_type(raw: &str) -> PositionUpdateType {
         "INCREASE" => PositionUpdateType::Increase,
         "DECREASE" => PositionUpdateType::Decrease,
         "CLOSE" => PositionUpdateType::Close,
+        "FUNDING_APPLIED" => PositionUpdateType::FundingApplied,
         _ => PositionUpdateType::Snapshot,
     }
 }

@@ -33,8 +33,9 @@ pub use enums::{
 pub use error::GodarkError;
 pub use order_error_code::{find as find_order_error, OrderErrorEntry, ORDER_ERROR_CODES};
 pub use rest_client::{GodarkRestClient, GodarkRestClientBuilder};
+pub use rest_transport::RestTransport;
 pub use types::{
-    Balance, BalanceUpdate, FundingRateUpdate, MarginAlert, MeProfile, OrderAck, OrderUpdate, PositionRow,
-    PositionUpdate, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
+    Balance, BalanceUpdate, FundingRateUpdate, MarginAlert, MeProfile, OrderAck, OrderUpdate,
+    PositionRow, PositionUpdate, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
     SettlementBatchStatus, SettlementUpdate, SystemHealthUpdate,
 };

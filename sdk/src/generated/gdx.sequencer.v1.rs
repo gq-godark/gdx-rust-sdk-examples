@@ -54,6 +54,8 @@ pub struct OrderMessage {
     /// client-selected value instead of a hardcoded 1.
     #[prost(uint32, tag = "16")]
     pub leverage: u32,
+    #[prost(enumeration = "super::super::common::v1::StpMode", tag = "17")]
+    pub stp_mode: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CancelMessage {
@@ -283,7 +285,10 @@ pub mod signing_request {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SequencerMessage {
-    #[prost(oneof = "sequencer_message::Inner", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(
+        oneof = "sequencer_message::Inner",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"
+    )]
     pub inner: ::core::option::Option<sequencer_message::Inner>,
 }
 /// Nested message and enum types in `SequencerMessage`.
@@ -308,6 +313,12 @@ pub mod sequencer_message {
         GetOrderHistory(super::GetOrderHistoryRequest),
         #[prost(message, tag = "9")]
         UnsubscribePositions(super::UnsubscribePositions),
+        #[prost(message, tag = "10")]
+        FetchFillShares(super::FetchFillShares),
+        #[prost(message, tag = "11")]
+        FillShareAck(super::FillShareAck),
+        #[prost(message, tag = "12")]
+        Catchup(super::CatchUpMutation),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -350,6 +361,8 @@ pub struct PlaceOrderInput {
     /// uses it in pre-trade margin checks.
     #[prost(uint32, tag = "21")]
     pub leverage: u32,
+    #[prost(enumeration = "super::super::common::v1::StpMode", tag = "22")]
+    pub stp_mode: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ModifyOrderInput {
@@ -386,6 +399,16 @@ pub struct PoolWithdrawRequest {
     pub owner: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub shares_to_burn: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub idempotency_key: ::prost::alloc::vec::Vec<u8>,
+}
+/// / Debit shielded balance and mint LP shares (sequencer-internal; no Solana tx).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PoolDepositRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub owner: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub amount_usdt: u64,
     #[prost(bytes = "vec", tag = "3")]
     pub idempotency_key: ::prost::alloc::vec::Vec<u8>,
 }
@@ -457,7 +480,7 @@ pub struct ShieldSubmitRequest {
 pub struct EdgeSequencerRequest {
     #[prost(
         oneof = "edge_sequencer_request::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17, 18"
     )]
     pub inner: ::core::option::Option<edge_sequencer_request::Inner>,
 }
@@ -497,6 +520,8 @@ pub mod edge_sequencer_request {
         /// Field 16 (balance_sync) removed — sequencer-owned submission removes lazy sync.
         #[prost(message, tag = "17")]
         ShieldSubmit(super::ShieldSubmitRequest),
+        #[prost(message, tag = "18")]
+        PoolDeposit(super::PoolDepositRequest),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -529,6 +554,48 @@ pub struct TradeMessage {
     pub taker_user_commitment: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FetchFillShares {
+    #[prost(uint64, repeated, tag = "1")]
+    pub order_ids: ::prost::alloc::vec::Vec<u64>,
+    /// When unset, sequencer may broadcast to all MPC nodes (legacy / WAL recovery).
+    #[prost(uint64, optional, tag = "2")]
+    pub symbol_id: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FillShareResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub shares: ::prost::alloc::vec::Vec<TradeMessage>,
+    #[prost(uint64, repeated, tag = "2")]
+    pub missing_order_ids: ::prost::alloc::vec::Vec<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FillShareAck {
+    #[prost(uint64, repeated, tag = "1")]
+    pub order_ids: ::prost::alloc::vec::Vec<u64>,
+}
+/// Sequencer → recovering node: one sequenced mutation for catch-up replay.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CatchUpMutation {
+    #[prost(uint64, tag = "1")]
+    pub sequence: u64,
+    #[prost(oneof = "catch_up_mutation::Body", tags = "2, 3, 4, 5")]
+    pub body: ::core::option::Option<catch_up_mutation::Body>,
+}
+/// Nested message and enum types in `CatchUpMutation`.
+pub mod catch_up_mutation {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "2")]
+        Place(super::OrderMessage),
+        #[prost(message, tag = "3")]
+        Cancel(super::CancelMessage),
+        #[prost(message, tag = "4")]
+        Modify(super::ModifyMessage),
+        #[prost(message, tag = "5")]
+        Fill(super::TradeMessage),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AckMessage {
     #[prost(uint64, tag = "1")]
     pub node_id: u64,
@@ -556,6 +623,8 @@ pub struct AckMessage {
     pub shield_solana_signature: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(uint64, optional, tag = "12")]
     pub shielded_balance_raw: ::core::option::Option<u64>,
+    #[prost(bytes = "vec", optional, tag = "13")]
+    pub book_hash: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// Phase 5 — liquidity pool command results (edge ↔ sequencer QUIC).
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
@@ -663,9 +732,23 @@ pub mod signing_response {
         Error(super::SigningError),
     }
 }
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct NodeReady {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub last_applied_seq: u64,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct CatchupApplied {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub last_applied_seq: u64,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct NodeResponse {
-    #[prost(oneof = "node_response::Inner", tags = "1, 2, 3, 4, 5")]
+    #[prost(oneof = "node_response::Inner", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
     pub inner: ::core::option::Option<node_response::Inner>,
 }
 /// Nested message and enum types in `NodeResponse`.
@@ -682,6 +765,12 @@ pub mod node_response {
         OpenOrdersSnapshot(super::OpenOrdersSnapshot),
         #[prost(message, tag = "5")]
         OrderHistorySnapshot(super::OrderHistorySnapshot),
+        #[prost(message, tag = "6")]
+        FillShareResponse(super::FillShareResponse),
+        #[prost(message, tag = "7")]
+        NodeReady(super::NodeReady),
+        #[prost(message, tag = "8")]
+        CatchupApplied(super::CatchupApplied),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -760,6 +849,9 @@ pub struct OrderUpdateMessage {
     /// "zero realized" from "field not emitted".
     #[prost(string, optional, tag = "17")]
     pub realized_pnl: ::core::option::Option<::prost::alloc::string::String>,
+    /// Order type (limit, market, peg variants).
+    #[prost(enumeration = "super::super::common::v1::OrderType", tag = "18")]
+    pub order_type: i32,
 }
 /// One position inside a `PositionsSnapshot` batch. All decimal fields
 /// are rendered at the sequencer's configured `decimal_places`; PnL /
@@ -860,6 +952,31 @@ pub struct FundingRateUpdateMessage {
     pub timestamp: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OpenInterestUpdateMessage {
+    #[prost(uint64, tag = "1")]
+    pub symbol_id: u64,
+    #[prost(string, tag = "2")]
+    pub open_interest: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    pub timestamp: u64,
+    #[prost(string, optional, tag = "4")]
+    pub oi_ccy: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Per-market volume delta pushed from sequencer to edge after fill
+/// reconstruction. Carries the notional volume (price * quantity) for one
+/// fill batch for a single symbol. Edge accumulates into a rolling 24h window.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VolumeUpdateMessage {
+    #[prost(uint64, tag = "1")]
+    pub symbol_id: u64,
+    /// Notional volume of this fill batch in quote currency (decimal string).
+    #[prost(string, tag = "2")]
+    pub notional_delta: ::prost::alloc::string::String,
+    /// Field 3 intentionally skipped (was num_trades, removed before first use).
+    #[prost(uint64, tag = "4")]
+    pub timestamp: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SettlementUpdateMessage {
     #[prost(uint64, tag = "1")]
     pub batch_id: u64,
@@ -930,9 +1047,23 @@ pub struct MarginAlertMessage {
     #[prost(bool, tag = "9")]
     pub recovered: bool,
 }
+/// Sequencer → edge push: a single terminal-state order to persist in the
+/// edge's Postgres `order_history` table. Sent alongside the real-time
+/// `OrderUpdate` push whenever an order transitions to Filled / Cancelled /
+/// Rejected.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OrderHistoryInsertMessage {
+    #[prost(bytes = "vec", tag = "1")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    pub row: ::core::option::Option<OrderHistoryRow>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SequencerToEdgeMessage {
-    #[prost(oneof = "sequencer_to_edge_message::Inner", tags = "1, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(
+        oneof = "sequencer_to_edge_message::Inner",
+        tags = "1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"
+    )]
     pub inner: ::core::option::Option<sequencer_to_edge_message::Inner>,
 }
 /// Nested message and enum types in `SequencerToEdgeMessage`.
@@ -957,6 +1088,13 @@ pub mod sequencer_to_edge_message {
         BalanceUpdate(super::BalanceUpdateMessage),
         #[prost(message, tag = "9")]
         MarginAlert(super::MarginAlertMessage),
+        /// Terminal-state order row for edge Postgres persistence.
+        #[prost(message, tag = "10")]
+        OrderHistoryInsert(super::OrderHistoryInsertMessage),
+        #[prost(message, tag = "11")]
+        OpenInterestUpdate(super::OpenInterestUpdateMessage),
+        #[prost(message, tag = "12")]
+        VolumeUpdate(super::VolumeUpdateMessage),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]

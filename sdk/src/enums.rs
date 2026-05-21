@@ -53,6 +53,7 @@ pub enum PositionUpdateType {
     Increase,
     Decrease,
     Close,
+    FundingApplied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -187,6 +188,7 @@ impl PositionUpdateType {
             3 => Self::Increase,
             4 => Self::Decrease,
             5 => Self::Close,
+            6 => Self::FundingApplied,
             _ => Self::Snapshot,
         }
     }
@@ -198,6 +200,7 @@ impl PositionUpdateType {
             Self::Increase => 3,
             Self::Decrease => 4,
             Self::Close => 5,
+            Self::FundingApplied => 6,
         }
     }
 }
@@ -340,10 +343,20 @@ mod tests {
             PositionUpdateType::Increase,
             PositionUpdateType::Decrease,
             PositionUpdateType::Close,
+            PositionUpdateType::FundingApplied,
         ];
         for v in variants {
             assert_eq!(PositionUpdateType::from_proto(v.to_proto()), v);
         }
+    }
+
+    #[test]
+    fn test_position_update_type_funding_applied_wire_value() {
+        assert_eq!(PositionUpdateType::FundingApplied.to_proto(), 6);
+        assert_eq!(
+            PositionUpdateType::from_proto(6),
+            PositionUpdateType::FundingApplied
+        );
     }
 
     #[test]

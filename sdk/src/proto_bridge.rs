@@ -65,6 +65,7 @@ pub fn build_place_order_proto(
         timestamp,
         user_uuid: user_uuid.to_vec(),
         leverage: 1,
+        stp_mode: 0,
     };
     let req = sequencer::EdgeSequencerRequest {
         inner: Some(sequencer::edge_sequencer_request::Inner::Place(place)),
@@ -202,9 +203,10 @@ pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError>
         }),
         Some(sequencer::node_response::Inner::Signing(_)) => Ok(NodeResponseKind::Signing),
         Some(sequencer::node_response::Inner::OpenOrdersSnapshot(_))
-        | Some(sequencer::node_response::Inner::OrderHistorySnapshot(_)) => {
-            Ok(NodeResponseKind::Unknown)
-        }
+        | Some(sequencer::node_response::Inner::OrderHistorySnapshot(_))
+        | Some(sequencer::node_response::Inner::FillShareResponse(_))
+        | Some(sequencer::node_response::Inner::NodeReady(_))
+        | Some(sequencer::node_response::Inner::CatchupApplied(_)) => Ok(NodeResponseKind::Unknown),
         None => Ok(NodeResponseKind::Unknown),
     }
 }
@@ -398,6 +400,11 @@ pub fn parse_sequencer_to_edge_message(data: &[u8]) -> Result<EdgeMessage, Godar
         }
         Some(sequencer::sequencer_to_edge_message::Inner::SettlementUpdate(s)) => {
             Ok(EdgeMessage::SettlementUpdate(parse_settlement_update(s)))
+        }
+        Some(sequencer::sequencer_to_edge_message::Inner::OrderHistoryInsert(_))
+        | Some(sequencer::sequencer_to_edge_message::Inner::OpenInterestUpdate(_))
+        | Some(sequencer::sequencer_to_edge_message::Inner::VolumeUpdate(_)) => {
+            Ok(EdgeMessage::Unknown)
         }
         None => Ok(EdgeMessage::Unknown),
     }

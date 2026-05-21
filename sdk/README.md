@@ -4,18 +4,23 @@ Encrypted Rust client for the GoDark DEX.
 
 ## Quickstart
 
-**From the `gdx` meta-repo** (recommended): clone `gdx` with `--recurse-submodules`. This SDK
-lives at `gdx-sdk/gdx-rust-sdk/`; `gdx-proto` is a symlink to the umbrella's `gdx-proto` submodule.
-
-**Standalone clone:**
+**Standalone clone (recommended):** `gdx-proto` is tracked as a git submodule
+pinned to a specific commit on `v1/devnet` (see `.gitmodules`), matching the
+python / java / cpp SDKs. Clone recursively so the submodule populates:
 
 ```bash
-git clone <repo-url> gdx-rust-sdk
+git clone --recurse-submodules <repo-url> gdx-rust-sdk
 cd gdx-rust-sdk
-rm gdx-proto && git clone https://github.com/gq-godark/gdx-proto.git gdx-proto
 cargo build --all-targets
 cargo test
 ```
+
+If you already cloned without `--recurse-submodules`, run
+`git submodule update --init --recursive` once to populate `gdx-proto/`.
+
+**From the `gdx` meta-repo:** the umbrella also pins `gdx-proto` as a
+submodule; cloning `gdx` with `--recurse-submodules` will fetch the same
+proto tree into both `gdx-proto/` and any sibling SDK.
 
 ## WebSocket endpoints
 
@@ -41,7 +46,7 @@ which suffix the caller supplied.
 - `examples/`    — runnable examples (`local_e2e.rs`, `full_trader_example.rs`)
 - `build.rs`      — prost-build hook; reads .proto from `gdx-proto/proto/`
 - `shared/`       — vendored symbol map (compiled into the crate via `include_str!`)
-- `gdx-proto/`    — symlink to umbrella `gdx-proto` in the meta-repo, or a clone when standalone
+- `gdx-proto/`    — git submodule pinned to a specific commit on `v1/devnet` (see `.gitmodules`)
 
 ## Testing
 

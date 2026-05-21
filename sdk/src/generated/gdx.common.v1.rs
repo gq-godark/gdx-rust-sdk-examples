@@ -114,6 +114,40 @@ impl TimeInForce {
         }
     }
 }
+/// Self-trade prevention policy for an order. Same-user detection uses
+/// `user_commitment`; `STP_MODE_UNSPECIFIED` maps to cancel-resting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum StpMode {
+    Unspecified = 0,
+    CancelResting = 1,
+    CancelAggressor = 2,
+    CancelBoth = 3,
+}
+impl StpMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "STP_MODE_UNSPECIFIED",
+            Self::CancelResting => "STP_MODE_CANCEL_RESTING",
+            Self::CancelAggressor => "STP_MODE_CANCEL_AGGRESSOR",
+            Self::CancelBoth => "STP_MODE_CANCEL_BOTH",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "STP_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "STP_MODE_CANCEL_RESTING" => Some(Self::CancelResting),
+            "STP_MODE_CANCEL_AGGRESSOR" => Some(Self::CancelAggressor),
+            "STP_MODE_CANCEL_BOTH" => Some(Self::CancelBoth),
+            _ => None,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum OrderStatus {
