@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MM bundle packager - Linux x86_64 zip distribution, built strictly from
+# MM bundle packager - release zip distribution, built strictly from
 # the pinned upstream gdx-rust-sdk commit recorded in sdk/UPSTREAM_REF.
 #
 # What this script does:
@@ -16,19 +16,15 @@
 #      rest_client.rs, rest_transport.rs). Drift here means somebody
 #      hand-edited the vendored copy or forgot to bump UPSTREAM_REF after a
 #      refresh - fail loudly.
-#   5. Builds release binaries via `cargo build --release --examples`. The
-#      parity check above guarantees vendored sdk/ is bit-equal to upstream/
-#      src/ for every file actually compiled, so the resulting binaries are
-#      reproducible from the public upstream pin.
-#   6. Stages the binaries + example sources + vendored sdk/ + a top-level
-#      Cargo.toml + recipient docs from bundle/, then zips them. Recipients
-#      can either run the prebuilt binaries directly (no toolchain needed)
-#      or `cargo build --release --examples` from the unzipped bundle.
+#   5. Smoke-builds release examples via `cargo build --release --examples`.
+#      The parity check above guarantees vendored sdk/ is bit-equal to upstream/
+#      src/ for every file actually compiled.
+#   6. Stages example sources + vendored sdk/ + a top-level Cargo.toml +
+#      recipient docs from bundle/, then zips them. Recipients build with
+#      `cargo build --release --examples` from the unzipped bundle.
 #
 # Output layout:
 #   <DIST_NAME>/
-#   |-- quickstart                 (prebuilt static-ish ELF, x86_64 Linux)
-#   |-- full_trader_example        (prebuilt)
 #   |-- Cargo.toml                 (workspace manifest; godark = { path = "sdk" })
 #   |-- .env.example
 #   |-- README.md                  (from bundle/README.md)
@@ -39,12 +35,11 @@
 #   |   `-- dotenv.rs
 #   `-- sdk/
 #       |-- Cargo.toml             (godark crate manifest)
-#       |-- README.md
 #       |-- shared/symbols.json
 #       `-- src/                   (godark crate source incl. pre-generated proto)
 #
 # Usage:
-#   bash scripts/package.sh                              # default: godark-rust-sdk-linux-x86_64.zip
+#   bash scripts/package.sh                              # default: godark-rust-sdk.zip
 #   bash scripts/package.sh my-release-name
 #   UPSTREAM_SRC=/path/to/gdx-rust-sdk bash scripts/package.sh
 set -euo pipefail
@@ -53,7 +48,7 @@ UPSTREAM_REPO="gq-godark/gdx-rust-sdk"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DIST_NAME="${1:-godark-rust-sdk-linux-x86_64}"
+DIST_NAME="${1:-godark-rust-sdk}"
 
 cd "$REPO_ROOT"
 
@@ -69,7 +64,7 @@ if [[ -z "$PINNED_REF" ]]; then
 fi
 
 for required in bundle/README.md bundle/SDK_REFERENCE.md bundle/Cargo.toml \
-                bundle/sdk/README.md .env.example \
+                .env.example \
                 examples/quickstart.rs examples/full_trader_example.rs examples/dotenv.rs; do
   if [[ ! -f "${REPO_ROOT}/${required}" ]]; then
     echo "error: required source file missing: ${required}" >&2
@@ -177,21 +172,20 @@ rm -f "$EXPECTED_LIB_RS"
 
 echo "Parity check passed: sdk/src/ matches $UPSTREAM_SRC/src/ (lib.rs trim verified)"
 
-# ---- build release binaries ----------------------------------------------
+# ---- smoke-build release examples ----------------------------------------
 # Build from the vendored sdk/ tree (parity check above guarantees it is
 # byte-identical to $UPSTREAM_SRC/src for every file the workspace
 # actually compiles). This keeps the build hermetic - no `protoc` required,
 # no `build.rs` invocation - because the vendored Cargo.toml has its
-# [build-dependencies] stripped by refresh_sdk.sh.
-echo "Building release binaries (quickstart + full_trader_example)..."
+# [build-dependencies] stripped by refresh_sdk.sh. Binaries are not shipped;
+# this step verifies the bundle is build-complete before zipping.
+echo "Smoke-building release examples (quickstart + full_trader_example)..."
 cargo build --release --examples --quiet
 
-QUICKSTART_BIN="$REPO_ROOT/target/release/examples/quickstart"
-FULL_TRADER_BIN="$REPO_ROOT/target/release/examples/full_trader_example"
-
-for bin in "$QUICKSTART_BIN" "$FULL_TRADER_BIN"; do
-  if [[ ! -x "$bin" ]]; then
-    echo "error: expected binary missing or non-executable: $bin" >&2
+for bin in quickstart full_trader_example; do
+  built="$REPO_ROOT/target/release/examples/$bin"
+  if [[ ! -x "$built" ]]; then
+    echo "error: expected example binary missing or non-executable: $built" >&2
     exit 1
   fi
 done
@@ -203,12 +197,6 @@ mkdir -p "$DEST"
 
 echo "Staging distribution at $DEST ..."
 mkdir -p "$DEST/examples" "$DEST/sdk"
-
-# Prebuilt binaries — recipients can run these directly without a Rust
-# toolchain. Built above against vendored sdk/, which the parity check
-# above guarantees is bit-equal to $UPSTREAM_SRC/src.
-cp "$QUICKSTART_BIN"                          "$DEST/quickstart"
-cp "$FULL_TRADER_BIN"                         "$DEST/full_trader_example"
 
 # MM-facing docs come from bundle/, never from the repo-root copies.
 cp "${REPO_ROOT}/.env.example"                "$DEST/.env.example"
@@ -227,7 +215,6 @@ cp "${REPO_ROOT}/examples/dotenv.rs"               "$DEST/examples/"
 # Bundled godark crate — copied from $REPO_ROOT/sdk/ after parity check.
 cp "${REPO_ROOT}/sdk/Cargo.toml"              "$DEST/sdk/Cargo.toml"
 cp -r "${REPO_ROOT}/sdk/src"                  "$DEST/sdk/src"
-cp "${REPO_ROOT}/bundle/sdk/README.md"        "$DEST/sdk/README.md"
 if [[ -d "${REPO_ROOT}/sdk/shared" ]]; then
   cp -r "${REPO_ROOT}/sdk/shared"             "$DEST/sdk/shared"
 fi
@@ -296,6 +283,7 @@ text = re.sub(
     text,
 )
 text = re.sub(r'^repository = .*$\n', '', text, flags=re.M)
+text = re.sub(r'^readme = .*$\n', '', text, flags=re.M)
 p.write_text(text)
 PY
 
@@ -321,8 +309,6 @@ if echo "$LISTING" | grep -E "${DIST_NAME}/(scripts|target|bundle|\.git)/" >/dev
 fi
 # Every required path must be present.
 for required in \
-  "${DIST_NAME}/quickstart" \
-  "${DIST_NAME}/full_trader_example" \
   "${DIST_NAME}/README\\.md" \
   "${DIST_NAME}/SDK_REFERENCE\\.md" \
   "${DIST_NAME}/Cargo\\.toml" \
@@ -347,6 +333,10 @@ if echo "$LISTING" | grep -E "${DIST_NAME}/\\.env$" >/dev/null; then
 fi
 if echo "$LISTING" | grep -E "${DIST_NAME}/sdk/UPSTREAM_REF$" >/dev/null; then
   echo "error: bundle contains sdk/UPSTREAM_REF — maintainer metadata must not ship" >&2
+  exit 1
+fi
+if echo "$LISTING" | grep -E "${DIST_NAME}/sdk/README\\.md$" >/dev/null; then
+  echo "error: bundle contains sdk/README.md — recipient docs belong at bundle root only" >&2
   exit 1
 fi
 

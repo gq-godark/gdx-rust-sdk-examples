@@ -3,13 +3,12 @@
 This repository is a market-maker-facing distribution for GoDark's Rust SDK.
 It includes:
 
-- **pre-built example binaries** (`quickstart` + `full_trader_example`)
-  shipped in a Linux x86_64 `.zip` release — no `cargo build` and no
-  `protoc` required to run the examples
 - the full **`godark` SDK source vendored under `sdk/`** for the local dev
   loop — no private crates registry required, no `protoc` required
   (pre-generated protobuf bindings ship with the SDK under
   `sdk/src/generated/`)
+- **example sources** (`quickstart` + `full_trader_example`) shipped in a
+  `.zip` release — recipients build with `cargo build`
 - a simple **`.env`** workflow (no shell `export` required)
 
 Third-party crates (`tokio`, `prost`, `serde`, `reqwest`, …) are still
@@ -20,11 +19,10 @@ fetched from **crates.io** when you `cargo build` from source — only the
 
 | Item | Requirement |
 |------|-------------|
-| Rust | ≥ 1.79 (`rustup install stable`) (only needed for the dev loop / source build; not needed to run the released binaries) |
-| OS | Linux x86_64 recommended (matches the published release zip) |
+| Rust | ≥ 1.79 (`rustup install stable`) |
+| OS | any platform Rust supports (Linux, macOS, Windows; amd64, arm64, …) |
 
-Released zips ship statically-linked binaries; no toolchain is required to
-run them. From a git clone, install the toolchain once:
+Install the toolchain once:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
@@ -63,27 +61,21 @@ The OS environment always wins over `.env`.
 
 ### From a released ZIP (recommended for MMs)
 
-Download the latest `gdx-rust-sdk-*-linux-x86_64.zip` from
+Download the latest `godark-rust-sdk-*.zip` from
 [GitHub Releases](https://github.com/gq-godark/gdx-rust-sdk-examples/releases)
-and unzip it. The bundle contains the prebuilt `quickstart` and
-`full_trader_example` binaries, the example sources under `examples/`, the
+and unzip it. The bundle contains the example sources under `examples/`, the
 vendored `godark` crate under `sdk/`, and a top-level `Cargo.toml` so
-recipients can either run the prebuilt binaries directly or rebuild from
-the included sources.
+recipients build with `cargo build --release --examples`.
 
 ```bash
-unzip gdx-rust-sdk-*-linux-x86_64.zip
-cd gdx-rust-sdk-*/
+unzip godark-rust-sdk-*.zip
+cd godark-rust-sdk-*/
 cp .env.example .env
 # fill in GODARK_API_KEY_ID, GODARK_API_SECRET
 
-# Option A — run the prebuilt binaries (no toolchain needed):
-./quickstart
-./full_trader_example
-
-# Option B — rebuild from sources (requires Rust stable):
 cargo build --release --examples
 ./target/release/examples/quickstart
+./target/release/examples/full_trader_example
 ```
 
 The bundled `Cargo.toml` wires `godark = { path = "sdk" }`, so `cargo`
@@ -126,16 +118,15 @@ Build a release zip locally:
 ./scripts/package.sh
 
 # Or explicitly point at an upstream checkout:
-UPSTREAM_SRC=/path/to/gdx-rust-sdk ./scripts/package.sh gdx-rust-sdk-vX.Y.Z-linux-x86_64
+UPSTREAM_SRC=/path/to/gdx-rust-sdk ./scripts/package.sh godark-rust-sdk-vX.Y.Z
 ```
 
 Output lands in the repo root as
-`gdx-rust-sdk-<bundle>-linux-x86_64.zip`. The zip includes:
+`godark-rust-sdk-<bundle>.zip`. The zip includes:
 
-- `quickstart` + `full_trader_example` — pre-built statically-ish-linked binaries
 - `Cargo.toml` — workspace manifest (`godark = { path = "sdk" }`) for source builds
 - `examples/*.rs` — example source files (`quickstart.rs`, `full_trader_example.rs`, `dotenv.rs`)
-- `sdk/` — vendored `godark` crate source + `sdk/UPSTREAM_REF` pin marker
+- `sdk/` — bundled `godark` crate source
 - `README.md`, `SDK_REFERENCE.md` — recipient-facing docs from `bundle/`
 - `.env.example` — credential template
 
@@ -155,18 +146,16 @@ leak into a release. Every release build:
    and **fails loudly** if they differ. Once this passes, the vendored
    `sdk/` is byte-equal to upstream for every file the workspace compiles,
    so building against `sdk/` is equivalent to building against `upstream/`.
-4. Builds the binaries via `cargo build --release --examples` against
+4. Smoke-builds the examples via `cargo build --release --examples` against
    the parity-verified `sdk/`.
-5. Stages the prebuilt binaries plus the parity-verified `sdk/`, the
-   example sources, the workspace `Cargo.toml`, and `sdk/UPSTREAM_REF`
-   into the recipient zip — so recipients can either run the binaries
-   directly or `cargo build` from the same vendored crate the binaries
-   were built against.
+5. Stages the parity-verified `sdk/`, the example sources, the workspace
+   `Cargo.toml`, and recipient docs into the zip — recipients build with
+   `cargo build --release --examples` from the unzipped bundle.
 
 The source of truth for what ships is always
 `gdx-rust-sdk@<sdk/UPSTREAM_REF>`.
 
-CI publishes a tagged `gdx-rust-sdk-*-linux-x86_64.zip` on every push to
+CI publishes a tagged `godark-rust-sdk-*.zip` on every push to
 `main` via `.github/workflows/release.yml`; download from
 [GitHub Releases](https://github.com/gq-godark/gdx-rust-sdk-examples/releases).
 

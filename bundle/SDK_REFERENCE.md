@@ -1,7 +1,7 @@
 # GoDark Rust SDK Reference (MM Distribution)
 
-This reference describes the API surface used by the two prebuilt examples
-shipped in this distribution. The examples use WebSocket encrypted trading
+This reference describes the API surface used by the two examples shipped in
+this distribution. The examples use WebSocket encrypted trading
 via `godark::GodarkClient`. REST and standalone market-data surfaces are
 intentionally excluded.
 
@@ -159,15 +159,14 @@ MM distribution supports placing only `Market` and `Limit` orders.
 
 ## Example files in this distribution
 
-| File | Built binary | Purpose |
-|------|--------------|---------|
-| `examples/quickstart.rs` | `./quickstart` | Minimal connect, place, cancel |
-| `examples/full_trader_example.rs` | `./full_trader_example` | Reference bot flow with all 6 push callbacks (positions snapshot, system health, balance, margin, funding rate, settlement) |
-| `examples/dotenv.rs` | (helper) | Shared `.env` loader and symbolic-error printer used by both example mains |
+| File | Purpose |
+|------|---------|
+| `examples/quickstart.rs` | Minimal connect, place, cancel |
+| `examples/full_trader_example.rs` | Reference bot flow with all 6 push callbacks (positions snapshot, system health, balance, margin, funding rate, settlement) |
+| `examples/dotenv.rs` | Shared `.env` loader and symbolic-error printer used by both example mains |
 
-Both prebuilt binaries are Linux x86_64 ELFs built against the bundled
-`sdk/`. To rebuild from the included sources, run
-`cargo build --release --examples` from the bundle root.
+Build from the bundle root with `cargo build --release --examples`. Binaries
+land in `target/release/examples/`.
 
 ## Cargo integration (your own bot)
 

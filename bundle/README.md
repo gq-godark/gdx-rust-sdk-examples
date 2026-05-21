@@ -7,7 +7,6 @@ Supported order types in this distribution: `MARKET`, `LIMIT`.
 
 ## Package contents
 
-- `quickstart`, `full_trader_example` — prebuilt Linux x86_64 binaries
 - `examples/` — `quickstart.rs`, `full_trader_example.rs`, `dotenv.rs`
 - `sdk/` — bundled `godark` crate
 - `Cargo.toml` — workspace manifest for `cargo build --release --examples`
@@ -16,24 +15,11 @@ Supported order types in this distribution: `MARKET`, `LIMIT`.
 
 ## 1) Prerequisites
 
-To **run the prebuilt binaries**, you only need the Linux runtime libs:
-
-| Item        | Requirement                                                                   |
-|-------------|-------------------------------------------------------------------------------|
-| OS / arch   | Linux x86_64 (built on Ubuntu, glibc ≥ 2.18)                                  |
-| TLS runtime | `libssl.so.3` + `libcrypto.so.3` (`apt install libssl3` on Debian/Ubuntu)     |
-| Other       | `libstdc++` / `libgcc_s` / `libm` / `libc` (standard system libraries)        |
-
-To **rebuild from source** (or build your own bot against the bundled
-`sdk/`), additionally install:
-
-| Item        | Requirement                                                                   |
-|-------------|-------------------------------------------------------------------------------|
-| Rust        | stable ≥ 1.79 (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh -s -- -y --default-toolchain stable`) |
-| Network     | `crates.io` access for runtime deps; `godark` is bundled in `sdk/` |
-
-> **macOS / Windows / aarch64?** Use the source build path:
-> `cargo build --release --examples`.
+| Item    | Requirement                                                                       |
+|---------|-----------------------------------------------------------------------------------|
+| OS / arch | any platform Rust supports (Linux, macOS, Windows; amd64, arm64, …)              |
+| Rust    | stable ≥ 1.79 (`https://rustup.rs/`)                                              |
+| Network | `crates.io` access for runtime deps; `godark` is bundled in `sdk/`                |
 
 ## 2) Create testnet credentials
 
@@ -61,28 +47,23 @@ Optional override:
 
 The OS environment always wins over `.env`.
 
-## 4) Run quickstart
+## 4) Build and run the examples
 
-Run the prebuilt binary directly:
+From inside the unzipped bundle:
 
 ```bash
-./quickstart
+cargo build --release --example quickstart
+cargo build --release --example full_trader_example
 ```
 
-Or the full trader example:
+Then run either binary:
 
 ```bash
-./full_trader_example
-```
-
-To rebuild from the included sources instead (e.g. on a non-Linux host or
-after editing `examples/*.rs`):
-
-```bash
-cargo build --release --examples
 ./target/release/examples/quickstart
 ./target/release/examples/full_trader_example
 ```
+
+The bundled `Cargo.toml` resolves `godark` from `./sdk`.
 
 ## Cargo integration (your own bot)
 
@@ -108,8 +89,6 @@ async fn main() -> Result<(), GodarkError> {
     let _ = dotenvy::dotenv();
 
     let config = GodarkClient::builder()
-        .base_url(std::env::var("GODARK_EDGE_URL")
-            .unwrap_or_else(|_| "wss://api.godark-dex.com".into()))
         .api_key_id(std::env::var("GODARK_API_KEY_ID").expect("GODARK_API_KEY_ID"))
         .api_secret(std::env::var("GODARK_API_SECRET").expect("GODARK_API_SECRET"))
         .build()?;

@@ -16,16 +16,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # build: pre-built example binaries packaged into a Linux x86_64 zip.
-  # Binaries come from a fresh checkout of gq-godark/gdx-rust-sdk at the
-  # commit pinned in sdk/UPSTREAM_REF; scripts/package.sh parity-checks the
-  # vendored sdk/ against that upstream so local edits cannot leak into the
-  # released artifact.
+  # build: source bundle packaged into a release zip.
+  # scripts/package.sh parity-checks the vendored sdk/ against a fresh
+  # checkout of gq-godark/gdx-rust-sdk at sdk/UPSTREAM_REF so local edits
+  # cannot leak into the released artifact.
   #
   # Required secrets: GDX_APP_ID + GDX_APP_PRIVATE_KEY (godark-ci App with
   # contents:read on gdx-rust-sdk).
   build:
-    name: Build Linux x86_64 zip
+    name: Build release zip
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -101,7 +100,7 @@ jobs:
             exit 1
           fi
           version="v${base}-build.${{ github.run_number }}"
-          bundle_name="godark-rust-sdk-${version}-linux-x86_64"
+          bundle_name="godark-rust-sdk-${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "bundle_name=${bundle_name}" >> "$GITHUB_OUTPUT"
           echo "Building ${bundle_name}.zip (godark==${base} from upstream pin ${{ steps.pin.outputs.ref }})"
@@ -111,47 +110,14 @@ jobs:
           UPSTREAM_SRC: ${{ github.workspace }}/upstream
         run: bash scripts/package.sh ${{ steps.ver.outputs.bundle_name }}
 
-      - name: Recipient smoke — prebuilt binaries (file + ldd)
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/recip
-          unzip -q ${{ steps.ver.outputs.bundle_name }}.zip -d /tmp/recip
-          cd /tmp/recip/${{ steps.ver.outputs.bundle_name }}
-
-          echo "=== file ==="
-          file ./quickstart
-          file ./full_trader_example
-
-          echo "=== ldd ==="
-          ldd ./quickstart
-          ldd ./full_trader_example
-
-          # Verify both binaries are ELF Linux x86_64 and have no unresolved
-          # dynamic dependencies. Recipients only need standard system libs
-          # (libssl, libcrypto, libstdc++, libgcc_s, libm, libc, ld-linux).
-          for bin in ./quickstart ./full_trader_example; do
-            if ! file "$bin" | grep -E 'ELF 64-bit LSB .*x86-64' >/dev/null; then
-              echo "::error::$bin is not an ELF 64-bit Linux x86_64 binary"
-              exit 1
-            fi
-            if ldd "$bin" 2>&1 | grep -E '(not found|missing)' >/dev/null; then
-              echo "::error::$bin has unresolved dynamic dependencies"
-              ldd "$bin"
-              exit 1
-            fi
-          done
-
-          echo "Smoke OK: both binaries are well-formed Linux x86_64 ELFs with resolvable deps."
-
       - name: Recipient smoke — cargo build from sources in the zip
         run: |
           # Verifies the bundle is "build-complete": a recipient with only
-          # the unzipped contents and a stable Rust toolchain can rebuild
+          # the unzipped contents and a stable Rust toolchain can build
           # both example binaries against the included sdk/ vendored crate.
-          # This is the path documented in bundle/README.md as "build from
-          # source", and in bundle/SDK_REFERENCE.md's Cargo integration
-          # snippet (`godark = { path = "sdk" }`).
           set -euo pipefail
+          mkdir -p /tmp/recip
+          unzip -q ${{ steps.ver.outputs.bundle_name }}.zip -d /tmp/recip
           cd /tmp/recip/${{ steps.ver.outputs.bundle_name }}
 
           # Run in a clean target/ so we don't pick up the workspace cache.
@@ -163,11 +129,15 @@ jobs:
           # the bundle's vendored sdk/.
           cargo build --release --examples --quiet
 
-          # Sanity: the cargo-built binaries should be drop-in equivalents
-          # of the prebuilt ones the bundle ships.
-          file "$CARGO_TARGET_DIR/release/examples/quickstart"
-          file "$CARGO_TARGET_DIR/release/examples/full_trader_example"
-          echo "Source-build smoke OK: bundle rebuilds cleanly against bundled sdk/."
+          for bin in quickstart full_trader_example; do
+            built="$CARGO_TARGET_DIR/release/examples/$bin"
+            if [[ ! -x "$built" ]]; then
+              echo "::error::expected example binary missing: $built"
+              exit 1
+            fi
+            file "$built"
+          done
+          echo "Recipient smoke OK: bundle builds cleanly against bundled sdk/."
 
       - name: Upload zip as workflow artifact
         uses: actions/upload-artifact@v4
@@ -210,8 +180,8 @@ jobs:
           body: |
             **Automated release** built from commit `${{ github.sha }}`.
 
-            Prebuilt Linux x86_64 example binaries plus the bundled `godark`
-            crate source for the GoDark Rust SDK.
+            Bundled `godark` crate source and example sources for the GoDark
+            Rust SDK.
 
             ## Install
 
@@ -223,7 +193,8 @@ jobs:
                unzip ${{ needs.build.outputs.bundle_name }}.zip
                cd ${{ needs.build.outputs.bundle_name }}
                cp .env.example .env   # then fill in your testnet creds
-               ./quickstart
+               cargo build --release --examples
+               ./target/release/examples/quickstart
                ```
 
             See `README.md` and `SDK_REFERENCE.md` inside the bundle for the
