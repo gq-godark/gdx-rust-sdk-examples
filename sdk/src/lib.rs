@@ -18,6 +18,8 @@ pub mod pb {
 }
 pub mod order_error_code;
 pub mod proto_bridge;
+pub mod rest_client;
+pub mod rest_transport;
 pub mod session;
 pub mod transport;
 pub mod types;
@@ -30,8 +32,9 @@ pub use enums::{
 };
 pub use error::GodarkError;
 pub use order_error_code::{find as find_order_error, OrderErrorEntry, ORDER_ERROR_CODES};
+pub use rest_client::{GodarkRestClient, GodarkRestClientBuilder};
 pub use types::{
-    BalanceUpdate, FundingRateUpdate, MarginAlert, OrderAck, OrderUpdate, PositionRow,
+    Balance, BalanceUpdate, FundingRateUpdate, MarginAlert, MeProfile, OrderAck, OrderUpdate, PositionRow,
     PositionUpdate, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
     SettlementBatchStatus, SettlementUpdate, SystemHealthUpdate,
 };

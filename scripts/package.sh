@@ -12,10 +12,9 @@
 #          (requires `gh` or `git`, plus auth for the private repo).
 #   3. Verifies the resolved upstream is at exactly the pinned ref.
 #   4. Parity check: vendored sdk/src/ must match $UPSTREAM_SRC/src/
-#      (excluding files refresh_sdk.sh deliberately drops: market_data.rs,
-#      rest_client.rs, rest_transport.rs). Drift here means somebody
-#      hand-edited the vendored copy or forgot to bump UPSTREAM_REF after a
-#      refresh - fail loudly.
+#      (excluding files refresh_sdk.sh deliberately drops: market_data.rs).
+#      Drift here means somebody hand-edited the vendored copy or forgot to
+#      bump UPSTREAM_REF after a refresh - fail loudly.
 #   5. Smoke-builds release examples via `cargo build --release --examples`.
 #      The parity check above guarantees vendored sdk/ is bit-equal to upstream/
 #      src/ for every file actually compiled.
@@ -134,8 +133,6 @@ echo "Upstream verified at pin: $PINNED_REF ($upstream_head_sha)"
 # below against a re-derived trim so non-trim edits still fail parity).
 PARITY_EXCLUDES=(
   --exclude='market_data.rs'
-  --exclude='rest_client.rs'
-  --exclude='rest_transport.rs'
   --exclude='lib.rs'
 )
 if ! diff -r --brief "${PARITY_EXCLUDES[@]}" \
@@ -154,7 +151,7 @@ EXPECTED_LIB_RS="$(mktemp)"
 python3 - "$UPSTREAM_SRC/src/lib.rs" > "$EXPECTED_LIB_RS" <<'PY'
 import re, sys, pathlib
 text = pathlib.Path(sys.argv[1]).read_text()
-for mod in ("market_data", "rest_client", "rest_transport"):
+for mod in ("market_data",):
     text = re.sub(rf"^pub mod {mod};\s*\n", "", text, flags=re.M)
     text = re.sub(rf"^pub use {mod}::[^;]+;\s*\n", "", text, flags=re.M)
 sys.stdout.write(text)

@@ -67,6 +67,74 @@ pub struct PositionUpdate {
     pub timestamp: u64,
 }
 
+/// User profile returned by `GET /api/v1/auth/me`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeProfile {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub dynamic_user_id: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub wallet_address: String,
+    #[serde(default)]
+    pub referral_code: String,
+    #[serde(default)]
+    pub tier: String,
+}
+
+/// On-chain balance snapshot from `GET /api/v1/shielded-pool/balances/{owner}`.
+///
+/// The wire format uses camelCase keys; raw u64 amounts arrive as JSON strings
+/// to avoid precision loss in JavaScript clients.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Balance {
+    #[serde(deserialize_with = "deserialize_string_u64")]
+    pub wallet_usdt_raw: u64,
+    #[serde(deserialize_with = "deserialize_string_u64")]
+    pub pending_deposits_raw: u64,
+    #[serde(deserialize_with = "deserialize_string_u64")]
+    pub shielded_balance_raw: u64,
+    pub wallet_usdt_ui: f64,
+}
+
+fn deserialize_string_u64<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringU64Visitor;
+
+    impl<'de> de::Visitor<'de> for StringU64Visitor {
+        type Value = u64;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a u64 as a string or number")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<u64, E> {
+            Ok(v)
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<u64, E> {
+            u64::try_from(v).map_err(|_| E::custom("negative value"))
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> std::result::Result<u64, E> {
+            Ok(v as u64)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<u64, E> {
+            v.parse::<u64>().map_err(de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_any(StringU64Visitor)
+}
+
 /// Why a [`PositionsSnapshot`] was emitted by the sequencer.
 ///
 /// Mirrors `gdx.common.v1.PositionsSnapshotSource`.

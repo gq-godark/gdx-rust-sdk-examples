@@ -65,8 +65,7 @@ mkdir -p "$DEST"
 #   - examples/, tests/, scripts/, deny.toml    (SDK-internal tooling)
 #   - CHANGELOG.md, .gitignore, .gitkeep        (not relevant to consumers)
 #   - build.rs, gdx-proto/                      (consumer uses pre-generated bindings)
-#   - src/market_data.rs, src/rest_client.rs,   (REST + gomarket WS surfaces are
-#     src/rest_transport.rs                     not used by either MM example)
+#   - src/market_data.rs                        (gomarket WS surface not used by MM examples)
 rsync -a \
   --exclude='target/' \
   --exclude='.git/' \
@@ -82,15 +81,12 @@ rsync -a \
   --exclude='gdx-proto' \
   --exclude='build.rs' \
   --exclude='src/market_data.rs' \
-  --exclude='src/rest_client.rs' \
-  --exclude='src/rest_transport.rs' \
   "$SRC/" "$DEST/"
 
 # Strip the SDK's own [[example]] / [dev-dependencies] / [build-dependencies]
-# blocks from the vendored Cargo.toml, drop the `reqwest` line (only the
-# trimmed REST modules used it), and add the autoexamples/autotests/
-# autobenches = false trio under [package]. This matches the layout shipped
-# in this repo.
+# blocks from the vendored Cargo.toml and add the autoexamples/autotests/
+# autobenches = false trio under [package]. Keep reqwest (REST balance in
+# full_trader_example). This matches the layout shipped in this repo.
 python3 - "$DEST/Cargo.toml" <<'PY'
 import re, sys, pathlib
 p = pathlib.Path(sys.argv[1])
@@ -98,7 +94,6 @@ text = p.read_text()
 text = re.sub(r"\n\[build-dependencies\][\s\S]*?(?=\n\[|$)", "", text)
 text = re.sub(r"\n\[dev-dependencies\][\s\S]*?(?=\n\[|$)", "", text)
 text = re.sub(r"\n\[\[example\]\][\s\S]*?(?=\n\[|$)", "", text)
-text = re.sub(r"\nreqwest\s*=.*\n", "\n", text)
 text = text.rstrip() + "\n"
 inject = (
     "# Pre-generated protobuf bindings are committed under `src/generated/`, so\n"
@@ -114,15 +109,15 @@ text = re.sub(r"(\[package\][\s\S]*?)(\n\[)", lambda m: m.group(1).rstrip() + "\
 p.write_text(text)
 PY
 
-# Drop `pub mod market_data/rest_client/rest_transport;` (and their
-# `pub use` re-exports) from lib.rs — the matching .rs files are excluded
-# from the rsync above; leaving the decls in would fail to compile.
-# Idempotent.
+# Drop `pub mod market_data;` (and its re-exports) from lib.rs — the matching
+# .rs file is excluded from the rsync above; leaving the decl in would fail to
+# compile. REST modules (rest_client, rest_transport) are kept for balance
+# pre-flight in full_trader_example.
 python3 - "$DEST/src/lib.rs" <<'PY'
 import re, sys, pathlib
 p = pathlib.Path(sys.argv[1])
 text = p.read_text()
-for mod in ("market_data", "rest_client", "rest_transport"):
+for mod in ("market_data",):
     text = re.sub(rf"^pub mod {mod};\s*\n", "", text, flags=re.M)
     text = re.sub(rf"^pub use {mod}::[^;]+;\s*\n", "", text, flags=re.M)
 p.write_text(text)

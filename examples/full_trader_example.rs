@@ -2,7 +2,8 @@
 //!
 //! Demonstrates:
 //!   1. Load credentials from `.env` / environment
-//!   2. Connect and authenticate (encrypted ECDH session)
+//!   2. REST pre-flight: fetch shielded balance via `get_my_balance`
+//!   3. Connect and authenticate (encrypted ECDH session)
 //!   3. Take receivers for order, position, and all 6 sequencer push streams
 //!   4. Subscribe to the private order + position channels
 //!   5. Place, modify, and cancel `MARKET` / `LIMIT` orders
@@ -17,7 +18,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use godark::{GodarkClient, OrderType, Side, TimeInForce, TransportConfig};
+use godark::{GodarkClient, GodarkRestClient, OrderType, Side, TimeInForce, TransportConfig};
 
 #[path = "dotenv.rs"]
 mod dotenv;
@@ -58,6 +59,31 @@ async fn main() {
         std::env::var("GODARK_EDGE_URL").unwrap_or_else(|_| "wss://api.godark-dex.com".into());
 
     println!("Endpoint: {base_url}");
+
+    let mut rest = match GodarkRestClient::builder()
+        .api_key_id(&api_key_id)
+        .api_secret(&api_secret)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("REST config error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = rest.connect().await {
+        eprintln!("REST connect failed: {e}");
+        std::process::exit(1);
+    }
+    match rest.get_my_balance().await {
+        Ok(bal) => println!("Balance: shielded_raw={}", bal.shielded_balance_raw),
+        Err(e) => {
+            eprintln!("GetMyBalance failed: {e}");
+            let _ = rest.disconnect().await;
+            std::process::exit(1);
+        }
+    }
+    let _ = rest.disconnect().await;
 
     let mut headers = HashMap::new();
     headers.insert("X-Trader-Tag".into(), "rust-full-trader-demo".into());
