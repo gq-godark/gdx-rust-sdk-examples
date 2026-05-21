@@ -57,9 +57,7 @@ Use `.env.example` as the template for your local `.env`.
 ## GodarkClient API
 
 **Crate:** `godark` (statically linked into each example binary in this
-distribution; available on GitHub at
-[`gq-godark/gdx-rust-sdk`](https://github.com/gq-godark/gdx-rust-sdk) for
-your own builds).
+distribution; also available under `sdk/` for path-dependency builds).
 
 ### Core lifecycle
 
@@ -152,8 +150,8 @@ MM distribution supports placing only `Market` and `Limit` orders.
 - `Session(String)`
 - `Order { message: String, error_code: Option<String> }`
   — also carries the symbolic reason (e.g. `"PRICE_DEVIATION_TOO_LARGE"`,
-  `"MARGIN_INSUFFICIENT"`). See the `quickstart` source in the upstream
-  examples repo for the match-and-print pattern.
+  `"MARGIN_INSUFFICIENT"`). See the `quickstart` source for the match-and-print
+  pattern.
 - `Connection(String)`
 - `Encryption(String)`
 - `Timeout(String)`
@@ -168,13 +166,12 @@ MM distribution supports placing only `Market` and `Limit` orders.
 | `examples/dotenv.rs` | (helper) | Shared `.env` loader and symbolic-error printer used by both example mains |
 
 Both prebuilt binaries are Linux x86_64 ELFs built against the bundled
-`sdk/` (whose pin is recorded in `sdk/UPSTREAM_REF`). To rebuild from the
-included sources, run `cargo build --release --examples` from the bundle
-root.
+`sdk/`. To rebuild from the included sources, run
+`cargo build --release --examples` from the bundle root.
 
 ## Cargo integration (your own bot)
 
-The bundle includes a vendored `godark` crate under `sdk/`. Depend on it
+The bundle includes a bundled `godark` crate under `sdk/`. Depend on it
 via a path dependency from your own `Cargo.toml`:
 
 ```toml
@@ -221,16 +218,3 @@ async fn main() -> Result<(), godark::GodarkError> {
     Ok(())
 }
 ```
-
-To pin against the upstream `gdx-rust-sdk` repository directly instead of
-the bundled crate, use the SHA recorded in `sdk/UPSTREAM_REF`:
-
-```toml
-godark = { git = "https://github.com/gq-godark/gdx-rust-sdk.git",
-           rev = "<contents of sdk/UPSTREAM_REF>" }
-```
-
-Note: the upstream-source path requires `protoc` on `$PATH` (`gdx-rust-sdk`
-regenerates protobuf bindings via `prost-build`). The bundled `sdk/` does
-**not** share that requirement because bindings are pre-generated under
-`sdk/src/generated/`.

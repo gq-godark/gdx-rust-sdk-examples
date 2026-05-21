@@ -102,7 +102,7 @@ text = re.sub(r"\nreqwest\s*=.*\n", "\n", text)
 text = text.rstrip() + "\n"
 inject = (
     "# Pre-generated protobuf bindings are committed under `src/generated/`, so\n"
-    "# this vendored copy of `godark` does NOT regenerate them at build time -\n"
+    "# this bundled copy of `godark` does NOT regenerate them at build time -\n"
     "# consumers do not need `protoc` or `prost-build`. Ship only the library\n"
     "# target; the SDK's own examples and integration tests are excluded from\n"
     "# this distribution.\n"

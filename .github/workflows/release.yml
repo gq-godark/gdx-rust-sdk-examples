@@ -101,7 +101,7 @@ jobs:
             exit 1
           fi
           version="v${base}-build.${{ github.run_number }}"
-          bundle_name="gdx-rust-sdk-${version}-linux-x86_64"
+          bundle_name="godark-rust-sdk-${version}-linux-x86_64"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "bundle_name=${bundle_name}" >> "$GITHUB_OUTPUT"
           echo "Building ${bundle_name}.zip (godark==${base} from upstream pin ${{ steps.pin.outputs.ref }})"
@@ -210,8 +210,8 @@ jobs:
           body: |
             **Automated release** built from commit `${{ github.sha }}`.
 
-            Binaries built from upstream `gq-godark/gdx-rust-sdk` at pinned ref
-            `${{ needs.build.outputs.pinned_ref }}`.
+            Prebuilt Linux x86_64 example binaries plus the bundled `godark`
+            crate source for the GoDark Rust SDK.
 
             ## Install
 

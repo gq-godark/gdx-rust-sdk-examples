@@ -38,14 +38,13 @@
 #   |   |-- full_trader_example.rs
 #   |   `-- dotenv.rs
 #   `-- sdk/
-#       |-- UPSTREAM_REF           (the upstream commit the bundle was cut from)
 #       |-- Cargo.toml             (godark crate manifest)
 #       |-- README.md
 #       |-- shared/symbols.json
 #       `-- src/                   (godark crate source incl. pre-generated proto)
 #
 # Usage:
-#   bash scripts/package.sh
+#   bash scripts/package.sh                              # default: godark-rust-sdk-linux-x86_64.zip
 #   bash scripts/package.sh my-release-name
 #   UPSTREAM_SRC=/path/to/gdx-rust-sdk bash scripts/package.sh
 set -euo pipefail
@@ -54,7 +53,7 @@ UPSTREAM_REPO="gq-godark/gdx-rust-sdk"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DIST_NAME="${1:-gdx-rust-sdk-linux-x86_64}"
+DIST_NAME="${1:-godark-rust-sdk-linux-x86_64}"
 
 cd "$REPO_ROOT"
 
@@ -69,7 +68,8 @@ if [[ -z "$PINNED_REF" ]]; then
   exit 1
 fi
 
-for required in bundle/README.md bundle/SDK_REFERENCE.md .env.example \
+for required in bundle/README.md bundle/SDK_REFERENCE.md bundle/Cargo.toml \
+                bundle/sdk/README.md .env.example \
                 examples/quickstart.rs examples/full_trader_example.rs examples/dotenv.rs; do
   if [[ ! -f "${REPO_ROOT}/${required}" ]]; then
     echo "error: required source file missing: ${required}" >&2
@@ -215,10 +215,8 @@ cp "${REPO_ROOT}/.env.example"                "$DEST/.env.example"
 cp "${REPO_ROOT}/bundle/README.md"            "$DEST/README.md"
 cp "${REPO_ROOT}/bundle/SDK_REFERENCE.md"     "$DEST/SDK_REFERENCE.md"
 
-# Top-level Cargo.toml — same shape as the in-repo one (path = "sdk"
-# resolves correctly inside the unzipped bundle). Recipients can run
-# `cargo build --release --examples` against this manifest.
-cp "${REPO_ROOT}/Cargo.toml"                  "$DEST/Cargo.toml"
+# Top-level Cargo.toml — recipient-facing manifest from bundle/.
+cp "${REPO_ROOT}/bundle/Cargo.toml"             "$DEST/Cargo.toml"
 
 # Example sources — recipients can read them and rebuild against the
 # bundled sdk/ for their own bot scaffolding.
@@ -226,24 +224,80 @@ cp "${REPO_ROOT}/examples/quickstart.rs"           "$DEST/examples/"
 cp "${REPO_ROOT}/examples/full_trader_example.rs"  "$DEST/examples/"
 cp "${REPO_ROOT}/examples/dotenv.rs"               "$DEST/examples/"
 
-# Vendored godark crate — copied from $REPO_ROOT/sdk/ which the parity
-# check above already verified matches $UPSTREAM_SRC/src for every file
-# the workspace compiles. The bundle's release contract is preserved
-# because the source of truth (the commit the binaries were built from)
-# is recorded in sdk/UPSTREAM_REF below.
+# Bundled godark crate — copied from $REPO_ROOT/sdk/ after parity check.
 cp "${REPO_ROOT}/sdk/Cargo.toml"              "$DEST/sdk/Cargo.toml"
 cp -r "${REPO_ROOT}/sdk/src"                  "$DEST/sdk/src"
-if [[ -f "${REPO_ROOT}/sdk/README.md" ]]; then
-  cp "${REPO_ROOT}/sdk/README.md"             "$DEST/sdk/README.md"
-fi
+cp "${REPO_ROOT}/bundle/sdk/README.md"        "$DEST/sdk/README.md"
 if [[ -d "${REPO_ROOT}/sdk/shared" ]]; then
   cp -r "${REPO_ROOT}/sdk/shared"             "$DEST/sdk/shared"
 fi
 
-# UPSTREAM_REF marker — pins recipients to the exact upstream commit
-# this bundle was built from, mirroring the java distribution and the
-# cpp distribution.
-printf '%s\n' "$PINNED_REF" > "$DEST/sdk/UPSTREAM_REF"
+# Remove internal maintainer markers from shipped SDK sources (repo copy stays
+# parity-checked against upstream; recipients see cleaned comments only).
+python3 - "$DEST/sdk/src/order_error_code.rs" "$DEST/sdk/src/transport.rs" <<'PY'
+import pathlib, sys
+replacements = [
+    (pathlib.Path(sys.argv[1]), [
+        (
+            "//! Mirror of the canonical `OrderErrorCode` enum from\n"
+            "//! `gdx-protocol/src/order_error.rs` so the Rust SDK can produce informative\n"
+            "//! messages for protobuf-encoded ACK rejections (which carry only a numeric\n"
+            "//! `error_code` on the wire).\n"
+            "//!\n"
+            "//! The protocol crate is internal to the trading core; clients embed this\n"
+            "//! standalone copy so adding a new variant on the sequencer side requires\n"
+            "//! appending a row to [`ORDER_ERROR_CODES`] (preserving numeric codes; the\n"
+            "//! Rust enum in `gdx-protocol` is the source of truth).\n",
+            "//! Mirror of the canonical `OrderErrorCode` enum so the Rust SDK can produce\n"
+            "//! informative messages for protobuf-encoded ACK rejections (which carry only a\n"
+            "//! numeric `error_code` on the wire).\n"
+            "//!\n"
+            "//! Clients embed this standalone copy so adding a new variant on the sequencer\n"
+            "//! side requires appending a row to [`ORDER_ERROR_CODES`] (preserving numeric\n"
+            "//! codes; the canonical protocol schema is the source of truth).\n",
+        ),
+        (
+            "    /// Wire code from `gdx-protocol::OrderErrorCode::raw()`.",
+            "    /// Wire code from the canonical order-error schema.",
+        ),
+        (
+            "/// All canonical order-error codes the sequencer can emit. Keep in sync with\n"
+            "/// `gdx-protocol/src/order_error.rs`.",
+            "/// All canonical order-error codes the sequencer can emit.",
+        ),
+    ]),
+    (pathlib.Path(sys.argv[2]), [
+        (
+            "    // Regression test for the gdx-rust-sdk subscribe race fixed alongside\n"
+            "    // gdx-core PR #203. We",
+            "    // Regression test for the subscribe race fixed alongside core PR #203. We",
+        ),
+    ]),
+]
+for path, pairs in replacements:
+    text = path.read_text()
+    for old, new in pairs:
+        if old not in text:
+            raise SystemExit(f"missing expected text in {path}: {old[:60]!r}...")
+        text = text.replace(old, new, 1)
+    path.write_text(text)
+PY
+python3 - "$DEST/sdk/Cargo.toml" <<'PY'
+import re, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+text = p.read_text()
+text = re.sub(
+    r"# Pre-generated protobuf bindings are committed under `src/generated/`, so\n"
+    r"# this (?:vendored|bundled) copy of `godark` does NOT regenerate them at build time -\n"
+    r"# consumers do not need `protoc` or `prost-build`\. Ship only the library\n"
+    r"# target; the SDK's own examples and integration tests are excluded from\n"
+    r"# this distribution\.\n",
+    "# Pre-generated protobuf bindings ship under `src/generated/`.\n",
+    text,
+)
+text = re.sub(r'^repository = .*$\n', '', text, flags=re.M)
+p.write_text(text)
+PY
 
 # ---- zip ------------------------------------------------------------------
 ARCHIVE="$REPO_ROOT/${DIST_NAME}.zip"
@@ -276,7 +330,6 @@ for required in \
   "${DIST_NAME}/examples/quickstart\\.rs" \
   "${DIST_NAME}/examples/full_trader_example\\.rs" \
   "${DIST_NAME}/examples/dotenv\\.rs" \
-  "${DIST_NAME}/sdk/UPSTREAM_REF" \
   "${DIST_NAME}/sdk/Cargo\\.toml" \
   "${DIST_NAME}/sdk/src/lib\\.rs"; do
   if ! echo "$LISTING" | grep -E "${required}" >/dev/null; then
@@ -287,4 +340,24 @@ done
 
 echo
 echo "bundle-shape assertion: PASSED"
+
+if echo "$LISTING" | grep -E "${DIST_NAME}/\\.env$" >/dev/null; then
+  echo "error: bundle contains .env — ship .env.example only" >&2
+  exit 1
+fi
+if echo "$LISTING" | grep -E "${DIST_NAME}/sdk/UPSTREAM_REF$" >/dev/null; then
+  echo "error: bundle contains sdk/UPSTREAM_REF — maintainer metadata must not ship" >&2
+  exit 1
+fi
+
+# Must NOT leak internal repo names or maintainer markers into the archive.
+if unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -qiE \
+  'gdx-rust-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b|gdx-proto|gdx-protocol'; then
+  echo "error: bundle contains internal repo references or maintainer markers" >&2
+  unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -iE \
+    'gdx-rust-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b|gdx-proto|gdx-protocol' | head -20 >&2 || true
+  exit 1
+fi
+
+echo "leak guard: PASSED"
 echo "built from upstream:    ${UPSTREAM_REPO}@${PINNED_REF} (${upstream_head_sha})"

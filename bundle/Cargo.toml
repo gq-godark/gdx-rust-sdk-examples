@@ -1,0 +1,23 @@
+[package]
+name = "godark-examples"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Minimal GoDark Rust SDK examples for encrypted darkpool trading."
+license = "MIT"
+
+autoexamples = false
+
+[dependencies]
+godark = { path = "sdk" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+dotenvy = "0.15"
+
+[[example]]
+name = "quickstart"
+path = "examples/quickstart.rs"
+
+[[example]]
+name = "full_trader_example"
+path = "examples/full_trader_example.rs"

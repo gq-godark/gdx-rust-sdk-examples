@@ -1,24 +1,16 @@
 # GoDark Rust SDK
 
-This package provides two prebuilt market-maker examples for the GoDark Rust
-SDK, **plus their full source tree and the vendored `godark` crate** so you
-can rebuild the examples or scaffold your own bot directly against the
-shipped sources — no private registry required, no `protoc` required (the
-SDK ships pre-generated protobuf bindings under `sdk/src/generated/`).
+This package provides the GoDark Rust SDK and minimal examples for encrypted
+darkpool trading.
 
 Supported order types in this distribution: `MARKET`, `LIMIT`.
 
 ## Package contents
 
-- `quickstart`, `full_trader_example` — **prebuilt Linux x86_64 binaries** (run
-  these directly with no toolchain installed)
-- `examples/` — example **source files** (`quickstart.rs`,
-  `full_trader_example.rs`, `dotenv.rs`)
-- `sdk/` — **vendored `godark` crate** source (with pre-generated protobuf
-  bindings); `sdk/UPSTREAM_REF` records the upstream commit the binaries
-  were built from
-- `Cargo.toml` — workspace manifest depending on `godark = { path = "sdk" }`,
-  ready for `cargo build --release --examples`
+- `quickstart`, `full_trader_example` — prebuilt Linux x86_64 binaries
+- `examples/` — `quickstart.rs`, `full_trader_example.rs`, `dotenv.rs`
+- `sdk/` — bundled `godark` crate
+- `Cargo.toml` — workspace manifest for `cargo build --release --examples`
 - `README.md`, `SDK_REFERENCE.md` — recipient docs
 - `.env.example` — environment template
 
@@ -38,11 +30,10 @@ To **rebuild from source** (or build your own bot against the bundled
 | Item        | Requirement                                                                   |
 |-------------|-------------------------------------------------------------------------------|
 | Rust        | stable ≥ 1.79 (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh -s -- -y --default-toolchain stable`) |
-| Network     | `crates.io` access for the standard runtime crates (`tokio`, `prost`, `serde`, `reqwest`, …); the `godark` crate itself is bundled |
+| Network     | `crates.io` access for runtime deps; `godark` is bundled in `sdk/` |
 
-> **macOS / Windows / aarch64?** The prebuilt binaries are Linux x86_64 only,
-> but the source-build path works on any platform Rust supports — clone or
-> unzip this bundle and run `cargo build --release --examples`.
+> **macOS / Windows / aarch64?** Use the source build path:
+> `cargo build --release --examples`.
 
 ## 2) Create testnet credentials
 
@@ -93,16 +84,9 @@ cargo build --release --examples
 ./target/release/examples/full_trader_example
 ```
 
-The bundled `Cargo.toml` already wires `godark = { path = "sdk" }`, so the
-build is fully offline-capable for the SDK itself; `cargo` only fetches
-the third-party runtime crates (`tokio`, `prost`, `serde`, `reqwest`, …)
-from `crates.io`.
-
 ## Cargo integration (your own bot)
 
-The bundle includes a vendored `godark` crate under `sdk/`. To build your
-own bot against the same SDK revision, point your `Cargo.toml` at the
-bundled crate via a path dependency:
+Point your `Cargo.toml` at the bundled crate:
 
 ```toml
 # Cargo.toml — your own bot
@@ -152,20 +136,5 @@ async fn main() -> Result<(), GodarkError> {
     Ok(())
 }
 ```
-
-If you'd rather pin against the upstream `gdx-rust-sdk` repository directly
-(useful if you're tracking a moving branch rather than a release pin), the
-bundled `sdk/UPSTREAM_REF` file records the exact commit this distribution
-was built from:
-
-```toml
-godark = { git = "https://github.com/gq-godark/gdx-rust-sdk.git",
-           rev = "<contents of sdk/UPSTREAM_REF>" }
-```
-
-Note: building `gdx-rust-sdk` from upstream source requires `protoc` on
-`$PATH` (the upstream crate regenerates protobuf bindings via
-`prost-build`). The bundled `sdk/` does **not** share that requirement
-because the bindings are pre-generated under `sdk/src/generated/`.
 
 See `SDK_REFERENCE.md` for the full client API.
