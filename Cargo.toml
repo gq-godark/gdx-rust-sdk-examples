@@ -1,58 +1,37 @@
-# gdx-rust-sdk-examples
+# gdx-rust-sdk-examples — feat/v2 (MM distribution)
 #
-# Sample programs that consume the published `godark` crate ONLY. There is
-# *no* git or path dependency on any SDK source tree; configure a Cargo
-# registry (crates.io, or a private registry like Cloudsmith / Artifactory)
-# that publishes the matching `godark` version, then `cargo run --example
-# <name>`.
-#
-# Edit the `godark` version below to match the version your registry
-# publishes — the `gdx-cpp-sdk-examples` analogue is the
-# `godark/0.1.0@gq/stable` line in `conanfile.txt`.
+# Self-contained darkpool trading examples. The `godark` SDK is vendored
+# under `sdk/` (Rust source with pre-generated protobuf bindings already
+# committed under `sdk/src/generated/`), so building this repository
+# requires only the standard Rust toolchain plus the public crates
+# referenced below — no private registry, no `protoc`, no extra system
+# dependencies.
 
 [package]
 name = "gdx-rust-sdk-examples"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Sample programs that consume the published `godark` Rust crate."
+description = "Two MM-facing darkpool trading examples for the GoDark Rust SDK."
 license = "MIT"
 
+# Cargo's auto-discovery would otherwise try to compile the shared
+# `examples/dotenv.rs` helper as its own example binary; the two real
+# examples are listed explicitly in the `[[example]]` blocks below.
+autoexamples = false
+
 [dependencies]
-godark = "0.1"
+# Vendored SDK source (see `sdk/`).
+godark = { path = "sdk" }
 
-# Async runtime + helpers used by the example sources (kept aligned with
-# the SDK's own example deps so the same source files build unchanged).
+# Async runtime + dotenv loader used by both examples.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-serde_json = "1"
-
-# --- Local SDK fallback (for SDK developers only) ----------------------
-#
-# When iterating on the SDK locally, append a [patch.crates-io] section to
-# this file pointing at your in-tree clone, e.g.
-#
-#   [patch.crates-io]
-#   godark = { path = "../new-sdks/gdx-rust-sdk" }
-#
-# Production users do NOT need this — the registry dep above is the only
-# entry point, mirroring the cpp examples that never depend on SDK source.
+dotenvy = "0.15"
 
 [[example]]
 name = "quickstart"
 path = "examples/quickstart.rs"
 
 [[example]]
-name = "e2e_trading_smoke"
-path = "examples/e2e_trading_smoke.rs"
-
-[[example]]
-name = "market_data_example"
-path = "examples/market_data_example.rs"
-
-[[example]]
 name = "full_trader_example"
 path = "examples/full_trader_example.rs"
-
-[[example]]
-name = "full_trader_rest"
-path = "examples/full_trader_rest.rs"

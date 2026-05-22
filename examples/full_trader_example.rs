@@ -1,126 +1,112 @@
-//! GoDark Rust SDK — Complete Trader Example
+//! GoDark Rust SDK — Trader Reference Example
 //!
-//! Mirrors `python/examples/full_trader_example.py` and
-//! `javascript/examples/full-trader-example.ts`:
-//!
-//!   1. Configure transport (TLS, timeouts, headers)
-//!   2. Authenticate with API key pair
-//!   3. Take error / order / position channels
-//!   4. Subscribe to private order + position streams
-//!   5. Stream public market data (orderbook + trades)
-//!   6. Place, modify, and cancel orders
-//!   7. Drain queued order updates via the channel
-//!   8. Clean shutdown
-//!
-//! ## How to run
+//! Demonstrates:
+//!   1. Load credentials from `.env` / environment
+//!   2. REST pre-flight: fetch shielded balance via `get_my_balance`
+//!   3. Connect and authenticate (encrypted ECDH session)
+//!   3. Take receivers for order, position, and all 6 sequencer push streams
+//!   4. Subscribe to the private order + position channels
+//!   5. Place, modify, and cancel `MARKET` / `LIMIT` orders
+//!   6. Drain queued updates between actions
+//!   7. Print a session summary including push-callback counts
+//!   8. Clean disconnect
 //!
 //! ```text
-//! cd gdx/sdks/rust
-//! cargo run --example full_trader_example
+//! cargo run --release --example full_trader_example
 //! ```
-//!
-//! Or with `cargo run --release --example full_trader_example`.
-//!
-//! Prerequisites: gdx-edge listening on **:4000** (e.g. localnet `localnet_edge_1`).
-//!
-//! Override URL or keys with env (optional):
-//!   `GDX_EDGE_URL`, `GDX_API_KEY_ID`, `GDX_API_SECRET`
-//!
-//! Default `base_url` is `wss://api.godark-dex.com` (testnet, matches SDK
-//! default + `full_trader_example.py`); set `GDX_EDGE_URL=ws://localhost:4000`
-//! for localnet.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use godark::{GodarkClient, MarketDataClient, OrderType, Side, TimeInForce, TransportConfig};
-use serde_json::Value;
+use godark::{GodarkClient, GodarkRestClient, OrderType, Side, TimeInForce, TransportConfig};
+
+#[path = "dotenv.rs"]
+mod dotenv;
 
 const SYMBOL: &str = "BTC-USDC-PERP";
 
-const DEFAULT_API_KEY_ID: &str = "YOUR_API_KEY_ID";
-const DEFAULT_API_SECRET: &str = "YOUR_API_SECRET";
+#[tokio::main]
+async fn main() {
+    dotenv::load_dotenv();
 
-fn edge_url() -> String {
-    std::env::var("GDX_EDGE_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("GODARK_EDGE_URL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or_else(|| "wss://api.godark-dex.com".into())
-}
+    let sep = "=".repeat(60);
+    println!("{sep}");
+    println!("  GoDark Rust SDK — Trader Reference Example");
+    println!("{sep}");
+    println!("Order-type support in this distribution: MARKET, LIMIT");
 
-fn api_key_id() -> String {
-    std::env::var("GODARK_API_KEY_ID")
-        .ok()
-        .or_else(|| std::env::var("GDX_API_KEY_ID").ok())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_API_KEY_ID.into())
-}
+    let api_key_id = match std::env::var("GODARK_API_KEY_ID") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            eprintln!(
+                "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
+                 (or provide them in .env)."
+            );
+            std::process::exit(1);
+        }
+    };
+    let api_secret = match std::env::var("GODARK_API_SECRET") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            eprintln!(
+                "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
+                 (or provide them in .env)."
+            );
+            std::process::exit(1);
+        }
+    };
+    let base_url =
+        std::env::var("GODARK_EDGE_URL").unwrap_or_else(|_| "wss://api.godark-dex.com".into());
 
-fn api_secret() -> String {
-    std::env::var("GODARK_API_SECRET")
-        .ok()
-        .or_else(|| std::env::var("GDX_API_SECRET").ok())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_API_SECRET.into())
-}
+    println!("Endpoint: {base_url}");
 
-/// Optional bare static token (e.g. localnet `test-key-1`). Takes precedence
-/// over id/secret when set, mirroring the cpp examples.
-fn api_key_bare() -> Option<String> {
-    std::env::var("GODARK_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("GDX_API_KEY").ok())
-        .filter(|s| !s.trim().is_empty())
-}
+    let mut rest = match GodarkRestClient::builder()
+        .api_key_id(&api_key_id)
+        .api_secret(&api_secret)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("REST config error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = rest.connect().await {
+        eprintln!("REST connect failed: {e}");
+        std::process::exit(1);
+    }
+    match rest.get_my_balance().await {
+        Ok(bal) => println!("Balance: shielded_raw={}", bal.shielded_balance_raw),
+        Err(e) => {
+            eprintln!("GetMyBalance failed: {e}");
+            let _ = rest.disconnect().await;
+            std::process::exit(1);
+        }
+    }
+    let _ = rest.disconnect().await;
 
-fn tls_skip_verify() -> bool {
-    std::env::var("GDX_TLS_SKIP_VERIFY")
-        .or_else(|_| std::env::var("GODARK_TLS_SKIP_VERIFY"))
-        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
-        .unwrap_or(false)
-}
-
-fn transport_config() -> TransportConfig {
     let mut headers = HashMap::new();
     headers.insert("X-Trader-Tag".into(), "rust-full-trader-demo".into());
-    TransportConfig {
+    let transport = TransportConfig {
         extra_headers: headers,
         connect_timeout: Duration::from_secs(10),
         command_timeout: Duration::from_secs(10),
         heartbeat_interval: Duration::from_secs(30),
         stale_timeout: Duration::from_secs(60),
-        tls_skip_verify: tls_skip_verify(),
-        use_docs_wire: true,
-    }
-}
-
-#[tokio::main]
-async fn main() {
-    let sep = "=".repeat(60);
-    println!("{sep}");
-    println!("  GoDark SDK — Complete Trader Example (Rust)");
-    println!("{sep}");
-
-    let url = edge_url();
-
-    let mut builder = GodarkClient::builder()
-        .base_url(&url)
-        .transport(transport_config());
-    builder = if let Some(token) = api_key_bare() {
-        builder.api_key(token)
-    } else {
-        builder.api_key_id(api_key_id()).api_secret(api_secret())
+        ..TransportConfig::default()
     };
-    let config = match builder.build() {
+
+    let config = match GodarkClient::builder()
+        .base_url(&base_url)
+        .api_key_id(api_key_id)
+        .api_secret(api_secret)
+        .transport(transport)
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Config error: {e}");
-            return;
+            std::process::exit(1);
         }
     };
 
@@ -128,30 +114,43 @@ async fn main() {
 
     let mut order_rx = client.take_order_receiver().expect("order receiver");
     let mut position_rx = client.take_position_receiver().expect("position receiver");
+    let mut positions_snapshot_rx = client
+        .take_positions_snapshot_receiver()
+        .expect("positions snapshot receiver");
+    let mut system_health_rx = client
+        .take_system_health_receiver()
+        .expect("system health receiver");
+    let mut balance_rx = client.take_balance_receiver().expect("balance receiver");
+    let mut margin_alert_rx = client
+        .take_margin_alert_receiver()
+        .expect("margin alert receiver");
+    let mut funding_rate_rx = client
+        .take_funding_rate_receiver()
+        .expect("funding rate receiver");
+    let mut settlement_rx = client.take_settlement_receiver().expect("settlement receiver");
     let mut error_rx = client.take_error_receiver().expect("error receiver");
 
-    // ── 1. Connect & authenticate ──────────────────────────────────
     println!("Connecting...");
     if let Err(e) = client.connect().await {
         eprintln!("Failed to connect: {e}");
-        return;
+        std::process::exit(1);
     }
 
-    let uid = client
+    let user = client
         .user_uuid()
         .map(|u| u.to_string())
         .unwrap_or_default();
-    println!("Authenticated as user_uuid={uid}  (session encrypted)");
+    println!("Authenticated as user_uuid={user}  (session encrypted)");
 
-    // ── 2. Subscribe to private channels ───────────────────────────
     if let Err(e) = client.subscribe(&["orders", "positions"]).await {
         eprintln!("Subscribe failed: {e}");
         client.disconnect().await;
-        return;
+        std::process::exit(1);
     }
     println!("Subscribed to order + position updates");
 
-    // Drain any initial position snapshot that arrives immediately.
+    // Drain the initial PositionsSnapshot the sequencer pushes right after the
+    // trading session is established.
     tokio::time::sleep(Duration::from_millis(200)).await;
     while let Ok(pos) = position_rx.try_recv() {
         println!(
@@ -159,51 +158,33 @@ async fn main() {
             pos.side, pos.size, pos.entry_price
         );
     }
-
-    // ── 3. Start market data feed (no auth needed) ─────────────────
-    let md_transport = TransportConfig {
-        tls_skip_verify: tls_skip_verify(),
-        ..TransportConfig::default()
-    };
-    let mut md = MarketDataClient::with_transport(&url, md_transport);
-    let mut md_event_rx = md.take_event_receiver();
-    match md.connect().await {
-        Ok(()) => {
-            let _ = md.subscribe_orderbook(SYMBOL).await;
-            let _ = md.subscribe_trades(SYMBOL).await;
-            println!("Market data streaming for {SYMBOL}");
-        }
-        Err(e) => {
-            eprintln!("Market data unavailable (continuing without): {e}");
-        }
-    }
-
-    // Print market data for a short window.
-    if let Some(ref mut rx) = md_event_rx {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while let Ok(Some((key, val))) = tokio::time::timeout_at(deadline, rx.recv()).await {
-            print_market_event(&key, &val);
+    while let Ok(snap) = positions_snapshot_rx.try_recv() {
+        println!(
+            "SNAP   source={:?}  rows={}  ts={}",
+            snap.source,
+            snap.rows.len(),
+            snap.server_timestamp
+        );
+        for row in &snap.rows {
+            println!(
+                "  ↳ symbol={}  side={:?}  size={}  entry={}  mark={}",
+                row.symbol_id,
+                row.side,
+                row.size,
+                row.entry_price,
+                row.mark_price.as_deref().unwrap_or("—")
+            );
         }
     }
 
-    // ── 4. Place a limit BUY ───────────────────────────────────────
-    // GODARK_TEST_LIMIT_PRICE overrides for environments with a deviation cap
-    // (localnet caps at 1000 bps; testnet has no cap).
-    let buy_price: f64 = std::env::var("GODARK_TEST_LIMIT_PRICE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(67_500.0);
-    let modify_price = buy_price + 500.0;
-    let sell_price = buy_price + 2_000.0;
-
-    println!("Placing limit BUY @ {buy_price}...");
+    println!("Placing limit BUY @ 67500...");
     let buy_ack = match client
         .place_order(
             SYMBOL,
             Side::Buy,
             OrderType::Limit,
             0.1,
-            Some(buy_price),
+            Some(67_500.0),
             TimeInForce::Gtc,
             false,
             None,
@@ -219,39 +200,35 @@ async fn main() {
             ack
         }
         Err(e) => {
-            eprintln!("BUY failed: {e}");
-            md.disconnect().await;
+            dotenv::print_order_error("BUY rejected", &e);
             client.disconnect().await;
-            return;
+            std::process::exit(1);
         }
     };
 
-    // Let order updates arrive.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    drain_order_updates(&mut order_rx, "after BUY");
+    drain_orders(&mut order_rx, "after BUY");
 
-    // ── 5. Modify the order ────────────────────────────────────────
-    println!("Modifying order price to ${modify_price}...");
+    println!("Modifying order price to 68000...");
     match client
-        .modify_order(&buy_ack.order_id, SYMBOL, Some(modify_price), None)
+        .modify_order(&buy_ack.order_id, SYMBOL, Some(68_000.0), None)
         .await
     {
         Ok(ack) => println!("Modified: order_id={}", ack.order_id),
-        Err(e) => eprintln!("Modify rejected (order may have filled): {e}"),
+        Err(e) => dotenv::print_order_error("Modify rejected", &e),
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
-    drain_order_updates(&mut order_rx, "after MODIFY");
+    drain_orders(&mut order_rx, "after MODIFY");
 
-    // ── 6. Place a SELL and cancel it ──────────────────────────────
-    println!("Placing limit SELL @ {sell_price}...");
+    println!("Placing limit SELL @ 95000...");
     match client
         .place_order(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
             0.05,
-            Some(sell_price),
+            Some(95_000.0),
             TimeInForce::Gtc,
             false,
             None,
@@ -261,59 +238,93 @@ async fn main() {
     {
         Ok(sell_ack) => {
             println!("SELL placed: order_id={}", sell_ack.order_id);
-
             tokio::time::sleep(Duration::from_millis(500)).await;
-
             match client.cancel_order(&sell_ack.order_id, SYMBOL).await {
                 Ok(cancel_ack) => {
                     println!("SELL cancelled: order_id={}", cancel_ack.order_id)
                 }
-                Err(e) => eprintln!("Cancel SELL failed: {e}"),
+                Err(e) => dotenv::print_order_error("Cancel SELL rejected", &e),
             }
         }
-        Err(e) => eprintln!("Sell/cancel flow: {e}"),
+        Err(e) => dotenv::print_order_error("SELL rejected", &e),
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
-    drain_order_updates(&mut order_rx, "after SELL/CANCEL");
+    drain_orders(&mut order_rx, "after SELL/CANCEL");
 
-    // ── 7. Drain remaining queued updates ──────────────────────────
-    println!("Draining any remaining queued updates (short window)...");
-    let mut drained = 0usize;
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
-    while let Ok(Some(u)) = tokio::time::timeout_at(deadline, order_rx.recv()).await {
-        drained += 1;
-        println!("  (queued) order_id={} status={:?}", u.order_id, u.status);
-    }
-    println!("Drained {drained} queued order update(s)");
-
-    // ── 8. Cancel original BUY (cleanup) ───────────────────────────
     println!("Cancelling original BUY (cleanup)...");
     match client.cancel_order(&buy_ack.order_id, SYMBOL).await {
         Ok(_) => println!("Original BUY cancelled"),
         Err(_) => println!("Original BUY already filled or cancelled"),
     }
 
-    // Drain any errors that arrived during the session.
+    // Drain any sequencer pushes that arrived during the session.
+    let mut snap_count = 0usize;
+    while let Ok(snap) = positions_snapshot_rx.try_recv() {
+        snap_count += 1;
+        println!(
+            "SNAP   source={:?}  rows={}  ts={}",
+            snap.source,
+            snap.rows.len(),
+            snap.server_timestamp
+        );
+    }
+    let mut health_count = 0usize;
+    while let Ok(h) = system_health_rx.try_recv() {
+        health_count += 1;
+        println!(
+            "HEALTH nodes={}  accepting={}  ready={}",
+            h.total_nodes, h.accepting_orders, h.ready
+        );
+    }
+    let mut balance_count = 0usize;
+    while let Ok(b) = balance_rx.try_recv() {
+        balance_count += 1;
+        println!("BAL    shielded_raw={}", b.shielded_balance_raw);
+    }
+    let mut margin_count = 0usize;
+    while let Ok(a) = margin_alert_rx.try_recv() {
+        margin_count += 1;
+        println!(
+            "MARGIN symbol={}  tier={}  ratio_bps={}",
+            a.symbol_id, a.tier, a.margin_ratio_bps
+        );
+    }
+    let mut funding_count = 0usize;
+    while let Ok(f) = funding_rate_rx.try_recv() {
+        funding_count += 1;
+        println!(
+            "FUND   symbol={}  current={}  predicted={}",
+            f.symbol_id, f.current_rate, f.predicted_rate
+        );
+    }
+    let mut settle_count = 0usize;
+    while let Ok(s) = settlement_rx.try_recv() {
+        settle_count += 1;
+        println!("SETTLE batch={}  status={:?}", s.batch_id, s.status);
+    }
+
     let mut error_count = 0usize;
     while let Ok(e) = error_rx.try_recv() {
         error_count += 1;
         eprintln!("SDK ERROR (non-fatal): {e}");
     }
 
-    // ── 9. Summary ─────────────────────────────────────────────────
     println!("{sep}");
     println!("  Session complete");
+    println!(
+        "  Pushes: snapshots={snap_count}  health={health_count}  \
+         balance={balance_count}  margin={margin_count}  \
+         funding={funding_count}  settle={settle_count}"
+    );
     println!("  Non-fatal errors received: {error_count}");
     println!("{sep}");
 
-    // ── 10. Disconnect ─────────────────────────────────────────────
-    md.disconnect().await;
     client.disconnect().await;
     println!("Disconnected cleanly");
 }
 
-fn drain_order_updates(rx: &mut tokio::sync::mpsc::Receiver<godark::OrderUpdate>, label: &str) {
+fn drain_orders(rx: &mut tokio::sync::mpsc::Receiver<godark::OrderUpdate>, label: &str) {
     let mut count = 0usize;
     while let Ok(u) = rx.try_recv() {
         count += 1;
@@ -324,31 +335,5 @@ fn drain_order_updates(rx: &mut tokio::sync::mpsc::Receiver<godark::OrderUpdate>
     }
     if count > 0 {
         println!("  ({count} order update(s) {label})");
-    }
-}
-
-fn print_market_event(key: &str, val: &Value) {
-    let typ = val.get("type").and_then(|c| c.as_str()).unwrap_or("");
-    if matches!(
-        typ,
-        "status" | "subscribed" | "unsubscribed" | "pong" | "error"
-    ) {
-        return;
-    }
-    let channel = val.get("channel").and_then(|c| c.as_str()).unwrap_or("");
-
-    if typ == "orderbook" || channel == "orderbook" || key.starts_with("orderbook:") {
-        let best_ask = val
-            .get("asks")
-            .and_then(|a| a.as_array())
-            .and_then(|a| a.first())
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "n/a".into());
-        println!("ORDERBOOK  best_ask={best_ask}");
-    } else if typ == "trade" || channel == "trades" || key.starts_with("trades:") {
-        let price = val.get("price").map(|v| v.to_string()).unwrap_or_default();
-        let size = val.get("size").map(|v| v.to_string()).unwrap_or_default();
-        let side = val.get("side").map(|v| v.to_string()).unwrap_or_default();
-        println!("TRADE  price={price}  size={size}  side={side}");
     }
 }
