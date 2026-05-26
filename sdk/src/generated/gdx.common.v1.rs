@@ -271,6 +271,40 @@ impl PositionsSnapshotSource {
         }
     }
 }
+/// Position lifecycle status (mirrors Bybit `positionStatus`).
+/// Lets the frontend distinguish normal positions from those undergoing
+/// liquidation or auto-deleveraging.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PositionStatus {
+    Normal = 0,
+    /// Position is being liquidated (margin-tranche execution).
+    Liq = 1,
+    /// Position is being auto-deleveraged.
+    Adl = 2,
+}
+impl PositionStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Normal => "POSITION_STATUS_NORMAL",
+            Self::Liq => "POSITION_STATUS_LIQ",
+            Self::Adl => "POSITION_STATUS_ADL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "POSITION_STATUS_NORMAL" => Some(Self::Normal),
+            "POSITION_STATUS_LIQ" => Some(Self::Liq),
+            "POSITION_STATUS_ADL" => Some(Self::Adl),
+            _ => None,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum PositionUpdateType {
@@ -326,6 +360,7 @@ pub enum RequestType {
     /// never fanned out to MPC nodes). Paired with
     /// RESPONSE_MESSAGE_TYPE_ORDER_HISTORY_SNAPSHOT on the reply.
     GetOrderHistory = 7,
+    UpdateLeverage = 8,
 }
 impl RequestType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -342,6 +377,7 @@ impl RequestType {
             Self::Signing => "REQUEST_TYPE_SIGNING",
             Self::GetOpenOrders => "REQUEST_TYPE_GET_OPEN_ORDERS",
             Self::GetOrderHistory => "REQUEST_TYPE_GET_ORDER_HISTORY",
+            Self::UpdateLeverage => "REQUEST_TYPE_UPDATE_LEVERAGE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -355,6 +391,7 @@ impl RequestType {
             "REQUEST_TYPE_SIGNING" => Some(Self::Signing),
             "REQUEST_TYPE_GET_OPEN_ORDERS" => Some(Self::GetOpenOrders),
             "REQUEST_TYPE_GET_ORDER_HISTORY" => Some(Self::GetOrderHistory),
+            "REQUEST_TYPE_UPDATE_LEVERAGE" => Some(Self::UpdateLeverage),
             _ => None,
         }
     }
@@ -424,6 +461,8 @@ pub enum CancelReason {
     FokNotFilled = 3,
     Expired = 4,
     System = 5,
+    /// Position was auto-deleveraged by the exchange safety mechanism.
+    Adl = 6,
 }
 impl CancelReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -438,6 +477,7 @@ impl CancelReason {
             Self::FokNotFilled => "CANCEL_REASON_FOK_NOT_FILLED",
             Self::Expired => "CANCEL_REASON_EXPIRED",
             Self::System => "CANCEL_REASON_SYSTEM",
+            Self::Adl => "CANCEL_REASON_ADL",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -449,6 +489,7 @@ impl CancelReason {
             "CANCEL_REASON_FOK_NOT_FILLED" => Some(Self::FokNotFilled),
             "CANCEL_REASON_EXPIRED" => Some(Self::Expired),
             "CANCEL_REASON_SYSTEM" => Some(Self::System),
+            "CANCEL_REASON_ADL" => Some(Self::Adl),
             _ => None,
         }
     }

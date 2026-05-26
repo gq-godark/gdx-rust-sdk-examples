@@ -64,15 +64,15 @@ suites: WebSocket (`tests/ws_live_integration.rs`) and REST
 ```bash
 # Both suites against the SDK testnet default (api.godark-dex.com):
 GDX_LIVE_EDGE=1 \
-  GDX_API_KEY_ID=gdk_... GDX_API_SECRET=... \
+  GDX_API_KEY_ID=gdk_... GDX_API_SECRET=... GDX_PASSPHRASE=... \
   cargo test -p godark --test ws_live_integration --test rest_live_integration -- --ignored --nocapture
 
 # REST only:
-GDX_LIVE_EDGE=1 GDX_API_KEY_ID=... GDX_API_SECRET=... \
+GDX_LIVE_EDGE=1 GDX_API_KEY_ID=... GDX_API_SECRET=... GDX_PASSPHRASE=... \
   cargo test -p godark --test rest_live_integration -- --ignored --nocapture
 
 # WS only:
-GDX_LIVE_EDGE=1 GDX_API_KEY_ID=... GDX_API_SECRET=... \
+GDX_LIVE_EDGE=1 GDX_API_KEY_ID=... GDX_API_SECRET=... GDX_PASSPHRASE=... \
   cargo test -p godark --test ws_live_integration -- --ignored --nocapture
 ```
 
@@ -81,7 +81,7 @@ Environment variables (uniform across the Python / JS / C++ / Rust SDKs):
 | Var | Default | Notes |
 |---|---|---|
 | `GDX_LIVE_EDGE` | `0` (skip) | Set to `1` to run live tests |
-| `GDX_API_KEY_ID` + `GDX_API_SECRET` | falls back to legacy `test-key-1` (override via `GDX_TEST_API_KEY`) | Production credentials |
+| `GDX_API_KEY_ID` + `GDX_API_SECRET` + `GDX_PASSPHRASE` | falls back to legacy `test-key-1` (override via `GDX_TEST_API_KEY`) | Production credentials |
 | `GDX_REST_URL` / `GODARK_REST_URL` | `https://api.godark-dex.com` | REST live tests only |
 | `GDX_EDGE_URL` / `GODARK_EDGE_URL` | `wss://api.godark-dex.com` | WS live tests only |
 | `GDX_USE_DOCS_WIRE` | `1` (modern envelope) | Set `0|false|no|off` for legacy localnet edges (WS only) |

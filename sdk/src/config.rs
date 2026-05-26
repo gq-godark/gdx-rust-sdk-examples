@@ -70,6 +70,7 @@ pub struct GodarkConfigBuilder {
     api_key: Option<String>,
     api_key_id: Option<String>,
     api_secret: Option<String>,
+    passphrase: Option<String>,
     base_url: Option<String>,
     auto_reconnect: bool,
     symbol_map: HashMap<String, u64>,
@@ -86,6 +87,7 @@ impl GodarkConfigBuilder {
             api_key: None,
             api_key_id: None,
             api_secret: None,
+            passphrase: None,
             base_url: None,
             auto_reconnect: true,
             symbol_map: symbols,
@@ -114,6 +116,13 @@ impl GodarkConfigBuilder {
         self
     }
 
+    /// User-chosen API key passphrase (required with key pair; also reads
+    /// `GODARK_PASSPHRASE` / `GDX_PASSPHRASE`).
+    pub fn passphrase(mut self, pp: impl Into<String>) -> Self {
+        self.passphrase = Some(pp.into());
+        self
+    }
+
     pub fn base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = Some(url.into());
         self
@@ -139,8 +148,26 @@ impl GodarkConfigBuilder {
 
     pub fn build(self) -> Result<GodarkConfig, GodarkError> {
         let auth_token = match (self.api_key_id, self.api_secret, self.api_key) {
-            (Some(id), Some(secret), None) => format!("{id}:{secret}"),
-            (None, None, Some(key)) => key,
+            (Some(id), Some(secret), None) => {
+                let pp = resolve_passphrase(self.passphrase.as_deref()).ok_or_else(|| {
+                    GodarkError::Config(
+                        "passphrase is required when using api_key_id and api_secret".into(),
+                    )
+                })?;
+                format!("{id}:{secret}:{pp}")
+            }
+            (None, None, Some(key)) => {
+                if self
+                    .passphrase
+                    .as_ref()
+                    .is_some_and(|pp| !pp.trim().is_empty())
+                {
+                    return Err(GodarkError::Config(
+                        "passphrase must not be set when using legacy api_key".into(),
+                    ));
+                }
+                key
+            }
             (Some(_), None, _) | (None, Some(_), _) => {
                 return Err(GodarkError::Config(
                     "api_key_id and api_secret must be provided together".into(),
@@ -177,6 +204,25 @@ impl Default for GodarkConfigBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Resolve passphrase: constructor arg wins, then env vars.
+pub fn resolve_passphrase(explicit: Option<&str>) -> Option<String> {
+    if let Some(v) = explicit {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    for key in &["GODARK_PASSPHRASE", "GDX_PASSPHRASE"] {
+        if let Ok(v) = env::var(key) {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
 }
 
 /// Resolve user UUID from `GODARK_USER_UUID` or `GDX_USER_UUID` environment variables.
@@ -247,7 +293,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use super::{gomarket_url, resolve_edge_base_url, ws_url, GodarkConfigBuilder, GodarkError};
+    use super::{
+        gomarket_url, resolve_edge_base_url, resolve_passphrase, ws_url, GodarkConfigBuilder,
+        GodarkError,
+    };
 
     /// Serialize tests that mutate process environment variables.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -257,9 +306,78 @@ mod tests {
         let cfg = GodarkConfigBuilder::new()
             .api_key_id("id")
             .api_secret("secret")
+            .passphrase("pp")
             .build()
             .unwrap();
-        assert_eq!(cfg.auth_token, "id:secret");
+        assert_eq!(cfg.auth_token, "id:secret:pp");
+    }
+
+    #[test]
+    fn test_builder_api_key_pair_requires_passphrase() {
+        let err = GodarkConfigBuilder::new()
+            .api_key_id("id")
+            .api_secret("secret")
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, GodarkError::Config(ref msg) if msg.contains("passphrase")));
+    }
+
+    #[test]
+    fn test_builder_legacy_rejects_passphrase() {
+        let err = GodarkConfigBuilder::new()
+            .api_key("k")
+            .passphrase("pp")
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, GodarkError::Config(ref msg) if msg.contains("passphrase")));
+    }
+
+    #[test]
+    fn test_builder_api_key_pair_passphrase_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_g = std::env::var("GODARK_PASSPHRASE").ok();
+        let old_x = std::env::var("GDX_PASSPHRASE").ok();
+        std::env::remove_var("GODARK_PASSPHRASE");
+        std::env::set_var("GDX_PASSPHRASE", "env-pp");
+
+        let cfg = GodarkConfigBuilder::new()
+            .api_key_id("id")
+            .api_secret("secret")
+            .build()
+            .unwrap();
+        assert_eq!(cfg.auth_token, "id:secret:env-pp");
+
+        if let Some(v) = old_g {
+            std::env::set_var("GODARK_PASSPHRASE", v);
+        } else {
+            std::env::remove_var("GODARK_PASSPHRASE");
+        }
+        if let Some(v) = old_x {
+            std::env::set_var("GDX_PASSPHRASE", v);
+        } else {
+            std::env::remove_var("GDX_PASSPHRASE");
+        }
+    }
+
+    #[test]
+    fn test_resolve_passphrase_prefers_constructor() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("GDX_PASSPHRASE", "from-env");
+        assert_eq!(
+            resolve_passphrase(Some("explicit")),
+            Some("explicit".into())
+        );
+        std::env::remove_var("GDX_PASSPHRASE");
+    }
+
+    #[test]
+    fn test_resolve_passphrase_from_godark_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("GODARK_PASSPHRASE", "godark-pw");
+        std::env::set_var("GDX_PASSPHRASE", "gdx-pw");
+        assert_eq!(resolve_passphrase(None), Some("godark-pw".into()));
+        std::env::remove_var("GODARK_PASSPHRASE");
+        std::env::remove_var("GDX_PASSPHRASE");
     }
 
     #[test]
