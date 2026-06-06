@@ -24,6 +24,20 @@ pub enum ReconnectEvent {
     Failed { error: String },
 }
 
+/// One row from `GET /api/v1/leverage` — per-symbol leverage setting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeverageSetting {
+    pub symbol_id: u64,
+    pub leverage: u32,
+}
+
+/// Cached leverage settings for the authenticated user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeverageSettings {
+    #[serde(default)]
+    pub settings: Vec<LeverageSetting>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderAck {
     pub order_id: String,

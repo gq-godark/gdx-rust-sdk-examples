@@ -50,6 +50,7 @@ Required keys:
 
 - `GODARK_API_KEY_ID`
 - `GODARK_API_SECRET`
+- `GODARK_PASSPHRASE` — required for API key-pair auth.
 
 Optional:
 
@@ -71,7 +72,7 @@ recipients build with `cargo build --release --examples`.
 unzip godark-rust-sdk-*.zip
 cd godark-rust-sdk-*/
 cp .env.example .env
-# fill in GODARK_API_KEY_ID, GODARK_API_SECRET
+# fill in GODARK_API_KEY_ID, GODARK_API_SECRET, GODARK_PASSPHRASE
 
 cargo build --release --examples
 ./target/release/examples/quickstart

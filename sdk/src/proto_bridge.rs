@@ -115,6 +115,27 @@ pub fn build_modify_order_proto(
     req.encode_to_vec()
 }
 
+pub fn build_update_leverage_proto(
+    user_uuid: &[u8],
+    symbol_id: u64,
+    leverage: u32,
+    correlation_id_bytes: &[u8],
+) -> Vec<u8> {
+    let leverage = leverage.max(1);
+    let update = sequencer::UpdateLeverageRequest {
+        user_uuid: user_uuid.to_vec(),
+        symbol_id,
+        leverage,
+        correlation_id: correlation_id_bytes.to_vec(),
+    };
+    let req = sequencer::EdgeSequencerRequest {
+        inner: Some(sequencer::edge_sequencer_request::Inner::UpdateLeverage(
+            update,
+        )),
+    };
+    req.encode_to_vec()
+}
+
 pub fn build_order_header_aad(
     user_uuid: &[u8],
     symbol_id: u64,
@@ -419,6 +440,7 @@ mod tests {
         CancelReason, OrderStatus, OrderType, OrderUpdateType, PositionUpdateType, Side,
         TimeInForce,
     };
+    use crate::generated::edge::v1 as edge;
     use crate::generated::sequencer::v1 as sequencer;
 
     use super::*;
@@ -494,6 +516,38 @@ mod tests {
         assert_eq!(modify.new_price, Some(2.25));
         assert_eq!(modify.new_quantity, Some(3.5));
         assert_eq!(modify.correlation_id, b"m".as_slice());
+    }
+
+    #[test]
+    fn test_build_update_leverage_roundtrip() {
+        let bytes = build_update_leverage_proto(&TEST_UUID, 42, 5, b"corr");
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let update = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::UpdateLeverage(u)) => u,
+            other => panic!("expected UpdateLeverage, got {:?}", other),
+        };
+        assert_eq!(update.user_uuid, TEST_UUID.as_slice());
+        assert_eq!(update.symbol_id, 42);
+        assert_eq!(update.leverage, 5);
+        assert_eq!(update.correlation_id, b"corr".as_slice());
+    }
+
+    #[test]
+    fn test_build_update_leverage_clamped_to_one() {
+        let bytes = build_update_leverage_proto(&TEST_UUID, 1, 0, b"");
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let update = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::UpdateLeverage(u)) => u,
+            other => panic!("expected UpdateLeverage, got {:?}", other),
+        };
+        assert_eq!(update.leverage, 1);
+    }
+
+    #[test]
+    fn test_build_order_header_aad_update_leverage() {
+        let bytes = build_order_header_aad(&TEST_UUID, 1, "update_leverage", 3, 128, b"");
+        let header = edge::OrderHeader::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(header.request_type, 8);
     }
 
     #[test]
@@ -610,6 +664,7 @@ mod tests {
             timestamp: 1_700_000_000,
             leverage: 1,
             realized_pnl: None,
+            order_type: OrderType::Limit.to_proto(),
         };
         let bytes = msg.encode_to_vec();
         let u = parse_order_update(&bytes).expect("parse");
@@ -681,6 +736,7 @@ mod tests {
             timestamp: 100,
             leverage: 1,
             realized_pnl: None,
+            order_type: OrderType::Limit.to_proto(),
         };
         let msg = sequencer::SequencerToEdgeMessage {
             inner: Some(sequencer::sequencer_to_edge_message::Inner::OrderUpdate(
@@ -744,6 +800,9 @@ mod tests {
             unrealized_pnl: Some("15000".to_string()),
             notional: Some("12765000".to_string()),
             mark_publish_time_sec: Some(1_700_000_010),
+            liquidation_price: None,
+            adl_indicator: None,
+            position_status: None,
         };
         let snap = sequencer::PositionsSnapshot {
             user_uuid: TEST_UUID.to_vec(),

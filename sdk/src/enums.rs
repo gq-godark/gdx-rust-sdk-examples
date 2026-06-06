@@ -236,6 +236,7 @@ pub fn request_type_to_proto(s: &str) -> i32 {
         "modify" => 3,
         "subscribe" => 4,
         "signing" => 5,
+        "update_leverage" => 8,
         _ => 0,
     }
 }
@@ -385,6 +386,7 @@ mod tests {
         assert_eq!(request_type_to_proto("place"), 1);
         assert_eq!(request_type_to_proto("cancel"), 2);
         assert_eq!(request_type_to_proto("modify"), 3);
+        assert_eq!(request_type_to_proto("update_leverage"), 8);
         assert_eq!(request_type_to_proto("unknown"), 0);
     }
 

@@ -94,6 +94,36 @@ impl RestTransport {
         post_json_envelope(&self.client, self.url("/api/v1/orders"), Some(bearer), body).await
     }
 
+    /// `GET /api/v1/leverage` — returns cached per-symbol leverage settings.
+    pub async fn get_leverage(&self, bearer: &str) -> Result<Value> {
+        let mut h = HeaderMap::new();
+        h.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {bearer}"))
+                .map_err(|e| GodarkError::Connection(e.to_string()))?,
+        );
+        let r = self
+            .client
+            .get(self.url("/api/v1/leverage"))
+            .headers(h)
+            .send()
+            .await
+            .map_err(|e| GodarkError::Connection(format!("GET /leverage: {e}")))?;
+        let v = parse_ok_json(r).await?;
+        data_clone_from_env(&v)
+    }
+
+    /// Encrypted `POST /api/v1/leverage` — update leverage setting.
+    pub async fn post_leverage_encrypted(&self, bearer: &str, body: Value) -> Result<Value> {
+        post_json_envelope(
+            &self.client,
+            self.url("/api/v1/leverage"),
+            Some(bearer),
+            body,
+        )
+        .await
+    }
+
     pub async fn delete_orders_encrypted(
         &self,
         bearer: &str,
