@@ -476,11 +476,23 @@ pub struct ShieldSubmitRequest {
     #[prost(bytes = "vec", tag = "3")]
     pub client_request_id: ::prost::alloc::vec::Vec<u8>,
 }
+/// Update the per-user-per-symbol leverage setting (industry-standard model).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateLeverageRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub symbol_id: u64,
+    #[prost(uint32, tag = "3")]
+    pub leverage: u32,
+    #[prost(bytes = "vec", tag = "4")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EdgeSequencerRequest {
     #[prost(
         oneof = "edge_sequencer_request::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17, 18"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17, 18, 19"
     )]
     pub inner: ::core::option::Option<edge_sequencer_request::Inner>,
 }
@@ -522,6 +534,8 @@ pub mod edge_sequencer_request {
         ShieldSubmit(super::ShieldSubmitRequest),
         #[prost(message, tag = "18")]
         PoolDeposit(super::PoolDepositRequest),
+        #[prost(message, tag = "19")]
+        UpdateLeverage(super::UpdateLeverageRequest),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -886,6 +900,24 @@ pub struct PositionRow {
     /// epoch). Lets the frontend surface stale-price warnings.
     #[prost(uint64, optional, tag = "9")]
     pub mark_publish_time_sec: ::core::option::Option<u64>,
+    /// Server-computed liquidation price (mark at which maintenance
+    /// margin equals equity under isolated margin). Absent when the
+    /// position is over-collateralised or on overflow.
+    #[prost(string, optional, tag = "10")]
+    pub liquidation_price: ::core::option::Option<::prost::alloc::string::String>,
+    /// ADL queue indicator (0 = safest, 5 = front of the auto-deleverage
+    /// queue). Server-computed from PnL-rank among counterparties.
+    /// Absent when ADL ranking is not yet available.
+    #[prost(uint32, optional, tag = "11")]
+    pub adl_indicator: ::core::option::Option<u32>,
+    /// Position lifecycle status (Normal / Liq / Adl). Absent when the
+    /// sequencer does not yet track liquidation state for this position.
+    #[prost(
+        enumeration = "super::super::common::v1::PositionStatus",
+        optional,
+        tag = "12"
+    )]
+    pub position_status: ::core::option::Option<i32>,
 }
 /// Full-user positions batch. Emitted on (a) initial subscribe, (b) the
 /// 5-second periodic sweep, and (c) any position-changing fill for this

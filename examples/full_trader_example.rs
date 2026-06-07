@@ -55,6 +55,16 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let passphrase = match std::env::var("GODARK_PASSPHRASE") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            eprintln!(
+                "Missing credentials. Set GODARK_PASSPHRASE \
+                 (or provide it in .env)."
+            );
+            std::process::exit(1);
+        }
+    };
     let base_url =
         std::env::var("GODARK_EDGE_URL").unwrap_or_else(|_| "wss://api.godark-dex.com".into());
 
@@ -63,6 +73,7 @@ async fn main() {
     let mut rest = match GodarkRestClient::builder()
         .api_key_id(&api_key_id)
         .api_secret(&api_secret)
+        .passphrase(&passphrase)
         .build()
     {
         Ok(c) => c,
@@ -100,6 +111,7 @@ async fn main() {
         .base_url(&base_url)
         .api_key_id(api_key_id)
         .api_secret(api_secret)
+        .passphrase(passphrase)
         .transport(transport)
         .build()
     {

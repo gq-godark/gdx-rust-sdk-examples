@@ -17,8 +17,9 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::config::resolve_passphrase;
 use crate::enums::{OrderType, Side, TimeInForce};
-use crate::types::{Balance, MeProfile};
+use crate::types::{Balance, LeverageSettings, MeProfile};
 
 /// AES-256-GCM auth tag length appended to ciphertext (matches Python/JS/C++ SDKs).
 const GCM_TAG_LEN: usize = 16;
@@ -147,25 +148,44 @@ impl GodarkRestClientBuilder {
     }
 
     pub fn build(self) -> Result<GodarkRestClient, GodarkError> {
-        let auth_token = match (self.api_key_id, self.api_secret, self.api_key) {
-            (Some(id), Some(secret), None) => format!("{id}:{secret}"),
-            (None, None, Some(key)) => key,
-            (Some(_), None, _) | (None, Some(_), _) => {
-                return Err(GodarkError::Config(
-                    "api_key_id and api_secret must be provided together".into(),
-                ));
-            }
-            (Some(_), Some(_), Some(_)) => {
-                return Err(GodarkError::Config(
-                    "use either api_key or (api_key_id, api_secret), not both".into(),
-                ));
-            }
-            (None, None, None) => {
-                return Err(GodarkError::Config(
-                    "provide api_key or both api_key_id and api_secret".into(),
-                ));
-            }
-        };
+        let (api_key_id, api_secret, passphrase, legacy_auth_token) =
+            match (self.api_key_id, self.api_secret, self.api_key) {
+                (Some(id), Some(secret), None) => {
+                    let pp = resolve_passphrase(self.passphrase.as_deref()).ok_or_else(|| {
+                        GodarkError::Config(
+                            "passphrase is required when using api_key_id and api_secret".into(),
+                        )
+                    })?;
+                    (Some(id), Some(secret), Some(pp), None)
+                }
+                (None, None, Some(key)) => {
+                    if self
+                        .passphrase
+                        .as_ref()
+                        .is_some_and(|pp| !pp.trim().is_empty())
+                    {
+                        return Err(GodarkError::Config(
+                            "passphrase must not be set when using legacy api_key".into(),
+                        ));
+                    }
+                    (None, None, None, Some(key))
+                }
+                (Some(_), None, _) | (None, Some(_), _) => {
+                    return Err(GodarkError::Config(
+                        "api_key_id and api_secret must be provided together".into(),
+                    ));
+                }
+                (Some(_), Some(_), Some(_)) => {
+                    return Err(GodarkError::Config(
+                        "use either api_key or (api_key_id, api_secret), not both".into(),
+                    ));
+                }
+                (None, None, None) => {
+                    return Err(GodarkError::Config(
+                        "provide api_key or both api_key_id and api_secret".into(),
+                    ));
+                }
+            };
 
         let base_url = resolve_rest_base_url(self.rest_base_url);
 
@@ -183,8 +203,10 @@ impl GodarkRestClientBuilder {
         Ok(GodarkRestClient {
             http: RestTransport::new(base_url),
             session: CryptoSession::new(),
-            auth_token,
-            passphrase: self.passphrase.unwrap_or_default(),
+            api_key_id,
+            api_secret,
+            passphrase,
+            legacy_auth_token,
             symbol_map: self.symbol_map,
             bearer: None,
             user_uuid,
@@ -204,8 +226,10 @@ impl Default for GodarkRestClientBuilder {
 pub struct GodarkRestClient {
     http: RestTransport,
     session: CryptoSession,
-    auth_token: String,
-    passphrase: String,
+    api_key_id: Option<String>,
+    api_secret: Option<String>,
+    passphrase: Option<String>,
+    legacy_auth_token: Option<String>,
     symbol_map: HashMap<String, u64>,
     bearer: Option<String>,
     user_uuid: Option<Uuid>,
@@ -251,15 +275,16 @@ impl GodarkRestClient {
 
     /// `auth/token` → `session/setup` (ECDH). Same crypto path used by WS.
     pub async fn connect(&mut self) -> Result<(), GodarkError> {
-        let auth_data = if self.auth_token.contains(':') {
-            let mut parts = self.auth_token.splitn(2, ':');
-            let id = parts.next().unwrap_or_default();
-            let sec = parts.next().unwrap_or_default();
+        let auth_data = if let (Some(id), Some(sec), Some(pp)) =
+            (&self.api_key_id, &self.api_secret, &self.passphrase)
+        {
             self.http
-                .auth_token_document_body("client_credentials", id, sec, &self.passphrase)
+                .auth_token_document_body("client_credentials", id, sec, pp)
                 .await?
+        } else if let Some(token) = &self.legacy_auth_token {
+            self.http.auth_token_legacy_token(token).await?
         } else {
-            self.http.auth_token_legacy_token(&self.auth_token).await?
+            return Err(GodarkError::Config("invalid auth credentials".into()));
         };
 
         let bearer = auth_data
@@ -357,6 +382,7 @@ impl GodarkRestClient {
                 &corr_id,
                 client_order_id,
                 None,
+                None,
             )
             .await?;
 
@@ -408,6 +434,7 @@ impl GodarkRestClient {
             &corr_id,
             None,
             Some(EncryptedRoute::DeletePathId(order_id.to_string())),
+            None,
         )
         .await
     }
@@ -464,6 +491,7 @@ impl GodarkRestClient {
             &corr_id,
             None,
             Some(EncryptedRoute::PatchPathId(order_id.to_string())),
+            None,
         )
         .await
     }
@@ -476,6 +504,38 @@ impl GodarkRestClient {
     pub async fn get_order_by_client_id(&self, coid: &str) -> Result<Value, GodarkError> {
         let bearer = self.current_bearer()?;
         self.http.get_order_by_client_order_id(bearer, coid).await
+    }
+
+    /// Fetch cached per-symbol leverage settings via `GET /api/v1/leverage`.
+    pub async fn get_leverage(&self) -> Result<LeverageSettings, GodarkError> {
+        let bearer = self.current_bearer()?.to_string();
+        let data = self.http.get_leverage(&bearer).await?;
+        serde_json::from_value(data)
+            .map_err(|e| GodarkError::Connection(format!("parse leverage settings: {e}")))
+    }
+
+    /// Update leverage for `symbol` via encrypted `POST /api/v1/leverage`.
+    pub async fn update_leverage(
+        &mut self,
+        symbol: &str,
+        leverage: u32,
+    ) -> Result<OrderAck, GodarkError> {
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let uuid = self.current_user_uuid()?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let lev = leverage.max(1);
+        let plaintext =
+            proto_bridge::build_update_leverage_proto(uuid.as_bytes(), symbol_id, lev, &corr_id);
+        self.send_encrypted_order(
+            "update_leverage",
+            symbol_id,
+            &plaintext,
+            &corr_id,
+            None,
+            Some(EncryptedRoute::PostLeverage),
+            Some(lev),
+        )
+        .await
     }
 
     /// Fetch the authenticated user's profile from `GET /api/v1/auth/me`.
@@ -548,6 +608,7 @@ impl GodarkRestClient {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_encrypted_order(
         &mut self,
         request_type: &str,
@@ -556,6 +617,7 @@ impl GodarkRestClient {
         correlation_id: &[u8],
         place_client_order_id: Option<String>,
         route: Option<EncryptedRoute>,
+        header_leverage: Option<u32>,
     ) -> Result<OrderAck, GodarkError> {
         let bearer = self.current_bearer()?.to_string();
         let uuid = self.current_user_uuid()?;
@@ -592,6 +654,9 @@ impl GodarkRestClient {
         if let Some(s) = corr_str {
             header["correlation_id"] = Value::String(s);
         }
+        if let Some(lev) = header_leverage {
+            header["leverage"] = json!(lev);
+        }
         let mut body = json!({ "header": header, "ciphertext": body_b64 });
         if let Some(coid) = place_client_order_id {
             body["client_order_id"] = Value::String(coid);
@@ -599,6 +664,9 @@ impl GodarkRestClient {
 
         let raw = match route {
             None => self.http.post_orders_encrypted(&bearer, body).await?,
+            Some(EncryptedRoute::PostLeverage) => {
+                self.http.post_leverage_encrypted(&bearer, body).await?
+            }
             Some(EncryptedRoute::DeletePathId(id)) => {
                 self.http
                     .delete_orders_encrypted(&bearer, &id, body)
@@ -678,6 +746,7 @@ impl GodarkRestClient {
 }
 
 enum EncryptedRoute {
+    PostLeverage,
     DeletePathId(String),
     PatchPathId(String),
 }
@@ -755,13 +824,38 @@ mod tests {
     }
 
     #[test]
-    fn builder_accepts_id_secret() {
+    fn builder_accepts_id_secret_with_passphrase() {
         let c = GodarkRestClient::builder()
             .api_key_id("id")
             .api_secret("sec")
+            .passphrase("pp")
             .build()
             .unwrap();
         assert!(c.user_uuid().is_none());
+    }
+
+    #[test]
+    fn builder_id_secret_requires_passphrase() {
+        let res = GodarkRestClient::builder()
+            .api_key_id("id")
+            .api_secret("sec")
+            .build();
+        assert!(matches!(
+            res,
+            Err(GodarkError::Config(ref msg)) if msg.contains("passphrase")
+        ));
+    }
+
+    #[test]
+    fn builder_legacy_rejects_passphrase() {
+        let res = GodarkRestClient::builder()
+            .api_key("k")
+            .passphrase("pp")
+            .build();
+        assert!(matches!(
+            res,
+            Err(GodarkError::Config(ref msg)) if msg.contains("passphrase")
+        ));
     }
 
     #[test]
@@ -805,5 +899,48 @@ mod tests {
         let ack = parse_order_ack(&v).unwrap();
         assert_eq!(ack.order_id, "9999");
         assert_eq!(ack.sequence, "7");
+    }
+
+    #[test]
+    fn get_leverage_requires_connect() {
+        let client = GodarkRestClient::builder()
+            .api_key("k")
+            .rest_base_url("http://localhost:4000")
+            .build()
+            .unwrap();
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(client.get_leverage())
+            .unwrap_err();
+        assert!(matches!(err, GodarkError::Session(_)));
+    }
+
+    #[test]
+    fn update_leverage_requires_connect() {
+        let mut client = GodarkRestClient::builder()
+            .api_key("k")
+            .rest_base_url("http://localhost:4000")
+            .build()
+            .unwrap();
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(client.update_leverage("BTC-USDC-PERP", 5))
+            .unwrap_err();
+        assert!(matches!(err, GodarkError::Session(_)));
+    }
+
+    #[test]
+    fn update_leverage_rejects_unknown_symbol() {
+        let mut client = GodarkRestClient::builder()
+            .api_key("k")
+            .user_uuid("00000000-0000-4000-8000-000000000001")
+            .rest_base_url("http://localhost:4000")
+            .build()
+            .unwrap();
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(client.update_leverage("NO-SUCH-SYMBOL", 5))
+            .unwrap_err();
+        assert!(matches!(err, GodarkError::Config(_)));
     }
 }
