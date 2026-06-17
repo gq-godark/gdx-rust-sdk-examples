@@ -35,8 +35,9 @@ pub use order_error_code::{find as find_order_error, OrderErrorEntry, ORDER_ERRO
 pub use rest_client::{GodarkRestClient, GodarkRestClientBuilder};
 pub use rest_transport::RestTransport;
 pub use types::{
-    Balance, BalanceUpdate, FundingRateUpdate, LeverageSetting, LeverageSettings, MarginAlert,
-    MeProfile, OrderAck, OrderUpdate, PositionRow, PositionUpdate, PositionsSnapshot,
-    PositionsSnapshotSource, ReconnectEvent, SettlementBatchStatus, SettlementUpdate,
-    SystemHealthUpdate,
+    Balance, BalanceUpdate, BatchCancelAck, BatchCancelLegResult, BatchModifyAck,
+    BatchModifyLegInput, BatchModifyLegResult, FundingRateUpdate, LeverageSetting,
+    LeverageSettings, MarginAlert, MassQuoteAck, MassQuoteLegInput, MassQuoteLegResult, MeProfile,
+    OrderAck, OrderUpdate, PositionRow, PositionUpdate, PositionsSnapshot, PositionsSnapshotSource,
+    ReconnectEvent, SettlementBatchStatus, SettlementUpdate, SystemHealthUpdate,
 };

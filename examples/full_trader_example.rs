@@ -18,7 +18,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use godark::{GodarkClient, GodarkRestClient, OrderType, Side, TimeInForce, TransportConfig};
+use godark::{
+    GodarkClient, GodarkRestClient, MassQuoteLegInput, OrderType, Side, TimeInForce, TransportConfig,
+};
 
 #[path = "dotenv.rs"]
 mod dotenv;
@@ -263,6 +265,91 @@ async fn main() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     drain_orders(&mut order_rx, "after SELL/CANCEL");
+
+    // --- Bulk quote (mass quote) ---
+    // Place a whole ladder of resting quotes in one batched request. Passing
+    // `None` for post_only keeps the node default (post-only): a leg that would
+    // cross is rejected as "failed" so the batch fuses into a single MPC round.
+    // Pass `Some(false)` for the relaxed path, where a crossing leg takes
+    // liquidity up to its limit and rests the remainder (the number of taker
+    // fills is reported per leg as `fill_count`).
+    println!("Mass-quoting a 3-level BUY ladder (post-only)...");
+    let ladder = vec![
+        MassQuoteLegInput {
+            side: Side::Buy,
+            price: 66_000.0,
+            quantity: 0.02,
+            cancel_order_id: None,
+            time_in_force: None,
+            expiry_time: None,
+        },
+        MassQuoteLegInput {
+            side: Side::Buy,
+            price: 65_500.0,
+            quantity: 0.02,
+            cancel_order_id: None,
+            time_in_force: None,
+            expiry_time: None,
+        },
+        MassQuoteLegInput {
+            side: Side::Buy,
+            price: 65_000.0,
+            quantity: 0.02,
+            cancel_order_id: None,
+            time_in_force: None,
+            expiry_time: None,
+        },
+    ];
+    let mut resting_ids: Vec<u64> = Vec::new();
+    match client.mass_quote(SYMBOL, &ladder, 1, None).await {
+        Ok(mq) => {
+            println!(
+                "Mass quote: success={}  sequence={}  legs={}",
+                mq.success,
+                mq.sequence,
+                mq.results.len()
+            );
+            for r in &mq.results {
+                println!(
+                    "  leg {}: status={}  new_order_id={}  fills={}  err={:?}",
+                    r.leg_index,
+                    r.status,
+                    r.new_order_id.as_deref().unwrap_or("—"),
+                    r.fill_count,
+                    r.error_code
+                );
+                if r.status == "open" {
+                    if let Some(id) = r.new_order_id.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                        resting_ids.push(id);
+                    }
+                }
+            }
+        }
+        Err(e) => dotenv::print_order_error("Mass quote rejected", &e),
+    }
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    drain_orders(&mut order_rx, "after MASS QUOTE");
+
+    if !resting_ids.is_empty() {
+        println!(
+            "Batch-cancelling {} ladder orders (cleanup)...",
+            resting_ids.len()
+        );
+        match client.batch_cancel(SYMBOL, &resting_ids).await {
+            Ok(bc) => {
+                for r in &bc.results {
+                    println!(
+                        "  cancel id={}: cancelled={}  err={:?}",
+                        r.order_id, r.cancelled, r.error_code
+                    );
+                }
+            }
+            Err(e) => dotenv::print_order_error("Batch cancel rejected", &e),
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drain_orders(&mut order_rx, "after BATCH CANCEL");
+    }
 
     println!("Cancelling original BUY (cleanup)...");
     match client.cancel_order(&buy_ack.order_id, SYMBOL).await {

@@ -47,6 +47,90 @@ pub struct OrderAck {
     pub error: Option<String>,
 }
 
+/// One cancel-replace leg of a mass quote. Mirrors the Python SDK leg dict.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MassQuoteLegInput {
+    pub side: Side,
+    pub price: f64,
+    pub quantity: f64,
+    /// Resting order to cancel-replace. `None`/`0` = pure place (no cancel target).
+    #[serde(default)]
+    pub cancel_order_id: Option<u64>,
+    /// Defaults to GTC when `None`.
+    #[serde(default)]
+    pub time_in_force: Option<crate::enums::TimeInForce>,
+    /// Required when `time_in_force` = GTD (nanoseconds).
+    #[serde(default)]
+    pub expiry_time: Option<u64>,
+}
+
+/// One amend leg of a batch modify. At least one of `new_price`/`new_quantity`
+/// must be set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchModifyLegInput {
+    pub order_id: u64,
+    #[serde(default)]
+    pub new_price: Option<f64>,
+    #[serde(default)]
+    pub new_quantity: Option<f64>,
+}
+
+/// Outcome of one cancel-replace leg in a mass-quote batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MassQuoteLegResult {
+    pub leg_index: u32,
+    /// "open" | "filled" | "failed" | "unspecified" | "unknown".
+    pub status: String,
+    /// `None` when no cancel target / cancel failed.
+    pub cancelled_order_id: Option<String>,
+    /// `None` when the replacement failed.
+    pub new_order_id: Option<String>,
+    pub error_code: Option<u32>,
+    /// Number of taker fills this leg produced in relaxed (`post_only = false`)
+    /// mode; 0 for a pure rest or a post-only leg.
+    pub fill_count: u32,
+}
+
+/// Batch-level result of a mass quote: one entry per submitted leg.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MassQuoteAck {
+    pub success: bool,
+    pub sequence: String,
+    pub results: Vec<MassQuoteLegResult>,
+}
+
+/// Outcome of cancelling one order id in a batch-cancel request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchCancelLegResult {
+    pub order_id: String,
+    pub cancelled: bool,
+    pub error_code: Option<u32>,
+}
+
+/// Batch-level result of a batch cancel: one entry per submitted order id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchCancelAck {
+    pub success: bool,
+    pub sequence: String,
+    pub results: Vec<BatchCancelLegResult>,
+}
+
+/// Outcome of amending one resting order in a batch-modify request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchModifyLegResult {
+    pub order_id: String,
+    pub modified: bool,
+    pub error_code: Option<u32>,
+}
+
+/// Batch-level result of a batch modify: one entry per submitted leg.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchModifyAck {
+    pub success: bool,
+    pub sequence: String,
+    pub results: Vec<BatchModifyLegResult>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderUpdate {
     pub order_id: String,

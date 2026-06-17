@@ -69,6 +69,9 @@ pub struct CancelMessage {
     pub sequence: u64,
     #[prost(bytes = "vec", tag = "5")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// Set by the sequencer for liquidation-driven cancels; omitted for user cancels.
+    #[prost(enumeration = "super::super::common::v1::CancelReason", optional, tag = "6")]
+    pub cancel_reason: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ModifyMessage {
@@ -90,6 +93,73 @@ pub struct ModifyMessage {
     pub new_quantity_auth: ::core::option::Option<AuthenticatedField>,
     #[prost(bytes = "vec", tag = "9")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+}
+/// One leg after scaling/splitting: a cancel target plus the replacement
+/// order as a fully-formed (secret-shared) OrderMessage. The sequencer
+/// assigns each leg's order_id and sequence inside `place`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MassQuoteLegShare {
+    #[prost(uint64, tag = "1")]
+    pub cancel_order_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub place: ::core::option::Option<OrderMessage>,
+}
+/// Sequencer → MPC nodes: one fused batch of cancel-replace legs. Nodes run
+/// all cancels then a fused batch-insert/match for the replacements.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MassQuoteMessage {
+    #[prost(uint64, tag = "1")]
+    pub symbol_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub sequence: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, repeated, tag = "4")]
+    pub legs: ::prost::alloc::vec::Vec<MassQuoteLegShare>,
+    /// When false, a crossing leg takes liquidity (up to its limit) and rests the
+    /// remainder instead of being rejected. Absent => true (post-only, the
+    /// historical behavior) for backward compatibility.
+    #[prost(bool, optional, tag = "5")]
+    pub post_only: ::core::option::Option<bool>,
+}
+/// Sequencer → MPC nodes: the resolved set of order ids to cancel in one batch.
+/// Cancels are pure index removals (no MPC comparison).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchCancelMessage {
+    #[prost(uint64, tag = "1")]
+    pub symbol_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub sequence: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, repeated, tag = "4")]
+    pub order_ids: ::prost::alloc::vec::Vec<u64>,
+}
+/// One leg of a batch modify after scaling: the resting order to amend and its
+/// new (secret-shared) price/quantity. Side / user / order_id are preserved from
+/// the resting order at the node, so only the changed fields travel here.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchModifyLegShare {
+    #[prost(uint64, tag = "1")]
+    pub order_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub new_price: ::core::option::Option<super::super::common::v1::FieldElement>,
+    #[prost(message, optional, tag = "3")]
+    pub new_quantity: ::core::option::Option<super::super::common::v1::FieldElement>,
+}
+/// Sequencer → MPC nodes: one fused batch of post-only modifies. Each leg is a
+/// cancel-replace of a resting order; nodes run all cancels then a fused
+/// batch-insert for the amended replacements (rejecting any that would cross).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchModifyMessage {
+    #[prost(uint64, tag = "1")]
+    pub symbol_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub sequence: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, repeated, tag = "4")]
+    pub legs: ::prost::alloc::vec::Vec<BatchModifyLegShare>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SigningRequestCommitment {
@@ -166,6 +236,8 @@ pub struct OpenOrderRow {
     pub timestamp: u64,
     #[prost(bytes = "vec", tag = "13")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, optional, tag = "14")]
+    pub expiry_time: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenOrdersSnapshot {
@@ -180,10 +252,6 @@ pub struct OpenOrdersSnapshot {
 /// orders: Filled, Cancelled, Rejected). Dispatched directly in the
 /// sequencer (no MPC fanout) and replied with an `OrderHistorySnapshot`
 /// inside `NodeResponse`.
-///
-/// Not yet attached to the `SequencerMessage` / `EdgeSequencerRequest` /
-/// `NodeResponse` oneofs — wire-up happens in a follow-up chunk together
-/// with the sequencer handler.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetOrderHistoryRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -209,6 +277,7 @@ pub struct GetOrderHistoryRequest {
 /// reject reasons, realized PnL, avg fill price).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OrderHistoryRow {
+    /// --- Core order fields (1–13 aligned with OpenOrderRow) ---
     #[prost(uint64, tag = "1")]
     pub order_id: u64,
     #[prost(uint64, tag = "2")]
@@ -233,8 +302,9 @@ pub struct OrderHistoryRow {
     pub leverage: u32,
     #[prost(uint64, tag = "12")]
     pub placed_timestamp: u64,
-    #[prost(uint64, tag = "13")]
-    pub terminal_timestamp: u64,
+    #[prost(bytes = "vec", tag = "13")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// --- Terminal-state fields (14–16 aligned with OrderUpdateMessage) ---
     #[prost(
         enumeration = "super::super::common::v1::CancelReason",
         optional,
@@ -245,8 +315,11 @@ pub struct OrderHistoryRow {
     pub reject_reason_code: ::core::option::Option<u32>,
     #[prost(string, optional, tag = "16")]
     pub realized_pnl: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(bytes = "vec", tag = "17")]
-    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// --- OrderHistoryRow-specific fields (17+) ---
+    #[prost(uint64, tag = "17")]
+    pub terminal_timestamp: u64,
+    #[prost(string, optional, tag = "18")]
+    pub msg: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OrderHistorySnapshot {
@@ -287,7 +360,7 @@ pub mod signing_request {
 pub struct SequencerMessage {
     #[prost(
         oneof = "sequencer_message::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15"
     )]
     pub inner: ::core::option::Option<sequencer_message::Inner>,
 }
@@ -319,6 +392,12 @@ pub mod sequencer_message {
         FillShareAck(super::FillShareAck),
         #[prost(message, tag = "12")]
         Catchup(super::CatchUpMutation),
+        #[prost(message, tag = "13")]
+        MassQuote(super::MassQuoteMessage),
+        #[prost(message, tag = "14")]
+        BatchCancel(super::BatchCancelMessage),
+        #[prost(message, tag = "15")]
+        BatchModify(super::BatchModifyMessage),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -354,6 +433,8 @@ pub struct PlaceOrderInput {
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "12")]
     pub timestamp: u64,
+    /// Fields 13–19 reserved for future core order fields.
+    /// Edge-only routing / policy fields start at 20.
     #[prost(bytes = "vec", tag = "20")]
     pub user_uuid: ::prost::alloc::vec::Vec<u8>,
     /// Client-selected leverage multiplier (1 = 1x isolated margin). Edge
@@ -378,6 +459,98 @@ pub struct ModifyOrderInput {
     pub new_quantity: ::core::option::Option<f64>,
     #[prost(bytes = "vec", tag = "6")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// Fields 7–19 reserved for future core modify fields.
+    #[prost(bytes = "vec", tag = "20")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+}
+/// One leg of a mass quote: cancel an existing resting order and place a
+/// replacement limit order on the same symbol. Limit-only; GTC or GTD.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MassQuoteLeg {
+    /// Resting order to cancel-replace. 0 = pure place (no cancel target).
+    #[prost(uint64, tag = "1")]
+    pub cancel_order_id: u64,
+    #[prost(enumeration = "super::super::common::v1::Side", tag = "2")]
+    pub side: i32,
+    #[prost(double, tag = "3")]
+    pub price: f64,
+    #[prost(double, tag = "4")]
+    pub quantity: f64,
+    #[prost(enumeration = "super::super::common::v1::TimeInForce", tag = "5")]
+    pub time_in_force: i32,
+    /// Required when time_in_force = GTD.
+    #[prost(uint64, optional, tag = "6")]
+    pub expiry_time: ::core::option::Option<u64>,
+    #[prost(bytes = "vec", tag = "7")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+}
+/// Edge → sequencer: a batch of up to 20 cancel-replace legs on one symbol.
+/// Single symbol per batch enables one fused MPC comparison round.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MassQuoteInput {
+    #[prost(uint64, tag = "1")]
+    pub symbol_id: u64,
+    #[prost(bytes = "vec", tag = "2")]
+    pub user_commitment: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, repeated, tag = "3")]
+    pub legs: ::prost::alloc::vec::Vec<MassQuoteLeg>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// Edge-only routing / policy fields start at 20 (mirrors PlaceOrderInput).
+    #[prost(bytes = "vec", tag = "20")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "21")]
+    pub leverage: u32,
+    #[prost(enumeration = "super::super::common::v1::StpMode", tag = "22")]
+    pub stp_mode: i32,
+    /// When false, crossing legs take liquidity instead of being rejected. Absent
+    /// => true (post-only) for backward compatibility.
+    #[prost(bool, optional, tag = "23")]
+    pub post_only: ::core::option::Option<bool>,
+}
+/// Edge → sequencer: cancel up to 20 resting orders on one symbol in a single
+/// request. Single symbol per batch (mirrors MassQuoteInput).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchCancelInput {
+    #[prost(uint64, tag = "1")]
+    pub symbol_id: u64,
+    #[prost(bytes = "vec", tag = "2")]
+    pub user_commitment: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, repeated, tag = "3")]
+    pub order_ids: ::prost::alloc::vec::Vec<u64>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// Edge-only routing fields start at 20 (mirrors MassQuoteInput).
+    #[prost(bytes = "vec", tag = "20")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+}
+/// One leg of a batch modify: amend a resting order's price and/or quantity.
+/// At least one of new_price / new_quantity must be set.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchModifyLeg {
+    #[prost(uint64, tag = "1")]
+    pub order_id: u64,
+    #[prost(double, optional, tag = "2")]
+    pub new_price: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "3")]
+    pub new_quantity: ::core::option::Option<f64>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+}
+/// Edge → sequencer: amend up to 20 resting orders on one symbol in a single
+/// post-only batch. Single symbol per batch enables one fused MPC comparison
+/// round (mirrors MassQuoteInput).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchModifyInput {
+    #[prost(uint64, tag = "1")]
+    pub symbol_id: u64,
+    #[prost(bytes = "vec", tag = "2")]
+    pub user_commitment: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, repeated, tag = "3")]
+    pub legs: ::prost::alloc::vec::Vec<BatchModifyLeg>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// Edge-only routing fields start at 20 (mirrors MassQuoteInput).
     #[prost(bytes = "vec", tag = "20")]
     pub user_uuid: ::prost::alloc::vec::Vec<u8>,
 }
@@ -402,7 +575,7 @@ pub struct PoolWithdrawRequest {
     #[prost(bytes = "vec", tag = "3")]
     pub idempotency_key: ::prost::alloc::vec::Vec<u8>,
 }
-/// / Debit shielded balance and mint LP shares (sequencer-internal; no Solana tx).
+/// Debit shielded balance and mint LP shares (sequencer-internal; no Solana tx).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PoolDepositRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -419,7 +592,7 @@ pub struct LiquidityPoolStatusRequest {
     #[prost(bytes = "vec", tag = "2")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// / Shield then LP-assign in one QUIC round-trip (wallet SPL → vault_stub + shield → sequencer submits + credits + pool deposit).
+/// Shield then LP-assign in one QUIC round-trip (wallet SPL → vault_stub + shield → sequencer submits + credits + pool deposit).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ShieldAndPoolDepositRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -432,7 +605,7 @@ pub struct ShieldAndPoolDepositRequest {
     pub tx_signature: ::prost::alloc::string::String,
     #[prost(bytes = "vec", tag = "5")]
     pub idempotency_key: ::prost::alloc::vec::Vec<u8>,
-    /// / Bincode-serialized Solana \[`Transaction`\] (wallet-signed); sequencer submits to RPC.
+    /// Bincode-serialized Solana Transaction (wallet-signed); sequencer submits to RPC.
     #[prost(bytes = "vec", tag = "6")]
     pub signed_transaction: ::prost::alloc::vec::Vec<u8>,
 }
@@ -466,7 +639,7 @@ pub struct TierSnapshotPush {
     #[prost(message, repeated, tag = "2")]
     pub users: ::prost::alloc::vec::Vec<TierUserSnapshotRow>,
 }
-/// / Edge relays a wallet-signed shield/unshield bundle; sequencer submits to Solana then updates WAL + ledger.
+/// Edge relays a wallet-signed shield/unshield bundle; sequencer submits to Solana then updates WAL + ledger.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ShieldSubmitRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -488,11 +661,25 @@ pub struct UpdateLeverageRequest {
     #[prost(bytes = "vec", tag = "4")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
+/// Add or remove collateral from an isolated-margin position's silo.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AdjustMarginRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub symbol_id: u64,
+    /// Signed delta: positive = add margin, negative = remove margin.
+    /// Encoded as sint64 for efficient varint of negative values.
+    #[prost(sint64, tag = "3")]
+    pub amount: i64,
+    #[prost(bytes = "vec", tag = "4")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EdgeSequencerRequest {
     #[prost(
         oneof = "edge_sequencer_request::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17, 18, 19"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23"
     )]
     pub inner: ::core::option::Option<edge_sequencer_request::Inner>,
 }
@@ -518,7 +705,6 @@ pub mod edge_sequencer_request {
         UnsubscribePositions(super::UnsubscribePositions),
         #[prost(message, tag = "9")]
         BalanceChange(super::BalanceChangeMessage),
-        /// Field 10 (pool_deposit / PoolDepositRequest) removed — unknown wire data ignored by new clients.
         #[prost(message, tag = "11")]
         PoolWithdraw(super::PoolWithdrawRequest),
         #[prost(message, tag = "12")]
@@ -529,13 +715,20 @@ pub mod edge_sequencer_request {
         QueryBalance(super::QueryBalanceRequest),
         #[prost(message, tag = "15")]
         TierSnapshotPush(super::TierSnapshotPush),
-        /// Field 16 (balance_sync) removed — sequencer-owned submission removes lazy sync.
         #[prost(message, tag = "17")]
         ShieldSubmit(super::ShieldSubmitRequest),
         #[prost(message, tag = "18")]
         PoolDeposit(super::PoolDepositRequest),
         #[prost(message, tag = "19")]
         UpdateLeverage(super::UpdateLeverageRequest),
+        #[prost(message, tag = "20")]
+        AdjustMargin(super::AdjustMarginRequest),
+        #[prost(message, tag = "21")]
+        MassQuote(super::MassQuoteInput),
+        #[prost(message, tag = "22")]
+        BatchCancel(super::BatchCancelInput),
+        #[prost(message, tag = "23")]
+        BatchModify(super::BatchModifyInput),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -639,6 +832,90 @@ pub struct AckMessage {
     pub shielded_balance_raw: ::core::option::Option<u64>,
     #[prost(bytes = "vec", optional, tag = "13")]
     pub book_hash: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Client-facing rejection copy when `error_code` alone is too generic (e.g. pre-trade oracle guard).
+    #[prost(string, optional, tag = "14")]
+    pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct MassQuoteLegResult {
+    #[prost(uint32, tag = "1")]
+    pub leg_index: u32,
+    /// Order id that was cancelled (0 if no cancel target or cancel failed).
+    #[prost(uint64, tag = "2")]
+    pub cancelled_order_id: u64,
+    /// New resting/filled order id (0 if the replacement failed).
+    #[prost(uint64, tag = "3")]
+    pub new_order_id: u64,
+    #[prost(enumeration = "MassQuoteLegStatus", tag = "4")]
+    pub status: i32,
+    #[prost(uint32, optional, tag = "5")]
+    pub error_code: ::core::option::Option<u32>,
+    /// Number of taker fills this leg produced (relaxed take). 0 for a pure rest
+    /// or a post-only leg. The sequencer uses this to decide whether to pull fill
+    /// shares for `new_order_id` (the leg's taker order id).
+    #[prost(uint32, tag = "6")]
+    pub fill_count: u32,
+}
+/// Node → sequencer → edge: per-leg outcome of a mass quote batch. Detailed
+/// fills flow through the existing per-order OrderUpdate push (one per
+/// new_order_id); this ack carries the batch-level open/failed summary.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MassQuoteAck {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub sequence: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, repeated, tag = "4")]
+    pub results: ::prost::alloc::vec::Vec<MassQuoteLegResult>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct BatchCancelLegResult {
+    #[prost(uint64, tag = "1")]
+    pub order_id: u64,
+    /// True if the order was resting and was removed; false if not found.
+    #[prost(bool, tag = "2")]
+    pub cancelled: bool,
+    /// Set when `cancelled` is false (e.g. order-not-found).
+    #[prost(uint32, optional, tag = "3")]
+    pub error_code: ::core::option::Option<u32>,
+}
+/// Node → sequencer → edge: per-id outcome of a batch cancel.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchCancelAck {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub sequence: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, repeated, tag = "4")]
+    pub results: ::prost::alloc::vec::Vec<BatchCancelLegResult>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct BatchModifyLegResult {
+    #[prost(uint64, tag = "1")]
+    pub order_id: u64,
+    /// True if the order was amended and rested post-only; false if not found or
+    /// the amended order would cross (post-only reject).
+    #[prost(bool, tag = "2")]
+    pub modified: bool,
+    /// Set when `modified` is false (2003 not-found, 2018 crossed, else failure).
+    #[prost(uint32, optional, tag = "3")]
+    pub error_code: ::core::option::Option<u32>,
+}
+/// Node → sequencer → edge: per-leg outcome of a batch modify.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchModifyAck {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub sequence: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, repeated, tag = "4")]
+    pub results: ::prost::alloc::vec::Vec<BatchModifyLegResult>,
 }
 /// Phase 5 — liquidity pool command results (edge ↔ sequencer QUIC).
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
@@ -762,7 +1039,7 @@ pub struct CatchupApplied {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct NodeResponse {
-    #[prost(oneof = "node_response::Inner", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
+    #[prost(oneof = "node_response::Inner", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
     pub inner: ::core::option::Option<node_response::Inner>,
 }
 /// Nested message and enum types in `NodeResponse`.
@@ -785,6 +1062,12 @@ pub mod node_response {
         NodeReady(super::NodeReady),
         #[prost(message, tag = "8")]
         CatchupApplied(super::CatchupApplied),
+        #[prost(message, tag = "9")]
+        MassQuoteAck(super::MassQuoteAck),
+        #[prost(message, tag = "10")]
+        BatchCancelAck(super::BatchCancelAck),
+        #[prost(message, tag = "11")]
+        BatchModifyAck(super::BatchModifyAck),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -820,52 +1103,52 @@ pub mod mask_transport_message {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OrderUpdateMessage {
-    #[prost(enumeration = "super::super::common::v1::OrderUpdateType", tag = "1")]
-    pub message_type: i32,
-    #[prost(uint64, tag = "2")]
+    /// --- Core order fields (1–13 aligned with OpenOrderRow) ---
+    #[prost(uint64, tag = "1")]
     pub order_id: u64,
-    #[prost(bytes = "vec", tag = "3")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag = "4")]
+    #[prost(uint64, tag = "2")]
     pub symbol_id: u64,
-    #[prost(enumeration = "super::super::common::v1::OrderStatus", tag = "5")]
-    pub order_status: i32,
-    #[prost(string, tag = "6")]
-    pub price: ::prost::alloc::string::String,
-    #[prost(string, tag = "7")]
-    pub quantity: ::prost::alloc::string::String,
-    #[prost(enumeration = "super::super::common::v1::Side", tag = "8")]
+    #[prost(enumeration = "super::super::common::v1::Side", tag = "3")]
     pub side: i32,
-    #[prost(string, tag = "9")]
+    #[prost(enumeration = "super::super::common::v1::OrderType", tag = "4")]
+    pub order_type: i32,
+    #[prost(string, tag = "5")]
+    pub price: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub quantity: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
     pub filled_qty: ::prost::alloc::string::String,
-    #[prost(string, tag = "10")]
+    #[prost(string, tag = "8")]
     pub remaining_qty: ::prost::alloc::string::String,
-    #[prost(string, tag = "11")]
-    pub cum_fill: ::prost::alloc::string::String,
+    #[prost(enumeration = "super::super::common::v1::OrderStatus", tag = "9")]
+    pub order_status: i32,
+    /// 10 reserved (time_in_force — not applicable to push updates).
+    #[prost(uint32, tag = "11")]
+    pub leverage: u32,
+    #[prost(uint64, tag = "12")]
+    pub timestamp: u64,
+    #[prost(bytes = "vec", tag = "13")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// --- Terminal-state fields (14–16 aligned with OrderHistoryRow) ---
     #[prost(
         enumeration = "super::super::common::v1::CancelReason",
         optional,
-        tag = "12"
+        tag = "14"
     )]
     pub cancel_reason: ::core::option::Option<i32>,
-    #[prost(uint32, optional, tag = "13")]
+    #[prost(uint32, optional, tag = "15")]
     pub reject_reason_code: ::core::option::Option<u32>,
-    #[prost(bytes = "vec", tag = "14")]
-    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag = "15")]
-    pub timestamp: u64,
-    /// Client-selected leverage at order-placement time (1 = 1x).
-    #[prost(uint32, tag = "16")]
-    pub leverage: u32,
-    /// Realized PnL accumulated by this order (decimal string, scaled the
-    /// same way as `price`). Present on closing fills / terminal events;
-    /// empty string otherwise. `optional` so receivers can distinguish
-    /// "zero realized" from "field not emitted".
-    #[prost(string, optional, tag = "17")]
+    #[prost(string, optional, tag = "16")]
     pub realized_pnl: ::core::option::Option<::prost::alloc::string::String>,
-    /// Order type (limit, market, peg variants).
-    #[prost(enumeration = "super::super::common::v1::OrderType", tag = "18")]
-    pub order_type: i32,
+    /// --- OrderUpdateMessage-specific fields (17+) ---
+    #[prost(enumeration = "super::super::common::v1::OrderUpdateType", tag = "17")]
+    pub message_type: i32,
+    #[prost(bytes = "vec", tag = "18")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "19")]
+    pub cum_fill: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "20")]
+    pub msg: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// One position inside a `PositionsSnapshot` batch. All decimal fields
 /// are rendered at the sequencer's configured `decimal_places`; PnL /
@@ -918,6 +1201,11 @@ pub struct PositionRow {
         tag = "12"
     )]
     pub position_status: ::core::option::Option<i32>,
+    /// Total margin allocated to this position (IM + any user-added margin),
+    /// decimal string. Equivalent to `margin` / `marginUsed` on other exchanges.
+    /// Absent when not computed.
+    #[prost(string, optional, tag = "13")]
+    pub margin: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Full-user positions batch. Emitted on (a) initial subscribe, (b) the
 /// 5-second periodic sweep, and (c) any position-changing fill for this
@@ -945,29 +1233,32 @@ pub struct PositionsSnapshot {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PositionUpdateMessage {
-    #[prost(enumeration = "super::super::common::v1::PositionUpdateType", tag = "1")]
-    pub update_type: i32,
-    #[prost(bytes = "vec", tag = "2")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag = "3")]
+    /// --- Core position fields (1–5 aligned with PositionRow) ---
+    #[prost(uint64, tag = "1")]
     pub symbol_id: u64,
-    #[prost(enumeration = "super::super::common::v1::Side", tag = "4")]
+    #[prost(enumeration = "super::super::common::v1::Side", tag = "2")]
     pub side: i32,
-    #[prost(string, tag = "5")]
+    #[prost(string, tag = "3")]
     pub size: ::prost::alloc::string::String,
-    #[prost(string, tag = "6")]
+    #[prost(string, tag = "4")]
     pub entry_price: ::prost::alloc::string::String,
-    #[prost(string, tag = "7")]
+    /// 5 reserved (leverage — carried on PositionRow, not per-event updates).
+    /// --- PositionUpdateMessage-specific fields (6+) ---
+    #[prost(enumeration = "super::super::common::v1::PositionUpdateType", tag = "6")]
+    pub update_type: i32,
+    #[prost(bytes = "vec", tag = "7")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "8")]
     pub previous_size: ::prost::alloc::string::String,
-    #[prost(string, optional, tag = "8")]
-    pub fill_price: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "9")]
+    pub fill_price: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "10")]
     pub fill_qty: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(bytes = "vec", optional, tag = "10")]
+    #[prost(bytes = "vec", optional, tag = "11")]
     pub correlation_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
-    #[prost(uint64, tag = "11")]
+    #[prost(uint64, tag = "12")]
     pub timestamp: u64,
-    #[prost(string, optional, tag = "12")]
+    #[prost(string, optional, tag = "13")]
     pub funding_rate: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -982,6 +1273,12 @@ pub struct FundingRateUpdateMessage {
     pub next_funding_time: u64,
     #[prost(uint64, tag = "5")]
     pub timestamp: u64,
+    /// Maximum absolute funding rate per canonical period in decimal BPS (symmetric cap/floor).
+    #[prost(string, optional, tag = "6")]
+    pub max_rate_bps: ::core::option::Option<::prost::alloc::string::String>,
+    /// Canonical funding period in hours (e.g. 8).
+    #[prost(uint32, optional, tag = "7")]
+    pub funding_period_hours: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenInterestUpdateMessage {
@@ -1004,7 +1301,6 @@ pub struct VolumeUpdateMessage {
     /// Notional volume of this fill batch in quote currency (decimal string).
     #[prost(string, tag = "2")]
     pub notional_delta: ::prost::alloc::string::String,
-    /// Field 3 intentionally skipped (was num_trades, removed before first use).
     #[prost(uint64, tag = "4")]
     pub timestamp: u64,
 }
@@ -1135,6 +1431,41 @@ pub struct FencedEdgeMessage {
     pub fencing_epoch: u64,
     #[prost(message, optional, tag = "2")]
     pub inner: ::core::option::Option<SequencerToEdgeMessage>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MassQuoteLegStatus {
+    Unspecified = 0,
+    /// Replacement order is live (resting or partially filled).
+    Open = 1,
+    /// Replacement order fully filled on placement.
+    Filled = 2,
+    /// Leg failed; see `error_code` (e.g. stale cancel target, risk reject).
+    Failed = 3,
+}
+impl MassQuoteLegStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "MASS_QUOTE_LEG_STATUS_UNSPECIFIED",
+            Self::Open => "MASS_QUOTE_LEG_STATUS_OPEN",
+            Self::Filled => "MASS_QUOTE_LEG_STATUS_FILLED",
+            Self::Failed => "MASS_QUOTE_LEG_STATUS_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MASS_QUOTE_LEG_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "MASS_QUOTE_LEG_STATUS_OPEN" => Some(Self::Open),
+            "MASS_QUOTE_LEG_STATUS_FILLED" => Some(Self::Filled),
+            "MASS_QUOTE_LEG_STATUS_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

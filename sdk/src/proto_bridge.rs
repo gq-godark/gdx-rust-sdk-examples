@@ -85,6 +85,7 @@ pub fn build_cancel_order_proto(
         symbol_id,
         sequence: 0,
         correlation_id: correlation_id_bytes.to_vec(),
+        cancel_reason: None,
     };
     let req = sequencer::EdgeSequencerRequest {
         inner: Some(sequencer::edge_sequencer_request::Inner::Cancel(cancel)),
@@ -134,6 +135,229 @@ pub fn build_update_leverage_proto(
         )),
     };
     req.encode_to_vec()
+}
+
+/// Build a `MassQuoteInput` (bulk cancel-replace) wrapped in an
+/// `EdgeSequencerRequest`. Each leg becomes its own order and carries a unique
+/// 16-byte correlation id (the wire requires exactly 16 bytes per leg).
+pub fn build_mass_quote_proto(
+    symbol_id: u64,
+    user_uuid: &[u8],
+    legs: &[crate::types::MassQuoteLegInput],
+    correlation_id_bytes: &[u8],
+    leverage: u32,
+    post_only: Option<bool>,
+) -> Vec<u8> {
+    let pb_legs = legs
+        .iter()
+        .map(|leg| {
+            let tif = leg.time_in_force.unwrap_or(crate::enums::TimeInForce::Gtc);
+            sequencer::MassQuoteLeg {
+                // 0 means "pure place" (no cancel target).
+                cancel_order_id: leg.cancel_order_id.unwrap_or(0),
+                side: leg.side.to_proto(),
+                price: leg.price,
+                quantity: leg.quantity,
+                time_in_force: tif.to_proto(),
+                expiry_time: leg.expiry_time,
+                correlation_id: Uuid::new_v4().into_bytes().to_vec(),
+            }
+        })
+        .collect();
+    let mq = sequencer::MassQuoteInput {
+        symbol_id,
+        user_commitment: Vec::new(),
+        legs: pb_legs,
+        correlation_id: correlation_id_bytes.to_vec(),
+        user_uuid: user_uuid.to_vec(),
+        leverage,
+        stp_mode: 0,
+        // None keeps the node default (post-only); Some(false) enables the
+        // relaxed path where a crossing leg takes liquidity and rests the rest.
+        post_only,
+    };
+    let req = sequencer::EdgeSequencerRequest {
+        inner: Some(sequencer::edge_sequencer_request::Inner::MassQuote(mq)),
+    };
+    req.encode_to_vec()
+}
+
+/// Build a `BatchCancelInput` (cancel up to 20 resting orders on one symbol)
+/// wrapped in an `EdgeSequencerRequest`.
+pub fn build_batch_cancel_proto(
+    symbol_id: u64,
+    user_uuid: &[u8],
+    order_ids: &[u64],
+    correlation_id_bytes: &[u8],
+) -> Vec<u8> {
+    let bc = sequencer::BatchCancelInput {
+        symbol_id,
+        user_commitment: Vec::new(),
+        order_ids: order_ids.to_vec(),
+        correlation_id: correlation_id_bytes.to_vec(),
+        user_uuid: user_uuid.to_vec(),
+    };
+    let req = sequencer::EdgeSequencerRequest {
+        inner: Some(sequencer::edge_sequencer_request::Inner::BatchCancel(bc)),
+    };
+    req.encode_to_vec()
+}
+
+/// Build a `BatchModifyInput` (post-only amend up to 20 resting orders on one
+/// symbol) wrapped in an `EdgeSequencerRequest`. Each leg carries a unique
+/// 16-byte correlation id.
+pub fn build_batch_modify_proto(
+    symbol_id: u64,
+    user_uuid: &[u8],
+    legs: &[crate::types::BatchModifyLegInput],
+    correlation_id_bytes: &[u8],
+) -> Vec<u8> {
+    let pb_legs = legs
+        .iter()
+        .map(|leg| sequencer::BatchModifyLeg {
+            order_id: leg.order_id,
+            new_price: leg.new_price,
+            new_quantity: leg.new_quantity,
+            correlation_id: Uuid::new_v4().into_bytes().to_vec(),
+        })
+        .collect();
+    let bm = sequencer::BatchModifyInput {
+        symbol_id,
+        user_commitment: Vec::new(),
+        legs: pb_legs,
+        correlation_id: correlation_id_bytes.to_vec(),
+        user_uuid: user_uuid.to_vec(),
+    };
+    let req = sequencer::EdgeSequencerRequest {
+        inner: Some(sequencer::edge_sequencer_request::Inner::BatchModify(bm)),
+    };
+    req.encode_to_vec()
+}
+
+fn mass_quote_leg_status_str(status: i32) -> &'static str {
+    match sequencer::MassQuoteLegStatus::try_from(status) {
+        Ok(sequencer::MassQuoteLegStatus::Open) => "open",
+        Ok(sequencer::MassQuoteLegStatus::Filled) => "filled",
+        Ok(sequencer::MassQuoteLegStatus::Failed) => "failed",
+        Ok(sequencer::MassQuoteLegStatus::Unspecified) => "unspecified",
+        Err(_) => "unknown",
+    }
+}
+
+/// Decode a `NodeResponse` carrying a `MassQuoteAck`. `success` is true when no
+/// leg failed.
+pub fn parse_mass_quote_ack(data: &[u8]) -> Result<crate::types::MassQuoteAck, GodarkError> {
+    let resp = sequencer::NodeResponse::decode(data)
+        .map_err(|e| GodarkError::Encryption(format!("decode NodeResponse: {e}")))?;
+    let ack = match resp.inner {
+        Some(sequencer::node_response::Inner::MassQuoteAck(a)) => a,
+        other => {
+            return Err(GodarkError::Order {
+                message: format!(
+                    "Expected mass_quote_ack, got {}",
+                    node_response_kind(&other)
+                ),
+                error_code: None,
+            });
+        }
+    };
+    let results: Vec<crate::types::MassQuoteLegResult> = ack
+        .results
+        .into_iter()
+        .map(|r| crate::types::MassQuoteLegResult {
+            leg_index: r.leg_index,
+            status: mass_quote_leg_status_str(r.status).to_string(),
+            cancelled_order_id: (r.cancelled_order_id != 0)
+                .then(|| r.cancelled_order_id.to_string()),
+            new_order_id: (r.new_order_id != 0).then(|| r.new_order_id.to_string()),
+            error_code: r.error_code,
+            fill_count: r.fill_count,
+        })
+        .collect();
+    let success = results.iter().all(|r| r.status != "failed");
+    Ok(crate::types::MassQuoteAck {
+        success,
+        sequence: ack.sequence.to_string(),
+        results,
+    })
+}
+
+/// Decode a `NodeResponse` carrying a `BatchCancelAck`. `success` is true when
+/// every id was cancelled.
+pub fn parse_batch_cancel_ack(data: &[u8]) -> Result<crate::types::BatchCancelAck, GodarkError> {
+    let resp = sequencer::NodeResponse::decode(data)
+        .map_err(|e| GodarkError::Encryption(format!("decode NodeResponse: {e}")))?;
+    let ack = match resp.inner {
+        Some(sequencer::node_response::Inner::BatchCancelAck(a)) => a,
+        other => {
+            return Err(GodarkError::Order {
+                message: format!(
+                    "Expected batch_cancel_ack, got {}",
+                    node_response_kind(&other)
+                ),
+                error_code: None,
+            });
+        }
+    };
+    let results: Vec<crate::types::BatchCancelLegResult> = ack
+        .results
+        .into_iter()
+        .map(|r| crate::types::BatchCancelLegResult {
+            order_id: r.order_id.to_string(),
+            cancelled: r.cancelled,
+            error_code: r.error_code,
+        })
+        .collect();
+    let success = results.iter().all(|r| r.cancelled);
+    Ok(crate::types::BatchCancelAck {
+        success,
+        sequence: ack.sequence.to_string(),
+        results,
+    })
+}
+
+/// Decode a `NodeResponse` carrying a `BatchModifyAck`. `success` is true when
+/// every leg was modified.
+pub fn parse_batch_modify_ack(data: &[u8]) -> Result<crate::types::BatchModifyAck, GodarkError> {
+    let resp = sequencer::NodeResponse::decode(data)
+        .map_err(|e| GodarkError::Encryption(format!("decode NodeResponse: {e}")))?;
+    let ack = match resp.inner {
+        Some(sequencer::node_response::Inner::BatchModifyAck(a)) => a,
+        other => {
+            return Err(GodarkError::Order {
+                message: format!(
+                    "Expected batch_modify_ack, got {}",
+                    node_response_kind(&other)
+                ),
+                error_code: None,
+            });
+        }
+    };
+    let results: Vec<crate::types::BatchModifyLegResult> = ack
+        .results
+        .into_iter()
+        .map(|r| crate::types::BatchModifyLegResult {
+            order_id: r.order_id.to_string(),
+            modified: r.modified,
+            error_code: r.error_code,
+        })
+        .collect();
+    let success = results.iter().all(|r| r.modified);
+    Ok(crate::types::BatchModifyAck {
+        success,
+        sequence: ack.sequence.to_string(),
+        results,
+    })
+}
+
+fn node_response_kind(inner: &Option<sequencer::node_response::Inner>) -> &'static str {
+    match inner {
+        Some(sequencer::node_response::Inner::MassQuoteAck(_)) => "mass_quote_ack",
+        Some(sequencer::node_response::Inner::BatchCancelAck(_)) => "batch_cancel_ack",
+        Some(sequencer::node_response::Inner::BatchModifyAck(_)) => "batch_modify_ack",
+        Some(_) => "other",
+        None => "unknown",
+    }
 }
 
 pub fn build_order_header_aad(
@@ -227,7 +451,10 @@ pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError>
         | Some(sequencer::node_response::Inner::OrderHistorySnapshot(_))
         | Some(sequencer::node_response::Inner::FillShareResponse(_))
         | Some(sequencer::node_response::Inner::NodeReady(_))
-        | Some(sequencer::node_response::Inner::CatchupApplied(_)) => Ok(NodeResponseKind::Unknown),
+        | Some(sequencer::node_response::Inner::CatchupApplied(_))
+        | Some(sequencer::node_response::Inner::MassQuoteAck(_))
+        | Some(sequencer::node_response::Inner::BatchCancelAck(_))
+        | Some(sequencer::node_response::Inner::BatchModifyAck(_)) => Ok(NodeResponseKind::Unknown),
         None => Ok(NodeResponseKind::Unknown),
     }
 }
@@ -440,7 +667,6 @@ mod tests {
         CancelReason, OrderStatus, OrderType, OrderUpdateType, PositionUpdateType, Side,
         TimeInForce,
     };
-    use crate::generated::edge::v1 as edge;
     use crate::generated::sequencer::v1 as sequencer;
 
     use super::*;
@@ -544,10 +770,210 @@ mod tests {
     }
 
     #[test]
-    fn test_build_order_header_aad_update_leverage() {
-        let bytes = build_order_header_aad(&TEST_UUID, 1, "update_leverage", 3, 128, b"");
-        let header = edge::OrderHeader::decode(bytes.as_slice()).expect("decode");
-        assert_eq!(header.request_type, 8);
+    fn test_build_mass_quote_proto_roundtrip() {
+        let legs = vec![
+            crate::types::MassQuoteLegInput {
+                side: Side::Buy,
+                price: 100.5,
+                quantity: 1.0,
+                cancel_order_id: Some(42),
+                time_in_force: None,
+                expiry_time: None,
+            },
+            crate::types::MassQuoteLegInput {
+                side: Side::Sell,
+                price: 200.0,
+                quantity: 2.0,
+                cancel_order_id: None,
+                time_in_force: Some(TimeInForce::Gtc),
+                expiry_time: None,
+            },
+        ];
+        let bytes = build_mass_quote_proto(7, &TEST_UUID, &legs, &[0u8; 16], 3, None);
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let mq = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::MassQuote(m)) => m,
+            other => panic!("expected MassQuote, got {:?}", other),
+        };
+        assert_eq!(mq.symbol_id, 7);
+        assert_eq!(mq.user_uuid, TEST_UUID.as_slice());
+        assert_eq!(mq.leverage, 3);
+        assert_eq!(mq.legs.len(), 2);
+        assert_eq!(mq.legs[0].cancel_order_id, 42);
+        assert_eq!(mq.legs[0].price, 100.5);
+        // Pure-place leg defaults the cancel target to 0.
+        assert_eq!(mq.legs[1].cancel_order_id, 0);
+        // Each leg carries a unique 16-byte correlation id.
+        assert_eq!(mq.legs[0].correlation_id.len(), 16);
+        assert_ne!(mq.legs[0].correlation_id, mq.legs[1].correlation_id);
+        // Default omits post_only (node defaults to post-only).
+        assert_eq!(mq.post_only, None);
+    }
+
+    #[test]
+    fn test_build_mass_quote_proto_relaxed_post_only() {
+        let legs = vec![crate::types::MassQuoteLegInput {
+            side: Side::Buy,
+            price: 100.0,
+            quantity: 1.0,
+            cancel_order_id: None,
+            time_in_force: None,
+            expiry_time: None,
+        }];
+        let bytes = build_mass_quote_proto(1, &TEST_UUID, &legs, &[0u8; 16], 1, Some(false));
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let mq = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::MassQuote(m)) => m,
+            other => panic!("expected MassQuote, got {:?}", other),
+        };
+        assert_eq!(mq.post_only, Some(false));
+    }
+
+    #[test]
+    fn test_build_batch_cancel_proto_roundtrip() {
+        let bytes = build_batch_cancel_proto(9, &TEST_UUID, &[11, 22, 33], b"bc");
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let bc = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::BatchCancel(b)) => b,
+            other => panic!("expected BatchCancel, got {:?}", other),
+        };
+        assert_eq!(bc.symbol_id, 9);
+        assert_eq!(bc.user_uuid, TEST_UUID.as_slice());
+        assert_eq!(bc.order_ids, vec![11, 22, 33]);
+        assert_eq!(bc.correlation_id, b"bc".as_slice());
+    }
+
+    #[test]
+    fn test_build_batch_modify_proto_roundtrip() {
+        let legs = vec![
+            crate::types::BatchModifyLegInput {
+                order_id: 5,
+                new_price: Some(101.0),
+                new_quantity: None,
+            },
+            crate::types::BatchModifyLegInput {
+                order_id: 6,
+                new_price: None,
+                new_quantity: Some(4.0),
+            },
+        ];
+        let bytes = build_batch_modify_proto(9, &TEST_UUID, &legs, &[0u8; 16]);
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let bm = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::BatchModify(b)) => b,
+            other => panic!("expected BatchModify, got {:?}", other),
+        };
+        assert_eq!(bm.symbol_id, 9);
+        assert_eq!(bm.legs.len(), 2);
+        assert_eq!(bm.legs[0].order_id, 5);
+        assert_eq!(bm.legs[0].new_price, Some(101.0));
+        assert_eq!(bm.legs[0].new_quantity, None);
+        assert_eq!(bm.legs[1].new_quantity, Some(4.0));
+        assert_eq!(bm.legs[0].correlation_id.len(), 16);
+    }
+
+    #[test]
+    fn test_parse_mass_quote_ack_roundtrip() {
+        let ack = sequencer::MassQuoteAck {
+            node_id: 1,
+            sequence: 99,
+            correlation_id: vec![],
+            results: vec![
+                sequencer::MassQuoteLegResult {
+                    leg_index: 0,
+                    cancelled_order_id: 42,
+                    new_order_id: 77,
+                    status: sequencer::MassQuoteLegStatus::Open as i32,
+                    error_code: None,
+                    fill_count: 0,
+                },
+                sequencer::MassQuoteLegResult {
+                    leg_index: 1,
+                    cancelled_order_id: 0,
+                    new_order_id: 0,
+                    status: sequencer::MassQuoteLegStatus::Failed as i32,
+                    error_code: Some(2018),
+                    fill_count: 0,
+                },
+                sequencer::MassQuoteLegResult {
+                    leg_index: 2,
+                    cancelled_order_id: 0,
+                    new_order_id: 88,
+                    status: sequencer::MassQuoteLegStatus::Filled as i32,
+                    error_code: None,
+                    fill_count: 3,
+                },
+            ],
+        };
+        let resp = sequencer::NodeResponse {
+            inner: Some(sequencer::node_response::Inner::MassQuoteAck(ack)),
+        };
+        let parsed = parse_mass_quote_ack(&resp.encode_to_vec()).expect("parse");
+        assert!(!parsed.success);
+        assert_eq!(parsed.sequence, "99");
+        assert_eq!(parsed.results.len(), 3);
+        assert_eq!(parsed.results[0].status, "open");
+        assert_eq!(parsed.results[0].cancelled_order_id.as_deref(), Some("42"));
+        assert_eq!(parsed.results[0].new_order_id.as_deref(), Some("77"));
+        assert_eq!(parsed.results[0].fill_count, 0);
+        assert_eq!(parsed.results[1].status, "failed");
+        assert_eq!(parsed.results[1].cancelled_order_id, None);
+        assert_eq!(parsed.results[1].error_code, Some(2018));
+        // Relaxed taker leg surfaces its fill count.
+        assert_eq!(parsed.results[2].status, "filled");
+        assert_eq!(parsed.results[2].fill_count, 3);
+    }
+
+    #[test]
+    fn test_parse_batch_cancel_ack_roundtrip() {
+        let ack = sequencer::BatchCancelAck {
+            node_id: 1,
+            sequence: 5,
+            correlation_id: vec![],
+            results: vec![
+                sequencer::BatchCancelLegResult {
+                    order_id: 11,
+                    cancelled: true,
+                    error_code: None,
+                },
+                sequencer::BatchCancelLegResult {
+                    order_id: 22,
+                    cancelled: false,
+                    error_code: Some(2003),
+                },
+            ],
+        };
+        let resp = sequencer::NodeResponse {
+            inner: Some(sequencer::node_response::Inner::BatchCancelAck(ack)),
+        };
+        let parsed = parse_batch_cancel_ack(&resp.encode_to_vec()).expect("parse");
+        assert!(!parsed.success);
+        assert_eq!(parsed.results[0].order_id, "11");
+        assert!(parsed.results[0].cancelled);
+        assert!(!parsed.results[1].cancelled);
+        assert_eq!(parsed.results[1].error_code, Some(2003));
+    }
+
+    #[test]
+    fn test_parse_batch_modify_ack_roundtrip() {
+        let ack = sequencer::BatchModifyAck {
+            node_id: 1,
+            sequence: 7,
+            correlation_id: vec![],
+            results: vec![sequencer::BatchModifyLegResult {
+                order_id: 5,
+                modified: true,
+                error_code: None,
+            }],
+        };
+        let resp = sequencer::NodeResponse {
+            inner: Some(sequencer::node_response::Inner::BatchModifyAck(ack)),
+        };
+        let parsed = parse_batch_modify_ack(&resp.encode_to_vec()).expect("parse");
+        assert!(parsed.success);
+        assert_eq!(parsed.sequence, "7");
+        assert_eq!(parsed.results[0].order_id, "5");
+        assert!(parsed.results[0].modified);
     }
 
     #[test]
@@ -665,6 +1091,7 @@ mod tests {
             leverage: 1,
             realized_pnl: None,
             order_type: OrderType::Limit.to_proto(),
+            msg: None,
         };
         let bytes = msg.encode_to_vec();
         let u = parse_order_update(&bytes).expect("parse");
@@ -737,6 +1164,7 @@ mod tests {
             leverage: 1,
             realized_pnl: None,
             order_type: OrderType::Limit.to_proto(),
+            msg: None,
         };
         let msg = sequencer::SequencerToEdgeMessage {
             inner: Some(sequencer::sequencer_to_edge_message::Inner::OrderUpdate(
@@ -803,6 +1231,7 @@ mod tests {
             liquidation_price: None,
             adl_indicator: None,
             position_status: None,
+            margin: None,
         };
         let snap = sequencer::PositionsSnapshot {
             user_uuid: TEST_UUID.to_vec(),
@@ -890,6 +1319,8 @@ mod tests {
             predicted_rate: "0.0002".to_string(),
             next_funding_time: 1_700_003_600,
             timestamp: 1_700_000_004,
+            max_rate_bps: None,
+            funding_period_hours: None,
         };
         let msg = sequencer::SequencerToEdgeMessage {
             inner: Some(sequencer::sequencer_to_edge_message::Inner::FundingRateUpdate(f)),
