@@ -273,32 +273,26 @@ async fn main() {
     // Pass `Some(false)` for the relaxed path, where a crossing leg takes
     // liquidity up to its limit and rests the remainder (the number of taker
     // fills is reported per leg as `fill_count`).
+    // `GDX_BASE` anchors the ladder/cross near the live mark (default 64000) so
+    // the post-only legs rest below the book on any environment.
+    let base: f64 = std::env::var("GDX_BASE")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(64_000.0);
+    let round1 = |p: f64| (p * 10.0).round() / 10.0;
+    let mk = |price: f64| MassQuoteLegInput {
+        side: Side::Buy,
+        price: round1(price),
+        quantity: 0.02,
+        cancel_order_id: None,
+        time_in_force: None,
+        expiry_time: None,
+    };
     println!("Mass-quoting a 3-level BUY ladder (post-only)...");
     let ladder = vec![
-        MassQuoteLegInput {
-            side: Side::Buy,
-            price: 66_000.0,
-            quantity: 0.02,
-            cancel_order_id: None,
-            time_in_force: None,
-            expiry_time: None,
-        },
-        MassQuoteLegInput {
-            side: Side::Buy,
-            price: 65_500.0,
-            quantity: 0.02,
-            cancel_order_id: None,
-            time_in_force: None,
-            expiry_time: None,
-        },
-        MassQuoteLegInput {
-            side: Side::Buy,
-            price: 65_000.0,
-            quantity: 0.02,
-            cancel_order_id: None,
-            time_in_force: None,
-            expiry_time: None,
-        },
+        mk(base * (1.0 - 0.003)),
+        mk(base * (1.0 - 0.005)),
+        mk(base * (1.0 - 0.008)),
     ];
     let mut resting_ids: Vec<u64> = Vec::new();
     match client.mass_quote(SYMBOL, &ladder, 1, None).await {
@@ -350,6 +344,49 @@ async fn main() {
         tokio::time::sleep(Duration::from_millis(500)).await;
         drain_orders(&mut order_rx, "after BATCH CANCEL");
     }
+
+    // Crossing BUY with post_only=true: a leg that would cross is rejected (2018).
+    let cross_px = base * (1.0 + 0.003);
+    println!("Mass-quoting a crossing BUY with post_only=true (expect rejected/2018)...");
+    match client
+        .mass_quote(SYMBOL, &[mk(cross_px)], 1, Some(true))
+        .await
+    {
+        Ok(mq) => {
+            for r in &mq.results {
+                println!(
+                    "  leg {}: status={}  fills={}  err={:?}",
+                    r.leg_index, r.status, r.fill_count, r.error_code
+                );
+            }
+        }
+        Err(e) => dotenv::print_order_error("post_only=true mass quote rejected", &e),
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drain_orders(&mut order_rx, "after post_only=true");
+
+    // Crossing BUY with post_only=false (relaxed): leg takes liquidity, fills>0.
+    println!("Mass-quoting a crossing BUY with post_only=false (expect filled, fills>0)...");
+    match client
+        .mass_quote(SYMBOL, &[mk(cross_px)], 1, Some(false))
+        .await
+    {
+        Ok(mq) => {
+            for r in &mq.results {
+                println!(
+                    "  leg {}: status={}  new_order_id={}  fills={}  err={:?}",
+                    r.leg_index,
+                    r.status,
+                    r.new_order_id.as_deref().unwrap_or("—"),
+                    r.fill_count,
+                    r.error_code
+                );
+            }
+        }
+        Err(e) => dotenv::print_order_error("post_only=false mass quote rejected", &e),
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drain_orders(&mut order_rx, "after post_only=false");
 
     println!("Cancelling original BUY (cleanup)...");
     match client.cancel_order(&buy_ack.order_id, SYMBOL).await {

@@ -271,7 +271,7 @@ impl PositionsSnapshotSource {
         }
     }
 }
-/// Position lifecycle status (mirrors Bybit `positionStatus`).
+/// Position lifecycle status.
 /// Lets the frontend distinguish normal positions from those undergoing
 /// liquidation or auto-deleveraging.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -441,15 +441,20 @@ pub enum ResponseMessageType {
     /// position-changing events. Carries server-computed mark price and
     /// unrealized PnL. See `gdx.sequencer.v1.PositionsSnapshot`.
     PositionsSnapshot = 7,
+    /// Atomic balance + positions envelope.
+    BalanceAndPosition = 8,
+    /// Dedicated account-margin push (collateral / used / reserved / free).
+    /// See `gdx.sequencer.v1.AccountMarginUpdate`.
+    AccountMarginUpdate = 9,
     /// Per-leg results for a REQUEST_TYPE_MASS_QUOTE batch. Carried in a
     /// NodeResponse::MassQuoteAck over the encrypted-edge response envelope.
-    MassQuoteAck = 8,
-    /// Per-leg results for a REQUEST_TYPE_BATCH_MODIFY batch. Carried in a
-    /// NodeResponse.batch_modify_ack; same envelope/AAD conventions.
-    BatchModifyAck = 10,
+    MassQuoteAck = 10,
     /// Per-id results for a REQUEST_TYPE_BATCH_CANCEL batch. Carried in a
     /// NodeResponse::BatchCancelAck over the encrypted-edge response envelope.
-    BatchCancelAck = 9,
+    BatchCancelAck = 11,
+    /// Per-leg results for a REQUEST_TYPE_BATCH_MODIFY batch. Carried in a
+    /// NodeResponse.batch_modify_ack; same envelope/AAD conventions.
+    BatchModifyAck = 12,
 }
 impl ResponseMessageType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -465,9 +470,11 @@ impl ResponseMessageType {
             Self::OpenOrdersSnapshot => "RESPONSE_MESSAGE_TYPE_OPEN_ORDERS_SNAPSHOT",
             Self::OrderHistorySnapshot => "RESPONSE_MESSAGE_TYPE_ORDER_HISTORY_SNAPSHOT",
             Self::PositionsSnapshot => "RESPONSE_MESSAGE_TYPE_POSITIONS_SNAPSHOT",
+            Self::BalanceAndPosition => "RESPONSE_MESSAGE_TYPE_BALANCE_AND_POSITION",
+            Self::AccountMarginUpdate => "RESPONSE_MESSAGE_TYPE_ACCOUNT_MARGIN_UPDATE",
             Self::MassQuoteAck => "RESPONSE_MESSAGE_TYPE_MASS_QUOTE_ACK",
-            Self::BatchModifyAck => "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK",
             Self::BatchCancelAck => "RESPONSE_MESSAGE_TYPE_BATCH_CANCEL_ACK",
+            Self::BatchModifyAck => "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -484,9 +491,15 @@ impl ResponseMessageType {
                 Some(Self::OrderHistorySnapshot)
             }
             "RESPONSE_MESSAGE_TYPE_POSITIONS_SNAPSHOT" => Some(Self::PositionsSnapshot),
+            "RESPONSE_MESSAGE_TYPE_BALANCE_AND_POSITION" => {
+                Some(Self::BalanceAndPosition)
+            }
+            "RESPONSE_MESSAGE_TYPE_ACCOUNT_MARGIN_UPDATE" => {
+                Some(Self::AccountMarginUpdate)
+            }
             "RESPONSE_MESSAGE_TYPE_MASS_QUOTE_ACK" => Some(Self::MassQuoteAck),
-            "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK" => Some(Self::BatchModifyAck),
             "RESPONSE_MESSAGE_TYPE_BATCH_CANCEL_ACK" => Some(Self::BatchCancelAck),
+            "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK" => Some(Self::BatchModifyAck),
             _ => None,
         }
     }

@@ -310,8 +310,8 @@ pub struct MarginAlert {
     pub symbol_id: u64,
     pub tier: u32,
     pub margin_ratio_bps: u32,
-    pub mark_price_bps: u64,
-    pub liquidation_price_bps: u64,
+    pub mark_price: String,
+    pub liquidation_price: String,
     pub ts: i64,
     pub state_version: u64,
     /// True when the position recovered to `Healthy` — UI clears the tier
