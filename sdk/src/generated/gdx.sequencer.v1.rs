@@ -56,14 +56,6 @@ pub struct OrderMessage {
     pub leverage: u32,
     #[prost(enumeration = "super::super::common::v1::StpMode", tag = "17")]
     pub stp_mode: i32,
-    /// Reduce-only: order must reduce an existing position; rejected if no
-    /// position or same-side; quantity clamped to position size.
-    #[prost(bool, tag = "18")]
-    pub reduce_only: bool,
-    /// Post-only: order must rest on the book as a maker; rejected if it
-    /// would immediately cross the spread.
-    #[prost(bool, tag = "19")]
-    pub post_only: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CancelMessage {
@@ -452,14 +444,6 @@ pub struct PlaceOrderInput {
     pub leverage: u32,
     #[prost(enumeration = "super::super::common::v1::StpMode", tag = "22")]
     pub stp_mode: i32,
-    /// Reduce-only: order must reduce an existing position; rejected if no
-    /// position or same-side; quantity clamped to position size.
-    #[prost(bool, tag = "23")]
-    pub reduce_only: bool,
-    /// Post-only: order must rest on the book as a maker; rejected if it
-    /// would immediately cross the spread.
-    #[prost(bool, tag = "24")]
-    pub post_only: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ModifyOrderInput {
@@ -608,7 +592,7 @@ pub struct LiquidityPoolStatusRequest {
     #[prost(bytes = "vec", tag = "2")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// Shield then LP-assign in one QUIC round-trip (wallet SPL → vault_program + shield → sequencer submits + credits + pool deposit).
+/// Shield then LP-assign in one QUIC round-trip (wallet SPL → vault_stub + shield → sequencer submits + credits + pool deposit).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ShieldAndPoolDepositRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -665,31 +649,6 @@ pub struct ShieldSubmitRequest {
     #[prost(bytes = "vec", tag = "3")]
     pub client_request_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// Edge requests the sequencer to prepare a shield commitment + Groth16 proof for a user deposit.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PrepareShieldNoteRequest {
-    #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag = "2")]
-    pub amount_raw: u64,
-    #[prost(bytes = "vec", tag = "3")]
-    pub client_request_id: ::prost::alloc::vec::Vec<u8>,
-}
-/// Edge requests the sequencer to prepare a 1-in unshield (withdrawal): derive the
-/// spent note's nullifier and produce the unshield Groth16 proof.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PrepareUnshieldRequest {
-    #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag = "2")]
-    pub amount_raw: u64,
-    #[prost(bytes = "vec", tag = "3")]
-    pub recipient: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag = "4")]
-    pub fee_raw: u64,
-    #[prost(bytes = "vec", tag = "5")]
-    pub client_request_id: ::prost::alloc::vec::Vec<u8>,
-}
 /// Update the per-user-per-symbol leverage setting (industry-standard model).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateLeverageRequest {
@@ -720,7 +679,7 @@ pub struct AdjustMarginRequest {
 pub struct EdgeSequencerRequest {
     #[prost(
         oneof = "edge_sequencer_request::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23"
     )]
     pub inner: ::core::option::Option<edge_sequencer_request::Inner>,
 }
@@ -765,14 +724,10 @@ pub mod edge_sequencer_request {
         #[prost(message, tag = "20")]
         AdjustMargin(super::AdjustMarginRequest),
         #[prost(message, tag = "21")]
-        PrepareShieldNote(super::PrepareShieldNoteRequest),
-        #[prost(message, tag = "22")]
-        PrepareUnshield(super::PrepareUnshieldRequest),
-        #[prost(message, tag = "23")]
         MassQuote(super::MassQuoteInput),
-        #[prost(message, tag = "24")]
+        #[prost(message, tag = "22")]
         BatchCancel(super::BatchCancelInput),
-        #[prost(message, tag = "25")]
+        #[prost(message, tag = "23")]
         BatchModify(super::BatchModifyInput),
     }
 }
@@ -880,27 +835,6 @@ pub struct AckMessage {
     /// Client-facing rejection copy when `error_code` alone is too generic (e.g. pre-trade oracle guard).
     #[prost(string, optional, tag = "14")]
     pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
-    /// 32-byte Poseidon7 commitment (PrepareShieldNote response).
-    #[prost(bytes = "vec", optional, tag = "15")]
-    pub shield_commitment: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
-    /// 256-byte Groth16 proof bytes a||b||c (PrepareShieldNote response).
-    #[prost(bytes = "vec", optional, tag = "16")]
-    pub shield_groth16_proof: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
-    /// 32-byte nullifier of the spent note (PrepareUnshield response).
-    #[prost(bytes = "vec", optional, tag = "17")]
-    pub unshield_nullifier: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
-    /// 32-byte commitment of the spent note (PrepareUnshield response).
-    #[prost(bytes = "vec", optional, tag = "18")]
-    pub unshield_leaf_commitment: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
-    /// Spent leaf index (PrepareUnshield response).
-    #[prost(uint64, optional, tag = "19")]
-    pub unshield_leaf_index: ::core::option::Option<u64>,
-    /// 256-byte Groth16 proof bytes a||b||c (PrepareUnshield response).
-    #[prost(bytes = "vec", optional, tag = "20")]
-    pub unshield_groth16_proof: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
-    /// Photon-indexed Merkle leaf hash of the spent note (PrepareUnshield response).
-    #[prost(bytes = "vec", optional, tag = "21")]
-    pub unshield_leaf_hash: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct MassQuoteLegResult {
@@ -1215,10 +1149,6 @@ pub struct OrderUpdateMessage {
     pub cum_fill: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "20")]
     pub msg: ::core::option::Option<::prost::alloc::string::String>,
-    /// Running volume-weighted average fill price (FIX AvgPx); absent before
-    /// any fill. Mirrors OrderHistoryRow.avg_fill_price.
-    #[prost(string, optional, tag = "21")]
-    pub avg_fill_price: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// One position inside a `PositionsSnapshot` batch. All decimal fields
 /// are rendered at the sequencer's configured `decimal_places`; PnL /
@@ -1276,43 +1206,6 @@ pub struct PositionRow {
     /// Absent when not computed.
     #[prost(string, optional, tag = "13")]
     pub margin: ::core::option::Option<::prost::alloc::string::String>,
-}
-/// Authoritative account-level margin summary, mirroring the sequencer's
-/// `RiskEngine` view. All amounts are decimal strings at `decimal_places`
-/// (same convention as `PositionRow.margin`). This is the single source of
-/// truth for "available margin": unlike a client-side estimate, it already
-/// deducts margin reserved by resting (open) orders, so the frontend must
-/// render `free_collateral` directly rather than recomputing it.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct AccountMarginSummary {
-    /// Risk-engine collateral balance (internal USDT) backing this account.
-    #[prost(string, tag = "1")]
-    pub total_collateral: ::prost::alloc::string::String,
-    /// Sum of initial margin + user-added extra margin across open positions.
-    #[prost(string, tag = "2")]
-    pub position_margin: ::prost::alloc::string::String,
-    /// Sum of margin reserved by the user's resting (unfilled) orders.
-    #[prost(string, tag = "3")]
-    pub reserved_order_margin: ::prost::alloc::string::String,
-    /// total_collateral − position_margin − reserved_order_margin: the amount
-    /// genuinely available to open new orders. Matches RiskEngine::free_collateral.
-    #[prost(string, tag = "4")]
-    pub free_collateral: ::prost::alloc::string::String,
-}
-/// Dedicated account-margin push (encrypted, per user). Emitted on the initial
-/// positions subscribe and whenever the user's collateral, positions, or
-/// resting-order holds change (the sequencer diffs the summary and pushes only
-/// on change). This is the authoritative source for the UI's "available margin"
-/// — see `AccountMarginSummary`.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct AccountMarginUpdate {
-    #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
-    /// Sequencer wall-clock timestamp when the summary was computed, ns.
-    #[prost(uint64, tag = "2")]
-    pub server_timestamp: u64,
-    #[prost(message, optional, tag = "3")]
-    pub account: ::core::option::Option<AccountMarginSummary>,
 }
 /// Full-user positions batch. Emitted on (a) initial subscribe, (b) the
 /// 5-second periodic sweep, and (c) any position-changing fill for this
@@ -1452,32 +1345,6 @@ pub struct BalanceUpdateMessage {
     pub shielded_balance_raw: u64,
     #[prost(uint64, tag = "3")]
     pub timestamp: u64,
-    /// Human-readable shielded balance at internal USDT decimal places.
-    #[prost(string, tag = "4")]
-    pub shielded_balance: ::prost::alloc::string::String,
-}
-/// Atomic balance + positions envelope.
-///
-/// Delivered as a single encrypted push whenever an event changes both
-/// balance and positions atomically (fills, settlements, liquidations).
-/// Keeps PositionsSnapshot and BalanceUpdateMessage as clean, single-concern
-/// messages; this envelope is the atomicity boundary.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BalanceAndPosition {
-    #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
-    /// Why the push was emitted: "filled", "settlement", "liquidation".
-    #[prost(string, tag = "2")]
-    pub event_type: ::prost::alloc::string::String,
-    /// Sequencer wall-clock timestamp (ns since epoch).
-    #[prost(uint64, tag = "3")]
-    pub server_timestamp: u64,
-    /// Balance data — authoritative shielded balance snapshot.
-    #[prost(message, optional, tag = "4")]
-    pub bal_data: ::core::option::Option<BalanceUpdateMessage>,
-    /// Position data — full positions snapshot for this user.
-    #[prost(message, optional, tag = "5")]
-    pub pos_data: ::core::option::Option<PositionsSnapshot>,
 }
 /// Margin tier transition / recovery routed via edge to the owning user's WS.
 ///
@@ -1495,10 +1362,10 @@ pub struct MarginAlertMessage {
     pub tier: u32,
     #[prost(uint32, tag = "4")]
     pub margin_ratio_bps: u32,
-    #[prost(string, tag = "5")]
-    pub mark_price: ::prost::alloc::string::String,
-    #[prost(string, tag = "6")]
-    pub liquidation_price: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "5")]
+    pub mark_price_bps: u64,
+    #[prost(uint64, tag = "6")]
+    pub liquidation_price_bps: u64,
     #[prost(int64, tag = "7")]
     pub ts: i64,
     #[prost(uint64, tag = "8")]
@@ -1523,7 +1390,7 @@ pub struct OrderHistoryInsertMessage {
 pub struct SequencerToEdgeMessage {
     #[prost(
         oneof = "sequencer_to_edge_message::Inner",
-        tags = "1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15"
+        tags = "1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"
     )]
     pub inner: ::core::option::Option<sequencer_to_edge_message::Inner>,
 }
@@ -1556,12 +1423,6 @@ pub mod sequencer_to_edge_message {
         OpenInterestUpdate(super::OpenInterestUpdateMessage),
         #[prost(message, tag = "12")]
         VolumeUpdate(super::VolumeUpdateMessage),
-        /// Atomic balance + positions envelope.
-        #[prost(message, tag = "14")]
-        BalanceAndPosition(super::BalanceAndPosition),
-        /// Dedicated account-margin push (collateral / used / reserved / free).
-        #[prost(message, tag = "15")]
-        AccountMarginUpdate(super::AccountMarginUpdate),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]

@@ -66,8 +66,6 @@ pub fn build_place_order_proto(
         user_uuid: user_uuid.to_vec(),
         leverage: 1,
         stp_mode: 0,
-        post_only: false,
-        reduce_only: false,
     };
     let req = sequencer::EdgeSequencerRequest {
         inner: Some(sequencer::edge_sequencer_request::Inner::Place(place)),
@@ -590,8 +588,8 @@ pub fn parse_margin_alert(msg: sequencer::MarginAlertMessage) -> MarginAlert {
         symbol_id: msg.symbol_id,
         tier: msg.tier,
         margin_ratio_bps: msg.margin_ratio_bps,
-        mark_price: msg.mark_price,
-        liquidation_price: msg.liquidation_price,
+        mark_price_bps: msg.mark_price_bps,
+        liquidation_price_bps: msg.liquidation_price_bps,
         ts: msg.ts,
         state_version: msg.state_version,
         recovered: msg.recovered,
@@ -653,9 +651,7 @@ pub fn parse_sequencer_to_edge_message(data: &[u8]) -> Result<EdgeMessage, Godar
         }
         Some(sequencer::sequencer_to_edge_message::Inner::OrderHistoryInsert(_))
         | Some(sequencer::sequencer_to_edge_message::Inner::OpenInterestUpdate(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::VolumeUpdate(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::BalanceAndPosition(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::AccountMarginUpdate(_)) => {
+        | Some(sequencer::sequencer_to_edge_message::Inner::VolumeUpdate(_)) => {
             Ok(EdgeMessage::Unknown)
         }
         None => Ok(EdgeMessage::Unknown),
