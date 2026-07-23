@@ -50,6 +50,8 @@ The MM examples expect:
 
 - `GODARK_API_KEY_ID` (required)
 - `GODARK_API_SECRET` (required)
+- `GODARK_PASSPHRASE` (required for API key-pair auth)
+- `GDX_NOISE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`
 - `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
 
 Use `.env.example` as the template for your local `.env`.
@@ -147,7 +149,7 @@ MM distribution supports placing only `Market` and `Limit` orders.
 `GodarkError` is the single error type returned from every fallible SDK call:
 
 - `Authentication(String)`
-- `Session(String)`
+- `Session(String)` — Noise XK handshake or rekey failure
 - `Order { message: String, error_code: Option<String> }`
   — also carries the symbolic reason (e.g. `"PRICE_DEVIATION_TOO_LARGE"`,
   `"MARGIN_INSUFFICIENT"`). See the `quickstart` source for the match-and-print

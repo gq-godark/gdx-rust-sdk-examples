@@ -3,7 +3,7 @@
 //! Demonstrates:
 //!   1. Load credentials from `.env` / environment
 //!   2. REST pre-flight: fetch shielded balance via `get_my_balance`
-//!   3. Connect and authenticate (encrypted ECDH session)
+//!   3. Connect and authenticate (Noise XK encrypted WebSocket session)
 //!   3. Take receivers for order, position, and all 6 sequencer push streams
 //!   4. Subscribe to the private order + position channels
 //!   5. Place, modify, and cancel `MARKET` / `LIMIT` orders

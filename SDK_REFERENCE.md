@@ -58,6 +58,8 @@ The MM examples expect:
 
 - `GODARK_API_KEY_ID` (required)
 - `GODARK_API_SECRET` (required)
+- `GODARK_PASSPHRASE` (required for API key-pair auth)
+- `GDX_NOISE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`. Or set `noise_static_public_key_hex` on `GodarkClient::builder()`.
 - `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
 
 Use `.env.example` as the template for your local `.env`. The shared helper
@@ -253,7 +255,7 @@ call:
 | Variant | When |
 |---------|------|
 | `Authentication(String)` | API key rejection at session bring-up |
-| `Session(String)` | ECDH session failure |
+| `Session(String)` | Noise XK handshake or rekey failure |
 | `Order { message, error_code }` | Order rejected by the sequencer; `error_code` carries the symbolic reason (see below) |
 | `Connection(String)` | Transport-level failure |
 | `Encryption(String)` | Cipher / nonce failure on encrypted payloads |
