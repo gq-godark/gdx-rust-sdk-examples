@@ -15,6 +15,9 @@ pub struct OrderHeader {
     /// Big-endian u128 for distributed tracing; empty means CorrelationId(0).
     #[prost(bytes = "vec", tag = "6")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// Per-edge-connection id (Noise session / fanout routing).
+    #[prost(uint64, tag = "7")]
+    pub conn_id: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EncryptedEdgeRequest {
@@ -38,6 +41,15 @@ pub struct ResponseHeader {
     pub nonce: u64,
     #[prost(uint64, tag = "5")]
     pub fencing_epoch: u64,
+    /// Big-endian u128 tracing id echoed from the request; empty means CorrelationId(0).
+    #[prost(bytes = "vec", tag = "6")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    /// Monotonic per-edge-connection sequence for gap-free ack delivery (Stage 15).
+    #[prost(uint64, tag = "7")]
+    pub session_seq: u64,
+    /// Per-edge-connection id (Noise session / fanout routing).
+    #[prost(uint64, tag = "8")]
+    pub conn_id: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EncryptedEdgeResponse {
@@ -48,26 +60,39 @@ pub struct EncryptedEdgeResponse {
     #[prost(bytes = "vec", tag = "3")]
     pub encrypted_body: ::prost::alloc::vec::Vec<u8>,
 }
+/// Stage 15d: edge reconnect resume — replay acks with session_seq > last_applied_seq.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct SessionControl {
+    #[prost(uint64, tag = "1")]
+    pub last_applied_seq: u64,
+}
+/// Noise XK opaque handshake relay (edge stamps user_uuid + conn_id).
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SessionSetup {
-    /// 16-byte RFC 4122 UUID (user establishing the E2E session).
+pub struct NoiseHandshake {
+    /// 16-byte UUID
     #[prost(bytes = "vec", tag = "1")]
     pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub conn_id: u64,
+    /// opaque Noise message bytes
+    #[prost(bytes = "vec", tag = "3")]
+    pub message: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NoiseHandshakeReply {
+    #[prost(uint64, tag = "1")]
+    pub conn_id: u64,
+    /// opaque Noise message bytes
     #[prost(bytes = "vec", tag = "2")]
-    pub client_ecdh_pubkey: ::prost::alloc::vec::Vec<u8>,
+    pub message: ::prost::alloc::vec::Vec<u8>,
+    /// true when transport is ready (no further handshake msgs)
+    #[prost(bool, tag = "3")]
+    pub established: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SessionEstablished {
-    #[prost(bytes = "vec", tag = "1")]
-    pub sequencer_ecdh_pubkey: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag = "2")]
-    pub session_id: u64,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RekeyRequired {
-    /// 16-byte RFC 4122 UUID (user whose session must rotate).
+pub struct SessionClose {
     #[prost(bytes = "vec", tag = "1")]
     pub user_uuid: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
-    pub session_id: u64,
+    pub conn_id: u64,
 }
