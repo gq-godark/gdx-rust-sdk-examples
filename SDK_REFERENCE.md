@@ -12,9 +12,10 @@ parity / pin discipline, error-code internals, forward-compat enum strategy,
 crate sourcing options).
 
 > Scope: the MM examples use **WebSocket encrypted trading** via
-> `godark::GodarkClient`. Standalone REST and market-data surfaces are
-> intentionally excluded from this distribution. Order placement support
-> is limited to `MARKET` and `LIMIT`.
+> `godark::GodarkClient`. Encrypted REST trading is not supported — all order
+> flow (place / modify / cancel / mass_quote) runs over the Noise XK WebSocket
+> client. Standalone market-data surfaces are intentionally excluded from this
+> distribution. Order placement support is limited to `MARKET` and `LIMIT`.
 
 ## Quick Start
 
@@ -150,7 +151,7 @@ will fill the buffer and back-pressure the dispatcher.
 | Push                  | Field highlights                                                                                | Typical use                                                                          |
 |-----------------------|-------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------|
 | `PositionsSnapshot`   | `rows[]` (`PositionRow{symbol_id, side, size, entry_price, mark_price, unrealized_pnl, ...}`), `source` (Initial / Periodic / Event) | Hydrate the open-positions table on connect; refresh every ~5s.                      |
-| `SystemHealthUpdate`  | `total_nodes`, `ready`, `degraded`, `accepting_orders`                                          | Display node-cluster status; pause submissions if `accepting_orders == false`.       |
+| `SystemHealthUpdate`  | `component_id`, `state`, `serving`, `cause`, `updated_at_nanos`                                 | Display per-component health; pause submissions if `serving == false`.               |
 | `BalanceUpdate`       | `shielded_balance_raw` (raw lamports-style integer)                                             | Refresh the wallet/equity widget after each fill or settlement.                      |
 | `MarginAlert`         | `owner`, `symbol_id`, `tier`, `margin_ratio_bps`, `liquidation_price_bps`, `recovered`          | Show / clear the margin-tier banner per `(owner, symbol_id)`.                        |
 | `FundingRateUpdate`   | `symbol_id`, `current_rate`, `predicted_rate`, `next_funding_time`                              | Update funding ticker / book metadata.                                               |
@@ -158,10 +159,12 @@ will fill the buffer and back-pressure the dispatcher.
 
 ### Concurrency rule
 
-Only one command (`place_order`, `cancel_order`, `modify_order`) should be
-in flight at a time. Call these sequentially. The push receivers above may
-be consumed concurrently from independent tasks — that's the intended
-pattern in `full_trader_example.rs`.
+`GodarkClient` routes trading commands by correlation id, so multiple commands
+(`place_order`, `cancel_order`, `modify_order`, `mass_quote`, `batch_cancel`, …)
+can be in flight concurrently. Encrypted REST trading is not supported; all
+order flow goes over the WebSocket client. The push receivers above may be
+consumed concurrently from independent tasks — that's the intended pattern in
+`full_trader_example.rs`.
 
 ## Core Types
 
@@ -219,7 +222,7 @@ all open positions for the authenticated user. `rows` holds one
 
 | Type | Notable fields |
 |------|----------------|
-| `SystemHealthUpdate` | `total_nodes`, `accepting_orders`, `ready`, `degraded`, `exhausted`, `warming`, `draining`, `waiting` |
+| `SystemHealthUpdate` | `component_id`, `state`, `serving`, `cause`, `updated_at_nanos`, `sequence`, `schema_version` |
 | `BalanceUpdate` | `user_uuid`, `shielded_balance_raw`, `timestamp` |
 | `MarginAlert` | `owner`, `symbol_id`, `tier`, `margin_ratio_bps`, `mark_price_bps`, `liquidation_price_bps`, `state_version`, `recovered`, `ts` |
 | `FundingRateUpdate` | `symbol_id`, `current_rate`, `predicted_rate`, `next_funding_time`, `timestamp` |
@@ -323,7 +326,7 @@ sequencer command acks.
 | File | Purpose |
 |------|---------|
 | `examples/quickstart.rs` | Minimal connect, place, cancel |
-| `examples/full_trader_example.rs` | Reference bot flow with all 6 push callbacks |
+| `examples/full_trader_example.rs` | Reference bot flow: all 6 push callbacks, place / modify / cancel, mass-quote / batch-cancel |
 | `examples/dotenv.rs` | Shared helper (`load_dotenv` + `print_order_error`) |
 
 ## SDK source layout

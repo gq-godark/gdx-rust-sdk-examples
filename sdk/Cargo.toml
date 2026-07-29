@@ -39,6 +39,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 aes-gcm = { version = "0.10", features = ["std"] }
 hkdf = "0.12"
 sha2 = "0.10"
+snow = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 rand = "0.9"
 
