@@ -594,7 +594,10 @@ impl EdgeTransport {
                     .get("message_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if sub_type == "ack" {
+                if matches!(
+                    sub_type,
+                    "ack" | "mass_quote_ack" | "batch_cancel_ack" | "batch_modify_ack"
+                ) {
                     if let Some(cmd) = pending_cmd.take() {
                         let _ = cmd.tx.send(val.clone());
                     } else {

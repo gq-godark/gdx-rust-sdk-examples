@@ -333,6 +333,90 @@ impl GodarkClient {
     }
 
     // ------------------------------------------------------------------
+    // Mass quote / batch operations
+    // ------------------------------------------------------------------
+
+    /// Bulk cancel-replace (market-maker mass quote) on one symbol.
+    ///
+    /// Up to 20 legs per batch, fused into one MPC round. `post_only` selects
+    /// the batch matching mode: `None` keeps the node default (post-only), where
+    /// a leg that would cross is rejected as `failed`; `Some(false)` enables the
+    /// relaxed path, where a crossing leg takes liquidity up to its limit and
+    /// rests the remainder (per-leg taker fills are surfaced as `fill_count`).
+    /// Returns one result per leg.
+    pub async fn mass_quote(
+        &mut self,
+        symbol: &str,
+        legs: &[crate::types::MassQuoteLegInput],
+        leverage: u32,
+        post_only: Option<bool>,
+    ) -> Result<crate::types::MassQuoteAck, GodarkError> {
+        self.ensure_ready()?;
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+
+        let plaintext = proto_bridge::build_mass_quote_proto(
+            symbol_id,
+            uuid.as_bytes(),
+            legs,
+            &corr_id,
+            leverage,
+            post_only,
+        );
+        let response = self
+            .send_encrypted_command("mass_quote", symbol_id, &plaintext, &corr_id)
+            .await?;
+        self.parse_mass_quote_response(&response)
+    }
+
+    /// Cancel multiple resting orders on one symbol in a single fanned-out
+    /// request (up to 20 ids). Cancels are pure index removals (zero online MPC
+    /// rounds). An id that is not resting is reported `cancelled=false`
+    /// (error_code 2003) and never aborts the rest of the batch.
+    pub async fn batch_cancel(
+        &mut self,
+        symbol: &str,
+        order_ids: &[u64],
+    ) -> Result<crate::types::BatchCancelAck, GodarkError> {
+        self.ensure_ready()?;
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+
+        let plaintext =
+            proto_bridge::build_batch_cancel_proto(symbol_id, uuid.as_bytes(), order_ids, &corr_id);
+        let response = self
+            .send_encrypted_command("batch_cancel", symbol_id, &plaintext, &corr_id)
+            .await?;
+        self.parse_batch_cancel_response(&response)
+    }
+
+    /// Amend multiple resting orders on one symbol in a single fanned-out
+    /// post-only request (up to 20 legs). Each leg sets `new_price` and/or
+    /// `new_quantity` (at least one). A leg whose amended order would cross is
+    /// rejected (`modified=false`, error_code 2018) rather than taking
+    /// liquidity; a missing order id is reported `modified=false`
+    /// (error_code 2003). Neither aborts the rest of the batch.
+    pub async fn batch_modify(
+        &mut self,
+        symbol: &str,
+        legs: &[crate::types::BatchModifyLegInput],
+    ) -> Result<crate::types::BatchModifyAck, GodarkError> {
+        self.ensure_ready()?;
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+
+        let plaintext =
+            proto_bridge::build_batch_modify_proto(symbol_id, uuid.as_bytes(), legs, &corr_id);
+        let response = self
+            .send_encrypted_command("batch_modify", symbol_id, &plaintext, &corr_id)
+            .await?;
+        self.parse_batch_modify_response(&response)
+    }
+
+    // ------------------------------------------------------------------
     // Subscriptions
     // ------------------------------------------------------------------
 
@@ -388,6 +472,22 @@ impl GodarkClient {
         plaintext: &[u8],
         correlation_id: &[u8],
     ) -> Result<OrderAck, GodarkError> {
+        let response = self
+            .send_encrypted_command(request_type, symbol_id, plaintext, correlation_id)
+            .await?;
+        self.parse_order_response(&response)
+    }
+
+    /// Encrypts `plaintext`, sends it over the wire with the appropriate op for
+    /// `request_type`, and returns the raw response `Value`. Shared by the
+    /// single-order pipeline and the mass-quote / batch pipelines.
+    async fn send_encrypted_command(
+        &mut self,
+        request_type: &str,
+        symbol_id: u64,
+        plaintext: &[u8],
+        correlation_id: &[u8],
+    ) -> Result<Value, GodarkError> {
         let body_length = (plaintext.len() + GCM_TAG_LEN) as u32;
         let uuid = self.current_user_uuid()?;
         let (actual_nonce, ciphertext) = {
@@ -438,6 +538,9 @@ impl GodarkClient {
                 "place" => "order.place",
                 "cancel" => "order.cancel",
                 "modify" => "order.modify",
+                "mass_quote" => "order.mass_quote",
+                "batch_cancel" => "order.batch_cancel",
+                "batch_modify" => "order.batch_modify",
                 other => {
                     return Err(GodarkError::Config(format!(
                         "invalid encrypted request_type: {other}"
@@ -463,7 +566,7 @@ impl GodarkClient {
         };
 
         let response = self.transport.lock().await.send_command(&payload).await?;
-        self.parse_order_response(&response)
+        Ok(response)
     }
 
     fn parse_order_response(&mut self, msg: &Value) -> Result<OrderAck, GodarkError> {
@@ -578,6 +681,88 @@ impl GodarkClient {
                 error_code: None,
             }),
         }
+    }
+
+    /// Decrypts an `encrypted_push` command response and returns the plaintext
+    /// `NodeResponse` bytes. Used by the mass-quote / batch ack pipelines.
+    fn decrypt_command_plaintext(
+        &mut self,
+        msg: &Value,
+        default_message_type: &str,
+    ) -> Result<Vec<u8>, GodarkError> {
+        let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if msg_type == "error" {
+            let message = msg
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(GodarkError::Order {
+                message: message.to_string(),
+                error_code: None,
+            });
+        }
+        if msg_type != "encrypted_push" {
+            return Err(GodarkError::Order {
+                message: format!("Unexpected response type: {msg_type}"),
+                error_code: None,
+            });
+        }
+
+        let ct_b64 = msg
+            .get("encrypted_body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let ct = BASE64
+            .decode(ct_b64)
+            .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
+        let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let user_uuid_bytes = self.current_user_uuid_bytes();
+        let message_type = msg
+            .get("message_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or(default_message_type);
+        let fencing_epoch = msg
+            .get("fencing_epoch")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let aad = proto_bridge::build_response_header_aad(
+            &user_uuid_bytes,
+            message_type,
+            ct.len() as u32,
+            nonce as u64,
+            fencing_epoch,
+        );
+
+        self.session
+            .lock()
+            .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
+            .decrypt_push(nonce, &aad, &ct)
+            .map_err(|e| GodarkError::Encryption(format!("Failed to decrypt ack: {e}")))
+    }
+
+    fn parse_mass_quote_response(
+        &mut self,
+        msg: &Value,
+    ) -> Result<crate::types::MassQuoteAck, GodarkError> {
+        let plaintext = self.decrypt_command_plaintext(msg, "mass_quote_ack")?;
+        proto_bridge::parse_mass_quote_ack(&plaintext)
+    }
+
+    fn parse_batch_cancel_response(
+        &mut self,
+        msg: &Value,
+    ) -> Result<crate::types::BatchCancelAck, GodarkError> {
+        let plaintext = self.decrypt_command_plaintext(msg, "batch_cancel_ack")?;
+        proto_bridge::parse_batch_cancel_ack(&plaintext)
+    }
+
+    fn parse_batch_modify_response(
+        &mut self,
+        msg: &Value,
+    ) -> Result<crate::types::BatchModifyAck, GodarkError> {
+        let plaintext = self.decrypt_command_plaintext(msg, "batch_modify_ack")?;
+        proto_bridge::parse_batch_modify_ack(&plaintext)
     }
 
     // ------------------------------------------------------------------

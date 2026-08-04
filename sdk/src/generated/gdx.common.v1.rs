@@ -277,6 +277,11 @@ impl PositionsSnapshotSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum PositionStatus {
+    /// Mirrors Bybit `positionStatus`: NORMAL is the meaningful default state and
+    /// there is no "unspecified" concept, so the zero value intentionally does not
+    /// use the *_UNSPECIFIED suffix. Renumbering would be a wire-incompatible break
+    /// for shipped consumers (gdx-web, generated types_pb.ts).
+    /// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
     Normal = 0,
     /// Position is being liquidated (margin-tranche execution).
     Liq = 1,
@@ -361,6 +366,17 @@ pub enum RequestType {
     /// RESPONSE_MESSAGE_TYPE_ORDER_HISTORY_SNAPSHOT on the reply.
     GetOrderHistory = 7,
     UpdateLeverage = 8,
+    AdjustMargin = 9,
+    /// Bulk cancel-replace for market makers: one request carries up to 20
+    /// cancel-replace legs on a single symbol, fanned out as one fused MPC
+    /// batch. Paired with RESPONSE_MESSAGE_TYPE_MASS_QUOTE_ACK on the reply.
+    MassQuote = 10,
+    /// Bulk cancel: one request carries up to 20 order ids on a single symbol,
+    /// fanned out as one batch. Paired with RESPONSE_MESSAGE_TYPE_BATCH_CANCEL_ACK.
+    BatchCancel = 11,
+    /// Amend up to 20 resting orders (post-only) on one symbol, fanned out as one
+    /// batch. Paired with RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK on the reply.
+    BatchModify = 12,
 }
 impl RequestType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -378,6 +394,10 @@ impl RequestType {
             Self::GetOpenOrders => "REQUEST_TYPE_GET_OPEN_ORDERS",
             Self::GetOrderHistory => "REQUEST_TYPE_GET_ORDER_HISTORY",
             Self::UpdateLeverage => "REQUEST_TYPE_UPDATE_LEVERAGE",
+            Self::AdjustMargin => "REQUEST_TYPE_ADJUST_MARGIN",
+            Self::MassQuote => "REQUEST_TYPE_MASS_QUOTE",
+            Self::BatchCancel => "REQUEST_TYPE_BATCH_CANCEL",
+            Self::BatchModify => "REQUEST_TYPE_BATCH_MODIFY",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -392,6 +412,10 @@ impl RequestType {
             "REQUEST_TYPE_GET_OPEN_ORDERS" => Some(Self::GetOpenOrders),
             "REQUEST_TYPE_GET_ORDER_HISTORY" => Some(Self::GetOrderHistory),
             "REQUEST_TYPE_UPDATE_LEVERAGE" => Some(Self::UpdateLeverage),
+            "REQUEST_TYPE_ADJUST_MARGIN" => Some(Self::AdjustMargin),
+            "REQUEST_TYPE_MASS_QUOTE" => Some(Self::MassQuote),
+            "REQUEST_TYPE_BATCH_CANCEL" => Some(Self::BatchCancel),
+            "REQUEST_TYPE_BATCH_MODIFY" => Some(Self::BatchModify),
             _ => None,
         }
     }
@@ -417,6 +441,15 @@ pub enum ResponseMessageType {
     /// position-changing events. Carries server-computed mark price and
     /// unrealized PnL. See `gdx.sequencer.v1.PositionsSnapshot`.
     PositionsSnapshot = 7,
+    /// Per-leg results for a REQUEST_TYPE_MASS_QUOTE batch. Carried in a
+    /// NodeResponse::MassQuoteAck over the encrypted-edge response envelope.
+    MassQuoteAck = 8,
+    /// Per-leg results for a REQUEST_TYPE_BATCH_MODIFY batch. Carried in a
+    /// NodeResponse.batch_modify_ack; same envelope/AAD conventions.
+    BatchModifyAck = 10,
+    /// Per-id results for a REQUEST_TYPE_BATCH_CANCEL batch. Carried in a
+    /// NodeResponse::BatchCancelAck over the encrypted-edge response envelope.
+    BatchCancelAck = 9,
 }
 impl ResponseMessageType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -432,6 +465,9 @@ impl ResponseMessageType {
             Self::OpenOrdersSnapshot => "RESPONSE_MESSAGE_TYPE_OPEN_ORDERS_SNAPSHOT",
             Self::OrderHistorySnapshot => "RESPONSE_MESSAGE_TYPE_ORDER_HISTORY_SNAPSHOT",
             Self::PositionsSnapshot => "RESPONSE_MESSAGE_TYPE_POSITIONS_SNAPSHOT",
+            Self::MassQuoteAck => "RESPONSE_MESSAGE_TYPE_MASS_QUOTE_ACK",
+            Self::BatchModifyAck => "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK",
+            Self::BatchCancelAck => "RESPONSE_MESSAGE_TYPE_BATCH_CANCEL_ACK",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -448,10 +484,17 @@ impl ResponseMessageType {
                 Some(Self::OrderHistorySnapshot)
             }
             "RESPONSE_MESSAGE_TYPE_POSITIONS_SNAPSHOT" => Some(Self::PositionsSnapshot),
+            "RESPONSE_MESSAGE_TYPE_MASS_QUOTE_ACK" => Some(Self::MassQuoteAck),
+            "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK" => Some(Self::BatchModifyAck),
+            "RESPONSE_MESSAGE_TYPE_BATCH_CANCEL_ACK" => Some(Self::BatchCancelAck),
             _ => None,
         }
     }
 }
+/// Broad cancel-reason bucket. Prefer using one of the existing values
+/// together with `msg` on `OrderUpdateMessage` / `OrderHistoryRow` for
+/// human-readable detail rather than adding new enum values for every
+/// system-initiated cancel sub-type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum CancelReason {
@@ -461,8 +504,9 @@ pub enum CancelReason {
     FokNotFilled = 3,
     Expired = 4,
     System = 5,
-    /// Position was auto-deleveraged by the exchange safety mechanism.
     Adl = 6,
+    Liquidation = 7,
+    MarginInsufficient = 8,
 }
 impl CancelReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -478,6 +522,8 @@ impl CancelReason {
             Self::Expired => "CANCEL_REASON_EXPIRED",
             Self::System => "CANCEL_REASON_SYSTEM",
             Self::Adl => "CANCEL_REASON_ADL",
+            Self::Liquidation => "CANCEL_REASON_LIQUIDATION",
+            Self::MarginInsufficient => "CANCEL_REASON_MARGIN_INSUFFICIENT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -490,6 +536,8 @@ impl CancelReason {
             "CANCEL_REASON_EXPIRED" => Some(Self::Expired),
             "CANCEL_REASON_SYSTEM" => Some(Self::System),
             "CANCEL_REASON_ADL" => Some(Self::Adl),
+            "CANCEL_REASON_LIQUIDATION" => Some(Self::Liquidation),
+            "CANCEL_REASON_MARGIN_INSUFFICIENT" => Some(Self::MarginInsufficient),
             _ => None,
         }
     }
