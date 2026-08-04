@@ -93,6 +93,8 @@ pub fn build_place_order_proto(
         stop_loss_price: None,
         take_profit_price: None,
         tpsl_slippage_bps: None,
+        peg_reference: 0, // PegReference::Unspecified
+        peg_offset_bps: None,
     };
     let req = sequencer::EdgeSequencerRequest {
         inner: Some(sequencer::edge_sequencer_request::Inner::Place(place)),

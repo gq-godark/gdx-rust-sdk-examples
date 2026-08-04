@@ -148,6 +148,42 @@ impl StpMode {
         }
     }
 }
+/// Price reference source for pegged order repricing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PegReference {
+    Unspecified = 0,
+    Pyth = 1,
+    Bbo = 2,
+    Hyperliquid = 3,
+    Binance = 4,
+}
+impl PegReference {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PEG_REFERENCE_UNSPECIFIED",
+            Self::Pyth => "PEG_REFERENCE_PYTH",
+            Self::Bbo => "PEG_REFERENCE_BBO",
+            Self::Hyperliquid => "PEG_REFERENCE_HYPERLIQUID",
+            Self::Binance => "PEG_REFERENCE_BINANCE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PEG_REFERENCE_UNSPECIFIED" => Some(Self::Unspecified),
+            "PEG_REFERENCE_PYTH" => Some(Self::Pyth),
+            "PEG_REFERENCE_BBO" => Some(Self::Bbo),
+            "PEG_REFERENCE_HYPERLIQUID" => Some(Self::Hyperliquid),
+            "PEG_REFERENCE_BINANCE" => Some(Self::Binance),
+            _ => None,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum OrderStatus {

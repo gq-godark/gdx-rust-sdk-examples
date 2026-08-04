@@ -1,6 +1,6 @@
 // GodarkClient — main entry point, mirrors Python SDK client.py
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc, Mutex,
@@ -31,8 +31,6 @@ use crate::types::{
 
 const NOISE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const _MAX_BACKOFF: Duration = Duration::from_secs(15);
-const MAX_ENCRYPTED_PUSH_BUFFER: usize = 64;
-
 struct PlaceOutcomeWaiter {
     token: u64,
     order_id: Option<String>,
@@ -86,7 +84,11 @@ pub struct GodarkClient {
     reconnect_tx: mpsc::Sender<ReconnectEvent>,
     reconnect_rx: Option<mpsc::Receiver<ReconnectEvent>>,
     place_outcomes: Arc<Mutex<PlaceOutcomeState>>,
-    encrypted_push_buffer: Arc<Mutex<BTreeMap<u32, Value>>>,
+    /// Correlation-keyed waiters for encrypted command acks (web parity).
+    encrypted_ack_waiters: Arc<Mutex<HashMap<u128, oneshot::Sender<Value>>>>,
+    /// Serializes Noise encrypt + WS send so ciphertext nonces hit the wire
+    /// in order under concurrent place/cancel/modify.
+    encrypted_send_lock: Arc<AsyncMutex<()>>,
 }
 
 impl GodarkClient {
@@ -139,7 +141,8 @@ impl GodarkClient {
             reconnect_tx,
             reconnect_rx: Some(reconnect_rx),
             place_outcomes: Arc::new(Mutex::new(PlaceOutcomeState::default())),
-            encrypted_push_buffer: Arc::new(Mutex::new(BTreeMap::new())),
+            encrypted_ack_waiters: Arc::new(Mutex::new(HashMap::new())),
+            encrypted_send_lock: Arc::new(AsyncMutex::new(())),
             config,
         }
     }
@@ -235,15 +238,16 @@ impl GodarkClient {
             &self.place_outcomes,
             "disconnected while waiting for order confirmation",
         );
+        fail_encrypted_ack_waiters(
+            &self.encrypted_ack_waiters,
+            "disconnected while waiting for encrypted command ack",
+        );
         if let Some(h) = self.event_handle.take() {
             h.abort();
         }
         self.transport.lock().await.disconnect().await;
         if let Ok(mut session) = self.session.lock() {
             session.reset();
-        }
-        if let Ok(mut buffer) = self.encrypted_push_buffer.lock() {
-            buffer.clear();
         }
         if let Ok(mut guard) = self.user_uuid.lock() {
             *guard = None;
@@ -279,7 +283,7 @@ impl GodarkClient {
     /// you only want the sequencer fast-ack.
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order(
-        &mut self,
+        &self,
         symbol: &str,
         side: Side,
         order_type: OrderType,
@@ -314,7 +318,7 @@ impl GodarkClient {
     ///   the caller must consume order updates for later rejects/fills.
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order_with_confirmation(
-        &mut self,
+        &self,
         symbol: &str,
         side: Side,
         order_type: OrderType,
@@ -386,7 +390,7 @@ impl GodarkClient {
     }
 
     pub async fn cancel_order(
-        &mut self,
+        &self,
         order_id: &str,
         symbol: &str,
     ) -> Result<OrderAck, GodarkError> {
@@ -407,7 +411,7 @@ impl GodarkClient {
     }
 
     pub async fn modify_order(
-        &mut self,
+        &self,
         order_id: &str,
         symbol: &str,
         new_price: Option<f64>,
@@ -468,7 +472,7 @@ impl GodarkClient {
     /// rests the remainder (per-leg taker fills are surfaced as `fill_count`).
     /// Returns one result per leg.
     pub async fn mass_quote(
-        &mut self,
+        &self,
         symbol: &str,
         legs: &[crate::types::MassQuoteLegInput],
         leverage: u32,
@@ -499,7 +503,7 @@ impl GodarkClient {
     /// rounds). An id that is not resting is reported `cancelled=false`
     /// (error_code 2003) and never aborts the rest of the batch.
     pub async fn batch_cancel(
-        &mut self,
+        &self,
         symbol: &str,
         order_ids: &[u64],
     ) -> Result<crate::types::BatchCancelAck, GodarkError> {
@@ -524,7 +528,7 @@ impl GodarkClient {
     /// liquidity; a missing order id is reported `modified=false`
     /// (error_code 2003). Neither aborts the rest of the batch.
     pub async fn batch_modify(
-        &mut self,
+        &self,
         symbol: &str,
         legs: &[crate::types::BatchModifyLegInput],
     ) -> Result<crate::types::BatchModifyAck, GodarkError> {
@@ -600,7 +604,7 @@ impl GodarkClient {
     // ------------------------------------------------------------------
 
     async fn send_encrypted_order(
-        &mut self,
+        &self,
         request_type: &str,
         symbol_id: u64,
         plaintext: &[u8],
@@ -616,7 +620,7 @@ impl GodarkClient {
     /// `request_type`, and returns the raw response `Value`. Shared by the
     /// single-order pipeline and the mass-quote / batch pipelines.
     async fn send_encrypted_command(
-        &mut self,
+        &self,
         request_type: &str,
         symbol_id: u64,
         plaintext: &[u8],
@@ -624,115 +628,129 @@ impl GodarkClient {
     ) -> Result<Value, GodarkError> {
         let body_length = CryptoSession::body_length_for_plaintext(plaintext.len())?;
         let uuid = self.current_user_uuid()?;
-        let (actual_nonce, ciphertext) = {
-            let mut session = self
-                .session
-                .lock()
-                .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?;
-            let nonce_counter = session.next_nonce();
-            let conn_id = session
-                .conn_id()
-                .ok_or_else(|| GodarkError::Session("Noise XK session not established".into()))?;
-
-            let aad = proto_bridge::build_order_header_aad(
-                uuid.as_bytes(),
-                symbol_id,
-                request_type,
-                nonce_counter as u64,
-                body_length,
-                correlation_id,
-                conn_id,
-            );
-
-            let (actual_nonce, ciphertext) = session
-                .encrypt_order(&aad, plaintext)
-                .map_err(|e| GodarkError::Encryption(format!("Failed to encrypt order: {e}")))?;
-            (actual_nonce, ciphertext)
-        };
-
-        let body_b64 = BASE64.encode(&ciphertext);
-        let corr_hex = if correlation_id.len() == 16 {
+        let corr_u128 = if correlation_id.len() == 16 {
             let arr: [u8; 16] = correlation_id.try_into().unwrap();
             let v = u128::from_be_bytes(arr);
             if v == 0 {
                 None
             } else {
-                Some(format!("{v:032x}"))
+                Some(v)
             }
         } else {
             None
         };
-        let mut header_json = serde_json::json!({
-            "symbol_id": symbol_id,
-            "request_type": request_type,
-            "nonce": actual_nonce,
-            "body_length": body_length,
-        });
-        if let Some(cid) = corr_hex {
-            header_json["correlation_id"] = serde_json::Value::String(cid);
-        }
-        let payload = if self.config.transport.use_docs_wire {
-            let wire_op = match request_type {
-                "place" => "order.place",
-                "cancel" => "order.cancel",
-                "modify" => "order.modify",
-                "mass_quote" => "order.mass_quote",
-                "batch_cancel" => "order.batch_cancel",
-                "batch_modify" => "order.batch_modify",
-                other => {
-                    return Err(GodarkError::Config(format!(
-                        "invalid encrypted request_type: {other}"
-                    )));
-                }
+        let corr_key = corr_u128.ok_or_else(|| {
+            GodarkError::Config("encrypted command requires non-zero correlation_id".into())
+        })?;
+        let (tx, rx) = oneshot::channel();
+
+        // Encrypt + register waiter + send under one lock so concurrent callers
+        // cannot interleave Noise send nonces on the wire.
+        {
+            let _send_guard = self.encrypted_send_lock.lock().await;
+            let (actual_nonce, ciphertext) = {
+                let mut session = self
+                    .session
+                    .lock()
+                    .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?;
+                let nonce_counter = session.next_nonce();
+                let conn_id = session.conn_id().ok_or_else(|| {
+                    GodarkError::Session("Noise XK session not established".into())
+                })?;
+
+                let aad = proto_bridge::build_order_header_aad(
+                    uuid.as_bytes(),
+                    symbol_id,
+                    request_type,
+                    nonce_counter as u64,
+                    body_length,
+                    correlation_id,
+                    conn_id,
+                );
+
+                session
+                    .encrypt_order(&aad, plaintext)
+                    .map_err(|e| GodarkError::Encryption(format!("Failed to encrypt order: {e}")))?
             };
-            serde_json::json!({
-                "id": Uuid::new_v4().to_string(),
-                "op": wire_op,
-                "args": {
-                    "header": header_json,
-                    "ciphertext": body_b64,
-                }
-            })
-        } else {
-            serde_json::json!({
-                "type": "encrypted_order",
-                "data": {
-                    "header": header_json,
-                    "encrypted_body": body_b64,
-                }
-            })
-        };
 
-        let response = self.transport.lock().await.send_command(&payload).await?;
-        if let Some(nonce) = json_u64(&response, "nonce") {
-            self.wait_for_prior_noise_messages(nonce as u32).await?;
+            let body_b64 = BASE64.encode(&ciphertext);
+            let corr_hex = format!("{corr_key:032x}");
+            let header_json = serde_json::json!({
+                "symbol_id": symbol_id,
+                "request_type": request_type,
+                "nonce": actual_nonce,
+                "body_length": body_length,
+                "correlation_id": corr_hex,
+            });
+            let payload = if self.config.transport.use_docs_wire {
+                let wire_op = match request_type {
+                    "place" => "order.place",
+                    "cancel" => "order.cancel",
+                    "modify" => "order.modify",
+                    "mass_quote" => "order.mass_quote",
+                    "batch_cancel" => "order.batch_cancel",
+                    "batch_modify" => "order.batch_modify",
+                    other => {
+                        return Err(GodarkError::Config(format!(
+                            "invalid encrypted request_type: {other}"
+                        )));
+                    }
+                };
+                serde_json::json!({
+                    "id": Uuid::new_v4().to_string(),
+                    "op": wire_op,
+                    "args": {
+                        "header": header_json,
+                        "ciphertext": body_b64,
+                    }
+                })
+            } else {
+                serde_json::json!({
+                    "type": "encrypted_order",
+                    "data": {
+                        "header": header_json,
+                        "encrypted_body": body_b64,
+                    }
+                })
+            };
+
+            {
+                let mut waiters = self.encrypted_ack_waiters.lock().map_err(|_| {
+                    GodarkError::Session("encrypted ack waiter mutex poisoned".into())
+                })?;
+                waiters.insert(corr_key, tx);
+            }
+
+            if let Err(err) = self.transport.lock().await.send_json(&payload).await {
+                let _ = self
+                    .encrypted_ack_waiters
+                    .lock()
+                    .ok()
+                    .and_then(|mut w| w.remove(&corr_key));
+                return Err(err);
+            }
         }
-        Ok(response)
+
+        let cmd_to = self.config.transport.command_timeout;
+        match tokio::time::timeout(cmd_to, rx).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(_)) => Err(GodarkError::Connection(
+                "encrypted command ack cancelled".into(),
+            )),
+            Err(_) => {
+                let _ = self
+                    .encrypted_ack_waiters
+                    .lock()
+                    .ok()
+                    .and_then(|mut w| w.remove(&corr_key));
+                Err(GodarkError::Timeout(format!(
+                    "Command timed out after {cmd_to:?}"
+                )))
+            }
+        }
     }
 
-    /// A command ack can arrive after an encrypted subscription push. Wait for
-    /// the event task to consume preceding Noise transport messages first.
-    async fn wait_for_prior_noise_messages(&self, nonce: u32) -> Result<(), GodarkError> {
-        let deadline = tokio::time::Instant::now() + self.config.transport.command_timeout;
-        loop {
-            let expected = self
-                .session
-                .lock()
-                .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
-                .recv_nonce();
-            if expected >= nonce {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(GodarkError::Timeout(format!(
-                    "waiting for encrypted push nonce {expected} before command ack nonce {nonce}"
-                )));
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    }
-
-    fn parse_order_response(&mut self, msg: &Value) -> Result<OrderAck, GodarkError> {
+    fn parse_order_response(&self, msg: &Value) -> Result<OrderAck, GodarkError> {
         let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         match msg_type {
@@ -783,46 +801,55 @@ impl GodarkClient {
         }
     }
 
-    fn decrypt_ack_push(&mut self, msg: &Value) -> Result<OrderAck, GodarkError> {
-        let ct_b64 = msg
-            .get("encrypted_body")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let ct = BASE64
-            .decode(ct_b64)
-            .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
-        let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let user_uuid_bytes = self.current_user_uuid_bytes();
-        let message_type = msg
-            .get("message_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("ack");
-        let fencing_epoch = msg
-            .get("fencing_epoch")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+    fn decrypt_ack_push(&self, msg: &Value) -> Result<OrderAck, GodarkError> {
+        if let Some(err) = msg.get("_decrypt_error").and_then(|v| v.as_str()) {
+            return Err(GodarkError::Encryption(err.to_string()));
+        }
+        let plaintext = if let Some(b64) = msg.get("_decrypted_plaintext").and_then(|v| v.as_str())
+        {
+            BASE64
+                .decode(b64)
+                .map_err(|e| GodarkError::Encryption(format!("cached ack plaintext: {e}")))?
+        } else {
+            let ct_b64 = msg
+                .get("encrypted_body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let ct = BASE64
+                .decode(ct_b64)
+                .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
+            let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let user_uuid_bytes = self.current_user_uuid_bytes();
+            let message_type = msg
+                .get("message_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ack");
+            let fencing_epoch = msg
+                .get("fencing_epoch")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
 
-        let aad = proto_bridge::build_response_header_aad(
-            &user_uuid_bytes,
-            message_type,
-            ct.len() as u32,
-            nonce as u64,
-            fencing_epoch,
-            &response_correlation_id_bytes(msg),
-            json_u64(msg, "session_seq").unwrap_or_default(),
+            let aad = proto_bridge::build_response_header_aad(
+                &user_uuid_bytes,
+                message_type,
+                ct.len() as u32,
+                nonce as u64,
+                fencing_epoch,
+                &response_correlation_id_bytes(msg),
+                json_u64(msg, "session_seq").unwrap_or_default(),
+                self.session
+                    .lock()
+                    .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
+                    .conn_id()
+                    .unwrap_or_default(),
+            );
+
             self.session
                 .lock()
                 .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
-                .conn_id()
-                .unwrap_or_default(),
-        );
-
-        let plaintext = self
-            .session
-            .lock()
-            .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
-            .decrypt_push(nonce, &aad, &ct)
-            .map_err(|e| GodarkError::Encryption(format!("Failed to decrypt ack: {e}")))?;
+                .decrypt_push(nonce, &aad, &ct)
+                .map_err(|e| GodarkError::Encryption(format!("Failed to decrypt ack: {e}")))?
+        };
 
         let ack_result = proto_bridge::parse_node_response(&plaintext)?;
         match ack_result {
@@ -858,7 +885,7 @@ impl GodarkClient {
     /// Decrypts an `encrypted_push` command response and returns the plaintext
     /// `NodeResponse` bytes. Used by the mass-quote / batch ack pipelines.
     fn decrypt_command_plaintext(
-        &mut self,
+        &self,
         msg: &Value,
         default_message_type: &str,
     ) -> Result<Vec<u8>, GodarkError> {
@@ -878,6 +905,14 @@ impl GodarkClient {
                 message: format!("Unexpected response type: {msg_type}"),
                 error_code: None,
             });
+        }
+        if let Some(err) = msg.get("_decrypt_error").and_then(|v| v.as_str()) {
+            return Err(GodarkError::Encryption(err.to_string()));
+        }
+        if let Some(b64) = msg.get("_decrypted_plaintext").and_then(|v| v.as_str()) {
+            return BASE64
+                .decode(b64)
+                .map_err(|e| GodarkError::Encryption(format!("cached ack plaintext: {e}")));
         }
 
         let ct_b64 = msg
@@ -921,7 +956,7 @@ impl GodarkClient {
     }
 
     fn parse_mass_quote_response(
-        &mut self,
+        &self,
         msg: &Value,
     ) -> Result<crate::types::MassQuoteAck, GodarkError> {
         let plaintext = self.decrypt_command_plaintext(msg, "mass_quote_ack")?;
@@ -929,7 +964,7 @@ impl GodarkClient {
     }
 
     fn parse_batch_cancel_response(
-        &mut self,
+        &self,
         msg: &Value,
     ) -> Result<crate::types::BatchCancelAck, GodarkError> {
         let plaintext = self.decrypt_command_plaintext(msg, "batch_cancel_ack")?;
@@ -937,7 +972,7 @@ impl GodarkClient {
     }
 
     fn parse_batch_modify_response(
-        &mut self,
+        &self,
         msg: &Value,
     ) -> Result<crate::types::BatchModifyAck, GodarkError> {
         let plaintext = self.decrypt_command_plaintext(msg, "batch_modify_ack")?;
@@ -1035,7 +1070,7 @@ impl GodarkClient {
         let intentional_close = Arc::clone(&self.intentional_close);
         let reconnect_tx = self.reconnect_tx.clone();
         let place_outcomes = Arc::clone(&self.place_outcomes);
-        let encrypted_push_buffer = Arc::clone(&self.encrypted_push_buffer);
+        let encrypted_ack_waiters = Arc::clone(&self.encrypted_ack_waiters);
 
         self.event_handle = Some(tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
@@ -1052,14 +1087,59 @@ impl GodarkClient {
                         }
                     }
                     TransportEvent::EncryptedPush(val) => {
-                        match parse_buffered_encrypted_push(
-                            &session,
-                            &user_uuid,
-                            &encrypted_push_buffer,
-                            &val,
-                        ) {
-                            Ok(pushes) => {
-                                for push in pushes {
+                        match decrypt_push_plaintext(&session, &user_uuid, &val) {
+                            Ok(plaintext) => {
+                                let message_type = val
+                                    .get("message_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if message_type.ends_with("ack") {
+                                    let mut enriched = val.clone();
+                                    if let Some(obj) = enriched.as_object_mut() {
+                                        obj.insert(
+                                            "_decrypted_plaintext".into(),
+                                            Value::String(BASE64.encode(&plaintext)),
+                                        );
+                                    }
+                                    let wire_corr =
+                                        json_u128(&val, "correlation_id").filter(|c| *c != 0);
+                                    let plaintext_corr =
+                                        match proto_bridge::parse_node_response(&plaintext) {
+                                            Ok(proto_bridge::NodeResponseKind::Ack {
+                                                correlation_id: raw,
+                                                ..
+                                            }) => {
+                                                if raw.len() == 16 {
+                                                    let mut arr = [0u8; 16];
+                                                    arr.copy_from_slice(&raw);
+                                                    // Proto body stores correlation as LE u128.
+                                                    Some(u128::from_le_bytes(arr))
+                                                } else if raw.len() == 8 {
+                                                    let mut arr = [0u8; 8];
+                                                    arr.copy_from_slice(&raw);
+                                                    Some(u128::from(u64::from_le_bytes(arr)))
+                                                } else {
+                                                    None
+                                                }
+                                            }
+                                            _ => None,
+                                        }
+                                        .filter(|c| *c != 0);
+                                    if let Ok(mut waiters) = encrypted_ack_waiters.lock() {
+                                        for key in [wire_corr, plaintext_corr].into_iter().flatten()
+                                        {
+                                            if let Some(tx) = waiters.remove(&key) {
+                                                let _ = tx.send(enriched.clone());
+                                                break;
+                                            }
+                                        }
+                                        // No single-waiter fallback: with concurrent in-flight
+                                        // commands, an unmatched/orphan ack must not steal a
+                                        // different caller's waiter.
+                                    }
+                                } else if let Ok(push) =
+                                    decode_decrypted_push(message_type, &plaintext)
+                                {
                                     match push {
                                         DecodedPush::Order(update) => {
                                             observe_place_order_update(&place_outcomes, &update);
@@ -1086,24 +1166,49 @@ impl GodarkClient {
                                         DecodedPush::Settlement(s) => {
                                             let _ = settlement_tx.send(s).await;
                                         }
-                                        // Future-proof: a sequencer push variant we don't
-                                        // recognize is silently dropped — never an error.
                                         DecodedPush::Ignored => {}
                                     }
                                 }
                             }
                             Err(e) => {
                                 tracing::warn!("Encrypted push error: {e}");
+                                // Unblock a waiting command so callers fail fast instead of
+                                // hanging for the full command timeout after a Noise desync.
+                                if val
+                                    .get("message_type")
+                                    .and_then(|v| v.as_str())
+                                    .is_some_and(|mt| mt.ends_with("ack"))
+                                {
+                                    let mut err_msg = val.clone();
+                                    if let Some(obj) = err_msg.as_object_mut() {
+                                        obj.insert(
+                                            "_decrypt_error".into(),
+                                            Value::String(e.to_string()),
+                                        );
+                                    }
+                                    if let Ok(mut waiters) = encrypted_ack_waiters.lock() {
+                                        if let Some(corr) =
+                                            json_u128(&val, "correlation_id").filter(|c| *c != 0)
+                                        {
+                                            if let Some(tx) = waiters.remove(&corr) {
+                                                let _ = tx.send(err_msg);
+                                            }
+                                        }
+                                        // No single-waiter fallback (see success-path comment).
+                                    }
+                                }
                                 let _ = error_tx.try_send(e);
                             }
                         }
                     }
                     TransportEvent::RekeyRequired(_) => {
+                        // Inflight encrypted commands cannot complete across rekey.
+                        fail_encrypted_ack_waiters(
+                            &encrypted_ack_waiters,
+                            "session rekey in progress",
+                        );
                         let current_uuid = user_uuid.lock().ok().and_then(|guard| *guard);
                         if let Some(uid) = current_uuid {
-                            if let Ok(mut buffer) = encrypted_push_buffer.lock() {
-                                buffer.clear();
-                            }
                             if let Err(err) = {
                                 let transport = transport.lock().await;
                                 setup_noise_session_with_transport(
@@ -1125,12 +1230,13 @@ impl GodarkClient {
                         if let Ok(mut guard) = session.lock() {
                             guard.reset();
                         }
-                        if let Ok(mut buffer) = encrypted_push_buffer.lock() {
-                            buffer.clear();
-                        }
                         fail_place_outcome_waiters(
                             &place_outcomes,
                             "connection lost while waiting for order confirmation",
+                        );
+                        fail_encrypted_ack_waiters(
+                            &encrypted_ack_waiters,
+                            "connection lost while waiting for encrypted command ack",
                         );
                         let _ = reconnect_tx.send(ReconnectEvent::Disconnected).await;
                         if let Some(next_rx) = reconnect_transport(
@@ -1485,64 +1591,11 @@ enum DecodedPush {
     Ignored,
 }
 
-/// Preserve Noise receive-counter order when pushes arrive out of order.
-///
-/// Noise transport nonces are implicit, unlike the cleartext `nonce` field in
-/// the edge envelope. A future nonce therefore cannot be decrypted yet: retain
-/// it until all preceding pushes have been authenticated and processed.
-fn parse_buffered_encrypted_push(
-    session: &Arc<Mutex<CryptoSession>>,
-    user_uuid_slot: &Arc<Mutex<Option<Uuid>>>,
-    buffer: &Arc<Mutex<BTreeMap<u32, Value>>>,
-    msg: &Value,
-) -> Result<Vec<DecodedPush>, GodarkError> {
-    let nonce = json_u64(msg, "nonce")
-        .ok_or_else(|| GodarkError::Encryption("missing nonce".into()))? as u32;
-    let expected = session
-        .lock()
-        .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
-        .recv_nonce();
-    if nonce < expected {
-        return Err(GodarkError::Encryption(format!(
-            "stale encrypted push nonce {nonce}; expected {expected}"
-        )));
-    }
-    if nonce > expected {
-        let mut buffered = buffer
-            .lock()
-            .map_err(|_| GodarkError::Session("Encrypted push buffer mutex poisoned".into()))?;
-        if buffered.len() >= MAX_ENCRYPTED_PUSH_BUFFER && !buffered.contains_key(&nonce) {
-            return Err(GodarkError::Encryption(format!(
-                "encrypted push buffer limit ({MAX_ENCRYPTED_PUSH_BUFFER}) reached"
-            )));
-        }
-        buffered.insert(nonce, msg.clone());
-        return Ok(Vec::new());
-    }
-
-    let mut decoded = vec![parse_encrypted_push(session, user_uuid_slot, msg)?];
-    loop {
-        let next_nonce = session
-            .lock()
-            .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
-            .recv_nonce();
-        let next = buffer
-            .lock()
-            .map_err(|_| GodarkError::Session("Encrypted push buffer mutex poisoned".into()))?
-            .remove(&next_nonce);
-        let Some(next) = next else {
-            break;
-        };
-        decoded.push(parse_encrypted_push(session, user_uuid_slot, &next)?);
-    }
-    Ok(decoded)
-}
-
-fn parse_encrypted_push(
+fn decrypt_push_plaintext(
     session: &Arc<Mutex<CryptoSession>>,
     user_uuid_slot: &Arc<Mutex<Option<Uuid>>>,
     msg: &Value,
-) -> Result<DecodedPush, GodarkError> {
+) -> Result<Vec<u8>, GodarkError> {
     let ct_b64 = msg
         .get("encrypted_body")
         .and_then(|v| v.as_str())
@@ -1563,36 +1616,40 @@ fn parse_encrypted_push(
         .and_then(|v| v.as_str())
         .ok_or_else(|| GodarkError::Encryption("missing message_type".into()))?;
     let fencing_epoch = json_u64(msg, "fencing_epoch").unwrap_or_default();
+    let conn_id = json_u64(msg, "conn_id").unwrap_or_else(|| {
+        session
+            .lock()
+            .ok()
+            .and_then(|s| s.conn_id())
+            .unwrap_or_default()
+    });
 
+    let corr_bytes = response_correlation_id_bytes(msg);
+    let session_seq = json_u64(msg, "session_seq").unwrap_or_default();
     let aad = proto_bridge::build_response_header_aad(
         &user_uuid_bytes,
         message_type,
         ct.len() as u32,
         nonce as u64,
         fencing_epoch,
-        &response_correlation_id_bytes(msg),
-        json_u64(msg, "session_seq").unwrap_or_default(),
-        session
-            .lock()
-            .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
-            .conn_id()
-            .unwrap_or_default(),
+        &corr_bytes,
+        session_seq,
+        conn_id,
     );
 
-    let plaintext = session
+    session
         .lock()
         .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
         .decrypt_push(nonce, &aad, &ct)
-        .map_err(|e| GodarkError::Encryption(format!("Failed to decrypt push: {e}")))?;
+        .map_err(|e| GodarkError::Encryption(format!("Failed to decrypt push: {e}")))
+}
 
-    // A late command ack may be routed through the event stream after its
-    // caller has already received the matching response. It still consumes a
-    // Noise transport nonce, so authenticate it before dropping it.
+fn decode_decrypted_push(message_type: &str, plaintext: &[u8]) -> Result<DecodedPush, GodarkError> {
     if message_type.ends_with("ack") {
         return Ok(DecodedPush::Ignored);
     }
 
-    match proto_bridge::parse_sequencer_to_edge_message(&plaintext)? {
+    match proto_bridge::parse_sequencer_to_edge_message(plaintext)? {
         EdgeMessage::OrderUpdate(update) => Ok(DecodedPush::Order(update)),
         EdgeMessage::PositionUpdate(update) => Ok(DecodedPush::Position(update)),
         EdgeMessage::PositionsSnapshot(snap) => Ok(DecodedPush::PositionsSnapshot(snap)),
@@ -1601,7 +1658,6 @@ fn parse_encrypted_push(
         EdgeMessage::MarginAlert(a) => Ok(DecodedPush::MarginAlert(a)),
         EdgeMessage::FundingRateUpdate(f) => Ok(DecodedPush::FundingRate(f)),
         EdgeMessage::SettlementUpdate(s) => Ok(DecodedPush::Settlement(s)),
-        // Parsed but not yet routed to a consumer channel.
         EdgeMessage::AccountMarginUpdate(_) => Ok(DecodedPush::Ignored),
         EdgeMessage::Unknown => Ok(DecodedPush::Ignored),
     }
@@ -1632,6 +1688,19 @@ fn fail_place_outcome_waiters(state: &Arc<Mutex<PlaceOutcomeState>>, message: &s
             let _ = sender.send(Err(GodarkError::Connection(message.to_string())));
         }
     }
+}
+
+/// Drop all pending encrypted-command oneshots. Closing the sender makes the
+/// awaiting `rx` complete with `RecvError`, which `send_encrypted_command`
+/// maps to a connection error — fail-fast instead of waiting out the timeout.
+fn fail_encrypted_ack_waiters(
+    waiters: &Arc<Mutex<HashMap<u128, oneshot::Sender<Value>>>>,
+    _message: &str,
+) {
+    let Ok(mut waiters) = waiters.lock() else {
+        return;
+    };
+    waiters.clear();
 }
 
 fn observe_place_order_update(state: &Arc<Mutex<PlaceOutcomeState>>, update: &OrderUpdate) {
@@ -1786,9 +1855,15 @@ fn json_u64(msg: &Value, key: &str) -> Option<u64> {
 
 fn json_u128(msg: &Value, key: &str) -> Option<u128> {
     msg.get(key).and_then(|v| {
-        v.as_u64()
-            .map(u128::from)
-            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        v.as_u64().map(u128::from).or_else(|| {
+            v.as_str().and_then(|s| {
+                let s = s.trim();
+                s.parse::<u128>().ok().or_else(|| {
+                    let hex = s.strip_prefix("0x").unwrap_or(s);
+                    u128::from_str_radix(hex, 16).ok()
+                })
+            })
+        })
     })
 }
 
@@ -1948,6 +2023,25 @@ mod tests {
         assert!(state.recent.is_empty());
     }
 
+    #[tokio::test]
+    async fn test_fail_encrypted_ack_waiters_cancels_pending() {
+        let client = GodarkClient::new(test_config());
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut waiters = client.encrypted_ack_waiters.lock().unwrap();
+            waiters.insert(0xabcdu128, tx);
+        }
+        fail_encrypted_ack_waiters(
+            &client.encrypted_ack_waiters,
+            "disconnected while waiting for encrypted command ack",
+        );
+        assert!(
+            client.encrypted_ack_waiters.lock().unwrap().is_empty(),
+            "map must be cleared"
+        );
+        assert!(rx.await.is_err(), "oneshot must be cancelled by clear");
+    }
+
     #[test]
     fn test_confirmation_default_is_book() {
         assert_eq!(Confirmation::default(), Confirmation::Book);
@@ -2023,7 +2117,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_ready_not_connected() {
-        let mut client = GodarkClient::new(test_config());
+        let client = GodarkClient::new(test_config());
         let err = client
             .place_order(
                 "BTC-USDC-PERP",
@@ -2077,7 +2171,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_place_order_when_disconnected() {
-        let mut client = GodarkClient::new(test_config());
+        let client = GodarkClient::new(test_config());
         let err = client
             .place_order(
                 "BTC-USDC-PERP",
@@ -2100,7 +2194,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_order_when_disconnected() {
-        let mut client = GodarkClient::new(test_config());
+        let client = GodarkClient::new(test_config());
         let err = client
             .cancel_order("12345", "BTC-USDC-PERP")
             .await
@@ -2110,7 +2204,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_modify_order_when_disconnected() {
-        let mut client = GodarkClient::new(test_config());
+        let client = GodarkClient::new(test_config());
         let err = client
             .modify_order("12345", "BTC-USDC-PERP", Some(100.0), None)
             .await

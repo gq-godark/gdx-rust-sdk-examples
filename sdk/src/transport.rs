@@ -151,7 +151,8 @@ fn normalize_inbound_value(val: &Value) -> Value {
                         "nonce": d.get("nonce").cloned().unwrap_or(Value::from(0u64)),
                         "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64)),
                         "correlation_id": d.get("correlation_id").cloned().unwrap_or(Value::Null),
-                        "session_seq": d.get("session_seq").cloned().unwrap_or(Value::Null)
+                        "session_seq": d.get("session_seq").cloned().unwrap_or(Value::Null),
+                        "conn_id": d.get("conn_id").cloned().unwrap_or(Value::Null),
                     })
                 } else {
                     serde_json::json!({
@@ -181,11 +182,16 @@ fn normalize_inbound_value(val: &Value) -> Value {
                     return serde_json::json!({
                         "type": "encrypted_push",
                         "message_type": d.get("message_type"),
-                        "encrypted_body": d.get("ciphertext").or_else(|| d.get("encrypted_body")),
+                        "encrypted_body": d
+                            .get("ciphertext")
+                            .or_else(|| d.get("encrypted_body"))
+                            .cloned()
+                            .unwrap_or(Value::Null),
                         "nonce": d.get("nonce").cloned().unwrap_or(Value::from(0u64)),
                         "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64)),
                         "correlation_id": d.get("correlation_id").cloned().unwrap_or(Value::Null),
-                        "session_seq": d.get("session_seq").cloned().unwrap_or(Value::Null)
+                        "session_seq": d.get("session_seq").cloned().unwrap_or(Value::Null),
+                        "conn_id": d.get("conn_id").cloned().unwrap_or(Value::Null),
                     });
                 }
             }
@@ -529,8 +535,8 @@ impl EdgeTransport {
                         Err(_) => break,
                     };
                     let Message::Text(ref text) = msg else { continue };
-                    let text = text.as_ref();
-                    let Ok(val) = serde_json::from_str::<Value>(text) else { continue };
+                    let text_str: &str = text.as_ref();
+                    let Ok(val) = serde_json::from_str::<Value>(text_str) else { continue };
 
                     if let Ok(mut g) = last_inbound.lock() {
                         *g = Some(Instant::now());
@@ -577,7 +583,6 @@ impl EdgeTransport {
     ) {
         let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let event = val.get("event").and_then(|v| v.as_str()).unwrap_or("");
-
         match msg_type {
             "pong" => {}
             "auth_result" => {
@@ -611,32 +616,35 @@ impl EdgeTransport {
                     .send(TransportEvent::OrderUpdate(val.clone()))
                     .await;
             }
+            // Edge auto-fetches open orders on `orders` subscribe and pushes a
+            // cleartext snapshot. Fan rows out as order_update-shaped events so
+            // callers (and clear helpers) can cancel resting inventory.
+            "open_orders_snapshot" => {
+                if let Some(rows) = val.get("rows").and_then(|r| r.as_array()) {
+                    for row in rows {
+                        let mut update = row.clone();
+                        if let Some(obj) = update.as_object_mut() {
+                            obj.entry("type".to_string())
+                                .or_insert_with(|| Value::String("order_update".into()));
+                            obj.entry("message_type".to_string())
+                                .or_insert_with(|| Value::String("OPEN".into()));
+                        }
+                        let _ = event_tx.send(TransportEvent::OrderUpdate(update)).await;
+                    }
+                }
+            }
             "position_update" => {
                 let _ = event_tx
                     .send(TransportEvent::PositionUpdate(val.clone()))
                     .await;
             }
             "encrypted_push" => {
-                let sub_type = val
-                    .get("message_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if matches!(
-                    sub_type,
-                    "ack" | "mass_quote_ack" | "batch_cancel_ack" | "batch_modify_ack"
-                ) {
-                    if let Some(cmd) = pending_cmd.take() {
-                        let _ = cmd.tx.send(val.clone());
-                    } else {
-                        let _ = event_tx
-                            .send(TransportEvent::EncryptedPush(val.clone()))
-                            .await;
-                    }
-                } else {
-                    let _ = event_tx
-                        .send(TransportEvent::EncryptedPush(val.clone()))
-                        .await;
-                }
+                // Always decrypt on the client event loop in WebSocket arrival
+                // order (web parity). Command waiters are correlation-keyed and
+                // resolved after decrypt — do not divert acks around that path.
+                let _ = event_tx
+                    .send(TransportEvent::EncryptedPush(val.clone()))
+                    .await;
             }
             "ack" | "error" => {
                 if let Some(cmd) = pending_cmd.take() {
@@ -1105,15 +1113,17 @@ mod tests {
         )
         .await;
 
+        // Encrypted acks go to the event loop for ordered Noise decrypt; the
+        // transport pending_cmd slot is intentionally left for cleartext paths.
+        match event_rx.recv().await {
+            Some(TransportEvent::EncryptedPush(msg)) => assert_eq!(msg, val),
+            other => panic!("expected EncryptedPush, got {other:?}"),
+        }
         assert!(
-            event_rx.try_recv().is_err(),
-            "ack push must not go to event channel"
+            pending_cmd.is_some(),
+            "encrypted ack must not take pending_cmd"
         );
-        let received = cmd_rx
-            .await
-            .expect("encrypted_push ack should resolve command");
-        assert_eq!(received, val);
-        assert!(pending_cmd.is_none());
+        drop(cmd_rx);
     }
 
     #[tokio::test]

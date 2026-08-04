@@ -64,6 +64,21 @@ pub struct OrderMessage {
     /// would immediately cross the spread.
     #[prost(bool, tag = "19")]
     pub post_only: bool,
+    /// Pyth oracle mark stamped by the sequencer at accept time (public cleartext).
+    #[prost(message, optional, tag = "20")]
+    pub peg_oracle_mark: ::core::option::Option<super::super::common::v1::FieldElement>,
+    /// Price reference source for peg repricing (default: Pyth when unspecified).
+    #[prost(enumeration = "super::super::common::v1::PegReference", tag = "21")]
+    pub peg_reference: i32,
+    /// Signed basis-point offset relative to the peg reference.
+    #[prost(sint32, optional, tag = "22")]
+    pub peg_offset_bps: ::core::option::Option<i32>,
+    /// Hyperliquid best bid stamped by the sequencer (public cleartext).
+    #[prost(message, optional, tag = "23")]
+    pub hl_best_bid: ::core::option::Option<super::super::common::v1::FieldElement>,
+    /// Hyperliquid best ask stamped by the sequencer (public cleartext).
+    #[prost(message, optional, tag = "24")]
+    pub hl_best_ask: ::core::option::Option<super::super::common::v1::FieldElement>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CancelMessage {
@@ -251,6 +266,12 @@ pub struct OpenOrderRow {
     /// Sequencer-local close attribution (TP/SL fire, manual reduce-only, etc.).
     #[prost(enumeration = "super::super::common::v1::CloseReason", optional, tag = "21")]
     pub close_reason: ::core::option::Option<i32>,
+    /// Peg reference / offset so the UI can label resting pegs after refresh
+    /// (`price` alone is the absolute offset when bps is absent — not a limit).
+    #[prost(enumeration = "super::super::common::v1::PegReference", tag = "22")]
+    pub peg_reference: i32,
+    #[prost(sint32, optional, tag = "23")]
+    pub peg_offset_bps: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenOrdersSnapshot {
@@ -346,6 +367,11 @@ pub struct OrderHistoryRow {
     /// How a filled position-reducing order closed (manual / TP / SL / ADL / liq).
     #[prost(enumeration = "super::super::common::v1::CloseReason", optional, tag = "22")]
     pub close_reason: ::core::option::Option<i32>,
+    /// Peg reference / offset at placement (mirrors OpenOrderRow 22/23).
+    #[prost(enumeration = "super::super::common::v1::PegReference", tag = "23")]
+    pub peg_reference: i32,
+    #[prost(sint32, optional, tag = "24")]
+    pub peg_offset_bps: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OrderHistorySnapshot {
@@ -496,6 +522,12 @@ pub struct PlaceOrderInput {
     /// fill guardrail; 0/absent → market-like ceiling
     #[prost(uint32, optional, tag = "27")]
     pub tpsl_slippage_bps: ::core::option::Option<u32>,
+    /// Price reference source for peg repricing.
+    #[prost(enumeration = "super::super::common::v1::PegReference", tag = "28")]
+    pub peg_reference: i32,
+    /// Signed basis-point offset relative to the peg reference.
+    #[prost(sint32, optional, tag = "29")]
+    pub peg_offset_bps: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ModifyOrderInput {
@@ -1205,6 +1237,10 @@ pub struct NodeReady {
     pub node_id: u64,
     #[prost(uint64, tag = "2")]
     pub last_applied_seq: u64,
+    /// Live PrecomputeHealth wire byte (same encoding as AckMessage.node_health).
+    /// Idle heartbeats must carry real pool state — never invent Ready on the sequencer.
+    #[prost(uint32, optional, tag = "3")]
+    pub node_health: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct NodeResponse {
