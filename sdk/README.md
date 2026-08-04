@@ -39,6 +39,10 @@ users today, and is the SDK default `base_url`. The public market-data client
 (`MarketDataClient`) continues to target `<host>/ws/gomarket` regardless of
 which suffix the caller supplied.
 
+Encrypted WebSocket trading uses **Noise XK** after login. Pin the sequencer
+static public key with `ClientConfig::noise_static_public_key_hex` or
+`GDX_NOISE_STATIC_PUBLIC_KEY`. Encrypted REST order flow is unsupported.
+
 ## Layout
 
 - `src/`          — crate source
@@ -84,12 +88,14 @@ Environment variables (uniform across the Python / JS / C++ / Rust SDKs):
 | `GDX_API_KEY_ID` + `GDX_API_SECRET` + `GDX_PASSPHRASE` | falls back to legacy `test-key-1` (override via `GDX_TEST_API_KEY`) | Production credentials |
 | `GDX_REST_URL` / `GODARK_REST_URL` | `https://api.godark-dex.com` | REST live tests only |
 | `GDX_EDGE_URL` / `GODARK_EDGE_URL` | `wss://api.godark-dex.com` | WS live tests only |
+| `GDX_NOISE_STATIC_PUBLIC_KEY` | — | Sequencer Noise XK static public key (64 hex chars) |
 | `GDX_USE_DOCS_WIRE` | `1` (modern envelope) | Set `0|false|no|off` for legacy localnet edges (WS only) |
 | `GDX_USER_UUID` / `GODARK_USER_UUID` | test fixture `00000000-0000-4000-8000-000000000001` | Optional client UUID override |
 | `GDX_LIVE_SYMBOL` | `BTC-USDC-PERP` | REST live trading test symbol override |
 
 Note: at the time of writing, the public testnet's sequencer is degraded;
-live trading-flow tests fail with `POST /api/v1/session/setup HTTP 502`
-(REST) or `ECDH session setup timed out` (WS). The
+live trading-flow tests may fail with `POST /api/v1/session/setup HTTP 502`
+(REST; encrypted REST trading is unsupported under Noise XK) or a Noise
+handshake / sequencer timeout (WS). The
 `*_bad_api_key_rejected` cases pass regardless and are the SDK-side
 control confirming the failures are server-side.

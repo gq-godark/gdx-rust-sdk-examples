@@ -65,6 +65,23 @@ fn normalize_inbound_value(val: &Value) -> Value {
                 })
             }
         }
+        "noise.handshake" | "noise_handshake" => {
+            if code != 0 {
+                serde_json::json!({
+                    "type": "error",
+                    "message": msg_str.unwrap_or("noise handshake failed")
+                })
+            } else if let Some(d) = data.and_then(|v| v.as_object()) {
+                serde_json::json!({
+                    "type": "noise_handshake_reply",
+                    "conn_id": d.get("conn_id"),
+                    "message": d.get("message").cloned().unwrap_or(Value::String(String::new())),
+                    "established": d.get("established").cloned().unwrap_or(Value::Bool(false))
+                })
+            } else {
+                serde_json::json!({ "type": "error", "message": "invalid noise handshake response" })
+            }
+        }
         "session.setup" | "session_setup" => {
             if code != 0 {
                 serde_json::json!({
@@ -115,21 +132,27 @@ fn normalize_inbound_value(val: &Value) -> Value {
                 serde_json::json!({ "type": "ack", "success": true })
             }
         }
-        "order.place" | "order.cancel" | "order.modify" => {
+        "order.place" | "order.cancel" | "order.modify" | "order.mass_quote"
+        | "order.batch_cancel" | "order.batch_modify" | "order.spline_place"
+        | "order.spline_anchor_update" => {
             if code != 0 {
                 serde_json::json!({ "type": "error", "message": msg_str.unwrap_or("order error") })
             } else if let Some(d) = data.and_then(|v| v.as_object()) {
-                if d.get("message_type").and_then(|v| v.as_str()) == Some("ack") {
+                if d.get("message_type").is_some()
+                    && (d.contains_key("ciphertext") || d.contains_key("encrypted_body"))
+                {
                     serde_json::json!({
                         "type": "encrypted_push",
-                        "message_type": "ack",
+                        "message_type": d.get("message_type"),
                         "encrypted_body": d
                             .get("ciphertext")
                             .or_else(|| d.get("encrypted_body"))
                             .cloned()
                             .unwrap_or(Value::Null),
                         "nonce": d.get("nonce").cloned().unwrap_or(Value::from(0u64)),
-                        "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64))
+                        "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64)),
+                        "correlation_id": d.get("correlation_id").cloned().unwrap_or(Value::Null),
+                        "session_seq": d.get("session_seq").cloned().unwrap_or(Value::Null)
                     })
                 } else {
                     serde_json::json!({
@@ -161,7 +184,9 @@ fn normalize_inbound_value(val: &Value) -> Value {
                         "message_type": d.get("message_type"),
                         "encrypted_body": d.get("ciphertext").or_else(|| d.get("encrypted_body")),
                         "nonce": d.get("nonce").cloned().unwrap_or(Value::from(0u64)),
-                        "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64))
+                        "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64)),
+                        "correlation_id": d.get("correlation_id").cloned().unwrap_or(Value::Null),
+                        "session_seq": d.get("session_seq").cloned().unwrap_or(Value::Null)
                     });
                 }
             }
@@ -337,8 +362,6 @@ impl EdgeTransport {
     }
 
     pub async fn send_command(&self, payload: &Value) -> Result<Value, GodarkError> {
-        self.send_json(payload).await?;
-
         let (tx, rx) = oneshot::channel();
         let cmd = PendingCommand { tx };
         self.cmd_tx
@@ -347,6 +370,7 @@ impl EdgeTransport {
             .send(cmd)
             .await
             .map_err(|_| GodarkError::Connection("Command channel closed".into()))?;
+        self.send_json(payload).await?;
 
         let cmd_to = self.transport.command_timeout;
         tokio::time::timeout(cmd_to, rx)
@@ -431,8 +455,6 @@ impl EdgeTransport {
                 "data": { "token": token }
             })
         };
-        self.send_json(&payload).await?;
-
         let (tx, rx) = oneshot::channel();
         let cmd = PendingCommand { tx };
         self.cmd_tx
@@ -441,6 +463,7 @@ impl EdgeTransport {
             .send(cmd)
             .await
             .map_err(|_| GodarkError::Connection("Auth channel closed".into()))?;
+        self.send_json(&payload).await?;
 
         let cmd_to = self.transport.command_timeout;
         tokio::time::timeout(cmd_to, rx)
@@ -450,8 +473,6 @@ impl EdgeTransport {
     }
 
     pub async fn send_session_setup(&self, payload: &Value) -> Result<Value, GodarkError> {
-        self.send_json(payload).await?;
-
         let (tx, rx) = oneshot::channel();
         let session = PendingSession { tx };
         self.session_tx
@@ -460,6 +481,7 @@ impl EdgeTransport {
             .send(session)
             .await
             .map_err(|_| GodarkError::Connection("Session channel closed".into()))?;
+        self.send_json(payload).await?;
 
         let cmd_to = self.transport.command_timeout;
         tokio::time::timeout(cmd_to, rx)
@@ -494,6 +516,13 @@ impl EdgeTransport {
 
         loop {
             tokio::select! {
+                biased;
+                Some(cmd) = cmd_rx.recv() => {
+                    pending_cmd = Some(cmd);
+                }
+                Some(session) = session_rx.recv() => {
+                    pending_session = Some(session);
+                }
                 maybe_msg = ws_read.next() => {
                     let Some(result) = maybe_msg else { break };
                     let msg = match result {
@@ -516,12 +545,6 @@ impl EdgeTransport {
                         &mut pending_session,
                         &pending_sub,
                     ).await;
-                }
-                Some(cmd) = cmd_rx.recv() => {
-                    pending_cmd = Some(cmd);
-                }
-                Some(session) = session_rx.recv() => {
-                    pending_session = Some(session);
                 }
             }
         }
@@ -574,6 +597,11 @@ impl EdgeTransport {
                         .await;
                 }
             }
+            "noise_handshake_reply" => {
+                if let Some(cmd) = pending_cmd.take() {
+                    let _ = cmd.tx.send(val.clone());
+                }
+            }
             "rekey_required" => {
                 let _ = event_tx
                     .send(TransportEvent::RekeyRequired(val.clone()))
@@ -594,7 +622,11 @@ impl EdgeTransport {
                     .get("message_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if sub_type == "ack" {
+                if matches!(
+                    sub_type,
+                    "ack" | "mass_quote_ack" | "batch_cancel_ack" | "batch_modify_ack"
+                        | "spline_order_ack"
+                ) {
                     if let Some(cmd) = pending_cmd.take() {
                         let _ = cmd.tx.send(val.clone());
                     } else {
@@ -693,7 +725,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        EdgeTransport, PendingCommand, PendingSession, PendingSubscription, TransportEvent,
+        normalize_inbound_value, EdgeTransport, PendingCommand, PendingSession,
+        PendingSubscription, TransportEvent,
     };
 
     // Helper: wraps the pending-sub slot in an Arc<Mutex> the way the
@@ -701,6 +734,64 @@ mod tests {
     // ergonomics (and original assertions) without growing more lines.
     fn make_sub_slot(sub: Option<PendingSubscription>) -> Arc<Mutex<Option<PendingSubscription>>> {
         Arc::new(Mutex::new(sub))
+    }
+
+    #[test]
+    fn test_docs_encrypted_spline_preserves_response_aad_fields() {
+        let normalized = normalize_inbound_value(&json!({
+            "id": "request-2",
+            "op": "order.spline_place",
+            "code": 0,
+            "data": {
+                "message_type": "spline_order_ack",
+                "ciphertext": "AAAA",
+                "nonce": 7,
+                "fencing_epoch": 3,
+                "correlation_id": "1339673755198158349044581307228491536",
+                "session_seq": 42
+            }
+        }));
+        assert_eq!(normalized["type"], "encrypted_push");
+        assert_eq!(normalized["message_type"], "spline_order_ack");
+    }
+
+    #[test]
+    fn test_docs_encrypted_batch_preserves_response_aad_fields() {
+        let normalized = normalize_inbound_value(&json!({
+            "id": "request-1",
+            "op": "order.mass_quote",
+            "code": 0,
+            "data": {
+                "message_type": "mass_quote_ack",
+                "ciphertext": "AAAA",
+                "nonce": 7,
+                "fencing_epoch": 3,
+                "correlation_id": "1339673755198158349044581307228491536",
+                "session_seq": 42
+            }
+        }));
+        assert_eq!(normalized["type"], "encrypted_push");
+        assert_eq!(
+            normalized["correlation_id"],
+            "1339673755198158349044581307228491536"
+        );
+        assert_eq!(normalized["session_seq"], 42);
+    }
+
+    #[test]
+    fn test_docs_batch_error_is_normalized() {
+        let normalized = normalize_inbound_value(&json!({
+            "id": "request-1",
+            "op": "order.mass_quote",
+            "code": 503,
+            "message": "system temporarily unavailable, retry",
+            "data": {}
+        }));
+        assert_eq!(normalized["type"], "error");
+        assert_eq!(
+            normalized["message"],
+            "system temporarily unavailable, retry"
+        );
     }
 
     #[tokio::test]

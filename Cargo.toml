@@ -35,3 +35,7 @@ path = "examples/quickstart.rs"
 [[example]]
 name = "full_trader_example"
 path = "examples/full_trader_example.rs"
+
+[[example]]
+name = "spline_order_example"
+path = "examples/spline_order_example.rs"
