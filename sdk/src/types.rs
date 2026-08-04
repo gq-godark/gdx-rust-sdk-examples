@@ -38,6 +38,20 @@ pub struct LeverageSettings {
     pub settings: Vec<LeverageSetting>,
 }
 
+/// Confirmation boundary for high-level [`crate::GodarkClient::place_order`].
+///
+/// Mirrors the JS SDK `confirmation: "ack" | "book"` option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Confirmation {
+    /// Return as soon as the sequencer acknowledges the order. Callers must
+    /// consume the order-update stream themselves for rejects / fills.
+    Ack,
+    /// Wait for a definitive order update (`OPEN` / `REJECTED` / fill / cancel)
+    /// and surface post-ack rejects as [`crate::GodarkError::Order`]. Default.
+    #[default]
+    Book,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderAck {
     pub order_id: String,
@@ -146,6 +160,7 @@ pub struct OrderUpdate {
     pub cum_fill: String,
     pub cancel_reason: Option<CancelReason>,
     pub reject_reason: Option<String>,
+    pub msg: Option<String>,
     pub correlation_id: u128,
     pub timestamp: u64,
 }
@@ -168,17 +183,17 @@ pub struct PositionUpdate {
 /// User profile returned by `GET /api/v1/auth/me`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeProfile {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_string")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_string")]
     pub dynamic_user_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_string")]
     pub email: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_string")]
     pub wallet_address: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_string")]
     pub referral_code: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_string")]
     pub tier: String,
 }
 
@@ -233,10 +248,17 @@ where
     deserializer.deserialize_any(StringU64Visitor)
 }
 
+fn deserialize_null_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// Why a [`PositionsSnapshot`] was emitted by the sequencer.
 ///
 /// Mirrors `gdx.common.v1.PositionsSnapshotSource`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PositionsSnapshotSource {
     Unspecified,
     /// First snapshot delivered after `SubscribePositions`.
@@ -282,17 +304,16 @@ pub struct PositionsSnapshot {
     pub correlation_id: Option<u128>,
 }
 
-/// Sequencer / MPC node health pulse routed via the trading WS.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Unified component health report routed via the trading WS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemHealthUpdate {
-    pub total_nodes: u32,
-    pub accepting_orders: bool,
-    pub ready: u32,
-    pub degraded: u32,
-    pub exhausted: u32,
-    pub warming: u32,
-    pub draining: u32,
-    pub waiting: u32,
+    pub component_id: String,
+    pub state: i32,
+    pub serving: bool,
+    pub cause: String,
+    pub updated_at_nanos: u64,
+    pub sequence: u64,
+    pub schema_version: u32,
 }
 
 /// Updated shielded balance for the authenticated user.
@@ -310,8 +331,8 @@ pub struct MarginAlert {
     pub symbol_id: u64,
     pub tier: u32,
     pub margin_ratio_bps: u32,
-    pub mark_price_bps: u64,
-    pub liquidation_price_bps: u64,
+    pub mark_price: String,
+    pub liquidation_price: String,
     pub ts: i64,
     pub state_version: u64,
     /// True when the position recovered to `Healthy` — UI clears the tier
@@ -346,6 +367,29 @@ pub struct SettlementUpdate {
     pub tx_signature: String,
     pub timestamp: u64,
     pub affected_user_uuids: Vec<Uuid>,
+}
+
+/// Authoritative account-level margin summary. All amounts are decimal strings.
+/// `free_collateral` is the server-computed amount available to open new orders
+/// (already deducts margin reserved by resting orders), so render it directly
+/// rather than recomputing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountMarginSummary {
+    pub total_collateral: String,
+    pub position_margin: String,
+    pub reserved_order_margin: String,
+    pub free_collateral: String,
+}
+
+/// Dedicated account-margin push for a user. Emitted whenever collateral,
+/// positions, or resting-order holds change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountMarginUpdate {
+    pub user_uuid: Uuid,
+    /// Sequencer wall-clock timestamp when the summary was computed, ns.
+    pub server_timestamp: u64,
+    /// Absent if the sequencer did not include a summary.
+    pub account: Option<AccountMarginSummary>,
 }
 
 #[cfg(test)]
@@ -384,6 +428,7 @@ mod tests {
             cum_fill: "4.5".to_string(),
             cancel_reason: Some(CancelReason::UserRequested),
             reject_reason: Some("bad".to_string()),
+            msg: Some("detail".to_string()),
             correlation_id: 999,
             timestamp: 1_700_000_000,
         };
@@ -458,6 +503,7 @@ mod tests {
             cum_fill: "0".into(),
             cancel_reason: None,
             reject_reason: None,
+            msg: None,
             correlation_id: 0,
             timestamp: 0,
         };

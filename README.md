@@ -106,7 +106,7 @@ get fast incremental builds and IDE go-to-definition into the SDK source.
 | Sample | Source | Purpose |
 |--------|--------|---------|
 | `quickstart` | `examples/quickstart.rs` | Minimal connect → LIMIT sell far from touch → cancel; demonstrates the symbolic `OrderError::error_code` reason on rejection |
-| `full_trader_example` | `examples/full_trader_example.rs` | Reference bot flow with all 6 sequencer push callbacks (positions_snapshot, system_health, balance_update, margin_alert, funding_rate, settlement), order placement, modify, cancel, and queued-update drain |
+| `full_trader_example` | `examples/full_trader_example.rs` | Reference bot flow with all 6 sequencer push callbacks, place / modify / cancel, mass-quote / batch-cancel, and queued-update drain |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and
 **`LIMIT`**.

@@ -12,7 +12,9 @@ parity / pin discipline, error-code internals, forward-compat enum strategy,
 crate sourcing options).
 
 > Scope: the MM examples use **WebSocket encrypted trading** via
-> `godark::GodarkClient`. Standalone REST and market-data surfaces are
+> `godark::GodarkClient`. Encrypted REST trading is not supported — all order
+> flow (place / modify / cancel / mass-quote) runs over the Noise XK WebSocket
+> client. Standalone market-data surfaces are
 > intentionally excluded from this distribution. Order placement support
 > is limited to `MARKET` and `LIMIT`.
 
@@ -107,7 +109,7 @@ To consume `godark` from your own project outside this repo, either:
 |--------|-----------|---------|
 | `builder` | `GodarkClient::builder() -> GodarkConfigBuilder` | Start a new client config |
 | `new` | `GodarkClient::new(config) -> GodarkClient` | Construct the client |
-| `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish encrypted session |
+| `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish Noise XK encrypted WebSocket session |
 | `disconnect` | `async fn disconnect(&mut self)` | Graceful disconnect |
 | `is_connected` | `fn is_connected(&self) -> bool` | Connection state |
 | `user_uuid` | `fn user_uuid(&self) -> Option<&Uuid>` | Authenticated user id |
@@ -325,7 +327,7 @@ sequencer command acks.
 | File | Purpose |
 |------|---------|
 | `examples/quickstart.rs` | Minimal connect, place, cancel |
-| `examples/full_trader_example.rs` | Reference bot flow with all 6 push callbacks |
+| `examples/full_trader_example.rs` | Reference bot flow: callbacks, place / modify / cancel, mass-quote / batch-cancel |
 | `examples/dotenv.rs` | Shared helper (`load_dotenv` + `print_order_error`) |
 
 ## SDK source layout

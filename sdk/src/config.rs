@@ -52,7 +52,11 @@ impl Default for TransportConfig {
 }
 
 /// Resolved configuration for a GodarkClient.
+///
+/// Construct via [`GodarkConfigBuilder`]. New fields are `pub(crate)` so
+/// external struct-literal construction is not required to keep pace.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct GodarkConfig {
     pub auth_token: String,
     pub base_url: String,
@@ -63,6 +67,24 @@ pub struct GodarkConfig {
     /// `user_uuid`, the SDK falls back to this value.  Resolved from
     /// `.user_uuid()` builder call or `GODARK_USER_UUID` / `GDX_USER_UUID`.
     pub user_uuid: Option<Uuid>,
+    /// Pinned sequencer Noise XK static X25519 public key, encoded as hex.
+    /// Resolved from the builder or `GDX_NOISE_STATIC_PUBLIC_KEY`,
+    /// `GDX_NOISE_STATIC_PUBKEY`, or `GODARK_NOISE_STATIC_PUBLIC_KEY`.
+    pub noise_static_public_key_hex: Option<String>,
+    /// How long [`Confirmation::Book`](crate::types::Confirmation::Book)
+    /// waits for an OPEN/reject/fill/cancel update after the fast ack.
+    /// Always positive; use [`Confirmation::Ack`](crate::types::Confirmation::Ack)
+    /// to skip waiting. Set via
+    /// [`GodarkConfigBuilder::place_order_terminal_timeout`].
+    pub(crate) place_order_terminal_timeout: Duration,
+}
+
+impl GodarkConfig {
+    /// Timeout used when `place_order` confirmation is [`Confirmation::Book`](crate::types::Confirmation::Book).
+    #[must_use]
+    pub fn place_order_terminal_timeout(&self) -> Duration {
+        self.place_order_terminal_timeout
+    }
 }
 
 /// Builder for GodarkClient configuration.
@@ -76,6 +98,8 @@ pub struct GodarkConfigBuilder {
     symbol_map: HashMap<String, u64>,
     transport: TransportConfig,
     user_uuid: Option<Uuid>,
+    noise_static_public_key_hex: Option<String>,
+    place_order_terminal_timeout: Option<Duration>,
 }
 
 impl GodarkConfigBuilder {
@@ -93,6 +117,8 @@ impl GodarkConfigBuilder {
             symbol_map: symbols,
             transport: TransportConfig::default(),
             user_uuid: None,
+            noise_static_public_key_hex: None,
+            place_order_terminal_timeout: None,
         }
     }
 
@@ -133,11 +159,24 @@ impl GodarkConfigBuilder {
         self
     }
 
+    /// How long book confirmation waits after the fast ack (must be > 0).
+    /// Defaults to the transport `command_timeout`.
+    pub fn place_order_terminal_timeout(mut self, timeout: Duration) -> Self {
+        self.place_order_terminal_timeout = Some(timeout);
+        self
+    }
+
     /// Set the user UUID explicitly. Required when the edge auth response does
     /// not return `user_uuid` (e.g. localnet / static-key auth). Falls back to
     /// `GODARK_USER_UUID` / `GDX_USER_UUID` environment variables at build time.
     pub fn user_uuid(mut self, uuid: impl Into<String>) -> Self {
         self.user_uuid = Uuid::parse_str(&uuid.into()).ok();
+        self
+    }
+
+    /// Pin the sequencer Noise XK static X25519 public key (64 hex characters).
+    pub fn noise_static_public_key_hex(mut self, key: impl Into<String>) -> Self {
+        self.noise_static_public_key_hex = Some(key.into());
         self
     }
 
@@ -188,7 +227,18 @@ impl GodarkConfigBuilder {
         let base_url = resolve_edge_base_url(self.base_url.as_deref());
 
         let user_uuid = self.user_uuid.or_else(resolve_user_uuid_env);
+        let noise_static_public_key_hex = self
+            .noise_static_public_key_hex
+            .or_else(resolve_noise_static_public_key_env);
 
+        let place_order_terminal_timeout = self
+            .place_order_terminal_timeout
+            .unwrap_or(self.transport.command_timeout);
+        if place_order_terminal_timeout.is_zero() {
+            return Err(GodarkError::Config(
+                "place_order_terminal_timeout must be greater than zero".into(),
+            ));
+        }
         Ok(GodarkConfig {
             auth_token,
             base_url,
@@ -196,6 +246,8 @@ impl GodarkConfigBuilder {
             symbol_map: self.symbol_map,
             transport: self.transport,
             user_uuid,
+            noise_static_public_key_hex,
+            place_order_terminal_timeout,
         })
     }
 }
@@ -231,6 +283,22 @@ fn resolve_user_uuid_env() -> Option<Uuid> {
         if let Ok(v) = env::var(key) {
             if let Ok(u) = Uuid::parse_str(v.trim()) {
                 return Some(u);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_noise_static_public_key_env() -> Option<String> {
+    for key in &[
+        "GDX_NOISE_STATIC_PUBLIC_KEY",
+        "GDX_NOISE_STATIC_PUBKEY",
+        "GODARK_NOISE_STATIC_PUBLIC_KEY",
+    ] {
+        if let Ok(value) = env::var(key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
         }
     }
@@ -314,12 +382,29 @@ mod tests {
 
     #[test]
     fn test_builder_api_key_pair_requires_passphrase() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_g = std::env::var("GODARK_PASSPHRASE").ok();
+        let old_x = std::env::var("GDX_PASSPHRASE").ok();
+        std::env::remove_var("GODARK_PASSPHRASE");
+        std::env::remove_var("GDX_PASSPHRASE");
+
         let err = GodarkConfigBuilder::new()
             .api_key_id("id")
             .api_secret("secret")
             .build()
             .unwrap_err();
         assert!(matches!(err, GodarkError::Config(ref msg) if msg.contains("passphrase")));
+
+        if let Some(v) = old_g {
+            std::env::set_var("GODARK_PASSPHRASE", v);
+        } else {
+            std::env::remove_var("GODARK_PASSPHRASE");
+        }
+        if let Some(v) = old_x {
+            std::env::set_var("GDX_PASSPHRASE", v);
+        } else {
+            std::env::remove_var("GDX_PASSPHRASE");
+        }
     }
 
     #[test]
@@ -378,6 +463,26 @@ mod tests {
         assert_eq!(resolve_passphrase(None), Some("godark-pw".into()));
         std::env::remove_var("GODARK_PASSPHRASE");
         std::env::remove_var("GDX_PASSPHRASE");
+    }
+
+    #[test]
+    fn test_builder_place_order_terminal_timeout_default() {
+        let cfg = GodarkConfigBuilder::new().api_key("k").build().unwrap();
+        assert_eq!(
+            cfg.place_order_terminal_timeout(),
+            cfg.transport.command_timeout
+        );
+    }
+
+    #[test]
+    fn test_builder_place_order_terminal_timeout_custom() {
+        use std::time::Duration;
+        let cfg = GodarkConfigBuilder::new()
+            .api_key("k")
+            .place_order_terminal_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        assert_eq!(cfg.place_order_terminal_timeout(), Duration::from_secs(5));
     }
 
     #[test]

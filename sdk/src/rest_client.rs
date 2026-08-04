@@ -21,8 +21,6 @@ use crate::config::resolve_passphrase;
 use crate::enums::{OrderType, Side, TimeInForce};
 use crate::types::{Balance, LeverageSettings, MeProfile};
 
-/// AES-256-GCM auth tag length appended to ciphertext (matches Python/JS/C++ SDKs).
-const GCM_TAG_LEN: usize = 16;
 use crate::error::GodarkError;
 use crate::order_error_code::{make_order_error_from_code, make_order_error_from_json};
 use crate::proto_bridge;
@@ -81,6 +79,23 @@ fn resolve_rest_base_url(explicit: Option<String>) -> String {
         }
     }
     DEFAULT_REST_BASE_URL.to_string()
+}
+
+fn json_u128(value: &Value, key: &str) -> Option<u128> {
+    value.get(key).and_then(|field| {
+        field
+            .as_u64()
+            .map(u128::from)
+            .or_else(|| field.as_str().and_then(|raw| raw.parse().ok()))
+    })
+}
+
+fn json_u64(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(|field| {
+        field
+            .as_u64()
+            .or_else(|| field.as_str().and_then(|raw| raw.parse().ok()))
+    })
 }
 
 /// Builder for [`GodarkRestClient`] — separate from `GodarkConfigBuilder` (WS) to
@@ -305,23 +320,9 @@ impl GodarkRestClient {
             }
         }
 
-        let client_pk_b64 = self.session.generate_keypair();
-        let session_data = self.http.session_setup(&bearer, &client_pk_b64).await?;
-        let server_pk = session_data
-            .get("server_ecdh_pubkey")
-            .or_else(|| session_data.get("sequencer_ecdh_pubkey"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                GodarkError::Session("session/setup missing server_ecdh_pubkey".into())
-            })?;
-        let session_id = session_data
-            .get("session_id")
-            .and_then(|v| {
-                v.as_u64()
-                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-            })
-            .ok_or_else(|| GodarkError::Session("session/setup missing session_id".into()))?;
-        self.session.establish(server_pk, session_id)?;
+        // Noise XK is bound to a WebSocket connection and cannot be established
+        // over REST. Public REST reads remain available; encrypted trading is
+        // rejected below until a caller uses `GodarkClient`.
         Ok(())
     }
 
@@ -621,7 +622,7 @@ impl GodarkRestClient {
     ) -> Result<OrderAck, GodarkError> {
         let bearer = self.current_bearer()?.to_string();
         let uuid = self.current_user_uuid()?;
-        let body_length = (plaintext.len() + GCM_TAG_LEN) as u32;
+        let body_length = CryptoSession::body_length_for_plaintext(plaintext.len())?;
         let nonce_counter = self.session.next_nonce();
 
         let aad = proto_bridge::build_order_header_aad(
@@ -631,6 +632,7 @@ impl GodarkRestClient {
             nonce_counter as u64,
             body_length,
             correlation_id,
+            0,
         );
 
         let (actual_nonce, ciphertext) = self
@@ -641,7 +643,8 @@ impl GodarkRestClient {
         let corr_str = if correlation_id.len() == 16 {
             let mut arr = [0u8; 16];
             arr.copy_from_slice(correlation_id);
-            Some(Uuid::from_bytes(arr).to_string())
+            let value = u128::from_be_bytes(arr);
+            (value != 0).then(|| format!("{value:032x}"))
         } else {
             None
         };
@@ -713,6 +716,12 @@ impl GodarkRestClient {
             ct.len() as u32,
             nonce as u64,
             fencing_epoch,
+            &json_u128(raw, "correlation_id")
+                .filter(|value| *value != 0)
+                .map(|value| value.to_be_bytes().to_vec())
+                .unwrap_or_default(),
+            json_u64(raw, "session_seq").unwrap_or_default(),
+            0,
         );
         let plaintext = self
             .session
@@ -724,10 +733,14 @@ impl GodarkRestClient {
                 success,
                 sequence,
                 error_code,
+                reject_text,
                 ..
             } => {
                 if !success {
-                    return Err(make_order_error_from_code(error_code));
+                    return Err(make_order_error_from_code(
+                        error_code,
+                        reject_text.as_deref(),
+                    ));
                 }
                 Ok(OrderAck {
                     order_id: order_id.to_string(),
@@ -806,6 +819,29 @@ fn timestamp_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_env(keys: &[&str]) -> Vec<(String, Option<String>)> {
+        keys.iter()
+            .map(|k| {
+                let prev = std::env::var(k).ok();
+                std::env::remove_var(k);
+                (k.to_string(), prev)
+            })
+            .collect()
+    }
+
+    fn restore_env(saved: Vec<(String, Option<String>)>) {
+        for (k, v) in saved {
+            if let Some(val) = v {
+                std::env::set_var(&k, val);
+            } else {
+                std::env::remove_var(&k);
+            }
+        }
+    }
 
     #[test]
     fn builder_rejects_no_credentials() {
@@ -825,6 +861,8 @@ mod tests {
 
     #[test]
     fn builder_accepts_id_secret_with_passphrase() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = clear_env(&["GODARK_USER_UUID", "GDX_USER_UUID"]);
         let c = GodarkRestClient::builder()
             .api_key_id("id")
             .api_secret("sec")
@@ -832,10 +870,13 @@ mod tests {
             .build()
             .unwrap();
         assert!(c.user_uuid().is_none());
+        restore_env(saved);
     }
 
     #[test]
     fn builder_id_secret_requires_passphrase() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = clear_env(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]);
         let res = GodarkRestClient::builder()
             .api_key_id("id")
             .api_secret("sec")
@@ -844,6 +885,7 @@ mod tests {
             res,
             Err(GodarkError::Config(ref msg)) if msg.contains("passphrase")
         ));
+        restore_env(saved);
     }
 
     #[test]
