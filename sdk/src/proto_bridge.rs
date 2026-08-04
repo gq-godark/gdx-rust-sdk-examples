@@ -519,10 +519,11 @@ pub fn parse_spline_order_ack(data: &[u8]) -> Result<crate::types::SplineOrderAc
         other => {
             return Err(GodarkError::Order {
                 message: format!(
-                    "Expected spline_order_ack, got {}",
-                    node_response_kind(&other)
+                    "Expected spline_order_ack, got {}{}",
+                    node_response_kind(&other),
+                    node_response_details(&other)
                 ),
-                error_code: None,
+                error_code: node_response_error_code_string(&other),
             });
         }
     };
@@ -536,12 +537,54 @@ pub fn parse_spline_order_ack(data: &[u8]) -> Result<crate::types::SplineOrderAc
 
 fn node_response_kind(inner: &Option<sequencer::node_response::Inner>) -> &'static str {
     match inner {
+        Some(sequencer::node_response::Inner::Ack(_)) => "ack",
+        Some(sequencer::node_response::Inner::Fill(_)) => "fill",
+        Some(sequencer::node_response::Inner::Signing(_)) => "signing",
+        Some(sequencer::node_response::Inner::OpenOrdersSnapshot(_)) => "open_orders_snapshot",
+        Some(sequencer::node_response::Inner::OrderHistorySnapshot(_)) => "order_history_snapshot",
+        Some(sequencer::node_response::Inner::FillShareResponse(_)) => "fill_share_response",
+        Some(sequencer::node_response::Inner::NodeReady(_)) => "node_ready",
         Some(sequencer::node_response::Inner::MassQuoteAck(_)) => "mass_quote_ack",
         Some(sequencer::node_response::Inner::BatchCancelAck(_)) => "batch_cancel_ack",
         Some(sequencer::node_response::Inner::BatchModifyAck(_)) => "batch_modify_ack",
+        Some(sequencer::node_response::Inner::BalanceChangeBatchAck(_)) => "balance_change_batch_ack",
+        Some(sequencer::node_response::Inner::DevWipeBatchAck(_)) => "dev_wipe_batch_ack",
+        Some(sequencer::node_response::Inner::SetOrderInventoryAck(_)) => "set_order_inventory_ack",
         Some(sequencer::node_response::Inner::SplineOrderAck(_)) => "spline_order_ack",
-        Some(_) => "other",
         None => "unknown",
+    }
+}
+
+fn node_response_error_code(inner: &Option<sequencer::node_response::Inner>) -> Option<u32> {
+    match inner {
+        Some(sequencer::node_response::Inner::Ack(a)) => a.error_code,
+        _ => None,
+    }
+}
+
+fn node_response_error_code_string(
+    inner: &Option<sequencer::node_response::Inner>,
+) -> Option<String> {
+    node_response_error_code(inner).map(|code| code.to_string())
+}
+
+fn node_response_details(inner: &Option<sequencer::node_response::Inner>) -> String {
+    match inner {
+        Some(sequencer::node_response::Inner::Ack(a)) => {
+            let mut parts = vec![
+                format!("success={}", a.success),
+                format!("order_id={}", a.order_id),
+                format!("sequence={}", a.sequence),
+            ];
+            if let Some(code) = a.error_code {
+                parts.push(format!("error_code={code}"));
+            }
+            if let Some(text) = a.reject_text.as_deref().filter(|s| !s.is_empty()) {
+                parts.push(format!("reject_text={text}"));
+            }
+            format!(" ({})", parts.join(", "))
+        }
+        _ => String::new(),
     }
 }
 

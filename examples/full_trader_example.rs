@@ -139,7 +139,9 @@ async fn main() {
     let mut funding_rate_rx = client
         .take_funding_rate_receiver()
         .expect("funding rate receiver");
-    let mut settlement_rx = client.take_settlement_receiver().expect("settlement receiver");
+    let mut settlement_rx = client
+        .take_settlement_receiver()
+        .expect("settlement receiver");
     let mut error_rx = client.take_error_receiver().expect("error receiver");
 
     println!("Connecting...");

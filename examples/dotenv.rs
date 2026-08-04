@@ -29,7 +29,10 @@ pub fn load_dotenv() {
 
 pub fn print_order_error(operation: &str, err: &GodarkError) {
     match err {
-        GodarkError::Order { message, error_code } => eprintln!(
+        GodarkError::Order {
+            message,
+            error_code,
+        } => eprintln!(
             "{operation}: OrderError code={} reason={}",
             error_code.as_deref().unwrap_or("<none>"),
             message,
