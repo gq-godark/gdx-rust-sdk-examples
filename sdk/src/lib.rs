@@ -40,6 +40,6 @@ pub use types::{
     FundingRateUpdate, LeverageSetting, LeverageSettings, MarginAlert, MassQuoteAck,
     MassQuoteLegInput, MassQuoteLegResult, MeProfile, OrderAck, OrderUpdate, PositionRow,
     PositionUpdate, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
-    SettlementBatchStatus, SettlementUpdate, SplineOrderAck, SplineRegionInput,
+    SettlementBatchStatus, SettlementUpdate, SplineOrderAck, SplineRegionInput, CurveBandKind,
     SystemHealthUpdate,
 };

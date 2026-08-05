@@ -266,11 +266,32 @@ pub fn build_batch_modify_proto(
 /// Maximum number of half-open regions allowed per side (bid or ask).
 pub const MAX_SPLINE_REGIONS_PER_SIDE: usize = 8;
 
+fn curve_band_kind_to_proto(kind: crate::types::CurveBandKind) -> i32 {
+    match kind {
+        crate::types::CurveBandKind::Step => sequencer::CurveBandKind::Step as i32,
+        crate::types::CurveBandKind::LinearTaper => {
+            sequencer::CurveBandKind::LinearTaper as i32
+        }
+    }
+}
+
+fn qty_at_human(region: &crate::types::SplineRegionInput, offset: u32) -> f64 {
+    match region.kind {
+        crate::types::CurveBandKind::Step => region.density,
+        crate::types::CurveBandKind::LinearTaper => {
+            let delta_ticks = f64::from(offset.saturating_sub(region.start_offset));
+            region.density + region.slope_per_tick * delta_ticks
+        }
+    }
+}
+
 fn spline_region_to_proto(region: &crate::types::SplineRegionInput) -> sequencer::SplineRegion {
     sequencer::SplineRegion {
         start_offset: region.start_offset,
         end_offset: region.end_offset,
         density: region.density,
+        kind: curve_band_kind_to_proto(region.kind),
+        slope_per_tick: region.slope_per_tick,
     }
 }
 
@@ -316,6 +337,7 @@ fn validate_spline_side_regions(
                 "{name}[{idx}]: density must be > 0"
             )));
         }
+        validate_region_shape(name, idx, region)?;
         if let Some(prev) = prev_end {
             if region.start_offset < prev {
                 return Err(GodarkError::InvalidInput(format!(
@@ -324,6 +346,43 @@ fn validate_spline_side_regions(
             }
         }
         prev_end = Some(region.end_offset);
+    }
+    Ok(())
+}
+
+fn validate_region_shape(
+    name: &str,
+    idx: usize,
+    region: &crate::types::SplineRegionInput,
+) -> Result<(), GodarkError> {
+    match region.kind {
+        crate::types::CurveBandKind::Step => {
+            if region.slope_per_tick != 0.0 {
+                return Err(GodarkError::InvalidInput(format!(
+                    "{name}[{idx}]: Step band must have slope_per_tick = 0"
+                )));
+            }
+        }
+        crate::types::CurveBandKind::LinearTaper => {
+            if !region.slope_per_tick.is_finite() {
+                return Err(GodarkError::InvalidInput(format!(
+                    "{name}[{idx}]: slope_per_tick must be finite"
+                )));
+            }
+            if region.slope_per_tick > 0.0 {
+                return Err(GodarkError::InvalidInput(format!(
+                    "{name}[{idx}]: LinearTaper slope_per_tick must be <= 0"
+                )));
+            }
+            for offset in region.start_offset..region.end_offset {
+                let qty = qty_at_human(region, offset);
+                if !qty.is_finite() || qty <= 0.0 {
+                    return Err(GodarkError::InvalidInput(format!(
+                        "{name}[{idx}]: non-positive qty at offset {offset}"
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -519,11 +578,10 @@ pub fn parse_spline_order_ack(data: &[u8]) -> Result<crate::types::SplineOrderAc
         other => {
             return Err(GodarkError::Order {
                 message: format!(
-                    "Expected spline_order_ack, got {}{}",
-                    node_response_kind(&other),
-                    node_response_details(&other)
+                    "Expected spline_order_ack, got {}",
+                    node_response_kind(&other)
                 ),
-                error_code: node_response_error_code_string(&other),
+                error_code: None,
             });
         }
     };
@@ -537,54 +595,12 @@ pub fn parse_spline_order_ack(data: &[u8]) -> Result<crate::types::SplineOrderAc
 
 fn node_response_kind(inner: &Option<sequencer::node_response::Inner>) -> &'static str {
     match inner {
-        Some(sequencer::node_response::Inner::Ack(_)) => "ack",
-        Some(sequencer::node_response::Inner::Fill(_)) => "fill",
-        Some(sequencer::node_response::Inner::Signing(_)) => "signing",
-        Some(sequencer::node_response::Inner::OpenOrdersSnapshot(_)) => "open_orders_snapshot",
-        Some(sequencer::node_response::Inner::OrderHistorySnapshot(_)) => "order_history_snapshot",
-        Some(sequencer::node_response::Inner::FillShareResponse(_)) => "fill_share_response",
-        Some(sequencer::node_response::Inner::NodeReady(_)) => "node_ready",
         Some(sequencer::node_response::Inner::MassQuoteAck(_)) => "mass_quote_ack",
         Some(sequencer::node_response::Inner::BatchCancelAck(_)) => "batch_cancel_ack",
         Some(sequencer::node_response::Inner::BatchModifyAck(_)) => "batch_modify_ack",
-        Some(sequencer::node_response::Inner::BalanceChangeBatchAck(_)) => "balance_change_batch_ack",
-        Some(sequencer::node_response::Inner::DevWipeBatchAck(_)) => "dev_wipe_batch_ack",
-        Some(sequencer::node_response::Inner::SetOrderInventoryAck(_)) => "set_order_inventory_ack",
         Some(sequencer::node_response::Inner::SplineOrderAck(_)) => "spline_order_ack",
+        Some(_) => "other",
         None => "unknown",
-    }
-}
-
-fn node_response_error_code(inner: &Option<sequencer::node_response::Inner>) -> Option<u32> {
-    match inner {
-        Some(sequencer::node_response::Inner::Ack(a)) => a.error_code,
-        _ => None,
-    }
-}
-
-fn node_response_error_code_string(
-    inner: &Option<sequencer::node_response::Inner>,
-) -> Option<String> {
-    node_response_error_code(inner).map(|code| code.to_string())
-}
-
-fn node_response_details(inner: &Option<sequencer::node_response::Inner>) -> String {
-    match inner {
-        Some(sequencer::node_response::Inner::Ack(a)) => {
-            let mut parts = vec![
-                format!("success={}", a.success),
-                format!("order_id={}", a.order_id),
-                format!("sequence={}", a.sequence),
-            ];
-            if let Some(code) = a.error_code {
-                parts.push(format!("error_code={code}"));
-            }
-            if let Some(text) = a.reject_text.as_deref().filter(|s| !s.is_empty()) {
-                parts.push(format!("reject_text={text}"));
-            }
-            format!(" ({})", parts.join(", "))
-        }
-        _ => String::new(),
     }
 }
 
@@ -1144,16 +1160,8 @@ mod tests {
 
     #[test]
     fn test_build_place_spline_order_proto_roundtrip() {
-        let bid = vec![crate::types::SplineRegionInput {
-            start_offset: 1,
-            end_offset: 4,
-            density: 0.5,
-        }];
-        let ask = vec![crate::types::SplineRegionInput {
-            start_offset: 1,
-            end_offset: 3,
-            density: 0.25,
-        }];
+        let bid = vec![crate::types::SplineRegionInput::step(1, 4, 0.5)];
+        let ask = vec![crate::types::SplineRegionInput::step(1, 3, 0.25)];
         let bytes = build_place_spline_order_proto(
             7,
             &TEST_UUID,
@@ -1203,17 +1211,42 @@ mod tests {
     #[test]
     fn test_validate_spline_regions_rejects_overlap() {
         let bid = vec![
-            crate::types::SplineRegionInput {
-                start_offset: 1,
-                end_offset: 5,
-                density: 1.0,
-            },
-            crate::types::SplineRegionInput {
-                start_offset: 3,
-                end_offset: 7,
-                density: 1.0,
-            },
+            crate::types::SplineRegionInput::step(1, 5, 1.0),
+            crate::types::SplineRegionInput::step(3, 7, 1.0),
         ];
+        assert!(validate_spline_regions(&bid, &[]).is_err());
+    }
+
+    #[test]
+    fn test_build_linear_taper_spline_order_proto() {
+        let bid = vec![crate::types::SplineRegionInput::linear_taper(1, 5, 0.01, -0.001)];
+        let ask = vec![crate::types::SplineRegionInput::linear_taper(1, 4, 0.01, -0.001)];
+        let bytes = build_place_spline_order_proto(
+            7,
+            &TEST_UUID,
+            50_000.0,
+            &bid,
+            &ask,
+            &TEST_UUID,
+            1,
+            0,
+        )
+        .expect("build");
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let spline = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::SplineOrder(s)) => s,
+            other => panic!("expected SplineOrder, got {:?}", other),
+        };
+        assert_eq!(
+            spline.bid_regions[0].kind,
+            sequencer::CurveBandKind::LinearTaper as i32
+        );
+        assert_eq!(spline.bid_regions[0].slope_per_tick, -0.001);
+    }
+
+    #[test]
+    fn test_validate_linear_taper_rejects_positive_slope() {
+        let bid = vec![crate::types::SplineRegionInput::linear_taper(1, 4, 0.01, 0.001)];
         assert!(validate_spline_regions(&bid, &[]).is_err());
     }
 

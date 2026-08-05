@@ -98,11 +98,46 @@ fn env_f64(name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+fn env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+fn spline_shape_from_env() -> String {
+    std::env::var("GODARK_SPLINE_SHAPE")
+        .unwrap_or_else(|_| "step".into())
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn build_spline_regions(
+    shape: &str,
+    bid_start: u32,
+    bid_end: u32,
+    ask_start: u32,
+    ask_end: u32,
+    q_start: f64,
+    slope: f64,
+) -> (Vec<SplineRegionInput>, Vec<SplineRegionInput>) {
+    match shape {
+        "linear_taper" | "lineartaper" | "linear-taper" => (
+            vec![SplineRegionInput::linear_taper(bid_start, bid_end, q_start, slope)],
+            vec![SplineRegionInput::linear_taper(ask_start, ask_end, q_start, slope)],
+        ),
+        _ => (
+            vec![SplineRegionInput::step(bid_start, bid_end, q_start)],
+            vec![SplineRegionInput::step(ask_start, ask_end, q_start)],
+        ),
+    }
 }
 
 #[tokio::main]
@@ -127,16 +162,19 @@ async fn main() -> Result<(), GodarkError> {
         "Config: symbol={SYMBOL} anchor_price={anchor_price} updated_anchor_price={updated_anchor_price}"
     );
 
-    let bid = vec![SplineRegionInput {
-        start_offset: 1,
-        end_offset: 5,
-        density: 0.01,
-    }];
-    let ask = vec![SplineRegionInput {
-        start_offset: 1,
-        end_offset: 4,
-        density: 0.01,
-    }];
+    let shape = spline_shape_from_env();
+    let bid_start = env_u32("GODARK_SPLINE_BID_START", 1);
+    let bid_end = env_u32("GODARK_SPLINE_BID_END", 5);
+    let ask_start = env_u32("GODARK_SPLINE_ASK_START", 1);
+    let ask_end = env_u32("GODARK_SPLINE_ASK_END", 4);
+    let q_start = env_f64("GODARK_SPLINE_Q_START", 0.01);
+    let slope = env_f64("GODARK_SPLINE_SLOPE_PER_TICK", -0.001);
+    let (bid, ask) = build_spline_regions(
+        &shape, bid_start, bid_end, ask_start, ask_end, q_start, slope,
+    );
+    println!(
+        "Config: shape={shape} q_start={q_start} slope_per_tick={slope}"
+    );
     println!("Config: bid_regions={bid:?}");
     println!("Config: ask_regions={ask:?}");
 

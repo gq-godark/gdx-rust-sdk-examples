@@ -138,7 +138,8 @@ pub struct MassQuoteMessage {
     pub post_only: ::core::option::Option<bool>,
 }
 /// Half-open tick offset region from the secret anchor. Bid tick x => anchor - x;
-/// ask tick x => anchor + x. Density is per tick within [start_offset, end_offset).
+/// ask tick x => anchor + x. For STEP, density is per tick within [start, end).
+/// For LINEAR_TAPER, density is q_start at the first tick and slope_per_tick tapers size.
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct SplineRegion {
     #[prost(uint32, tag = "1")]
@@ -147,8 +148,12 @@ pub struct SplineRegion {
     pub end_offset: u32,
     #[prost(double, tag = "3")]
     pub density: f64,
+    #[prost(enumeration = "CurveBandKind", tag = "4")]
+    pub kind: i32,
+    #[prost(double, tag = "5")]
+    pub slope_per_tick: f64,
 }
-/// Fanout path: same offsets with secret-shared per-tick density (instrument qty scale).
+/// Fanout path: same offsets with secret-shared q_start/density and public slope.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SplineRegionWire {
     #[prost(uint32, tag = "1")]
@@ -157,6 +162,10 @@ pub struct SplineRegionWire {
     pub end_offset: u32,
     #[prost(message, optional, tag = "3")]
     pub density: ::core::option::Option<super::super::common::v1::FieldElement>,
+    #[prost(enumeration = "CurveBandKind", tag = "4")]
+    pub kind: i32,
+    #[prost(sint64, tag = "5")]
+    pub slope_per_tick_scaled: i64,
 }
 /// Edge -> sequencer: place one compressed spline (human f64 anchor + regions).
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1955,6 +1964,32 @@ pub struct FencedEdgeMessage {
     pub fencing_epoch: u64,
     #[prost(message, optional, tag = "2")]
     pub inner: ::core::option::Option<SequencerToEdgeMessage>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CurveBandKind {
+    Step = 0,
+    LinearTaper = 1,
+}
+impl CurveBandKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Step => "CURVE_BAND_KIND_STEP",
+            Self::LinearTaper => "CURVE_BAND_KIND_LINEAR_TAPER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CURVE_BAND_KIND_STEP" => Some(Self::Step),
+            "CURVE_BAND_KIND_LINEAR_TAPER" => Some(Self::LinearTaper),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

@@ -145,15 +145,62 @@ pub struct BatchModifyAck {
     pub results: Vec<BatchModifyLegResult>,
 }
 
-/// One half-open tick band from the spline anchor with uniform per-tick size.
+/// Curve band shape for compressed spline liquidity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CurveBandKind {
+    /// Uniform per-tick density.
+    #[default]
+    Step,
+    /// Linear taper: `qty(x) = density + slope_per_tick × (x - start)`.
+    LinearTaper,
+}
+
+/// One half-open tick band from the spline anchor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SplineRegionInput {
     /// Inclusive start offset in ticks from the anchor (must be > 0).
     pub start_offset: u32,
     /// Exclusive end offset in ticks from the anchor (must be > start).
     pub end_offset: u32,
-    /// Size available at each tick within the band (human units).
+    /// Step density or LinearTaper q_start (human units).
     pub density: f64,
+    /// Band shape (defaults to Step when unset).
+    #[serde(default)]
+    pub kind: CurveBandKind,
+    /// LinearTaper only: signed delta per tick (≤ 0 away from mid).
+    #[serde(default)]
+    pub slope_per_tick: f64,
+}
+
+impl SplineRegionInput {
+    /// Build a Step band with uniform per-tick size.
+    #[must_use]
+    pub fn step(start_offset: u32, end_offset: u32, density: f64) -> Self {
+        Self {
+            start_offset,
+            end_offset,
+            density,
+            kind: CurveBandKind::Step,
+            slope_per_tick: 0.0,
+        }
+    }
+
+    /// Build a LinearTaper band tapering from `q_start` by `slope_per_tick` per tick.
+    #[must_use]
+    pub fn linear_taper(
+        start_offset: u32,
+        end_offset: u32,
+        q_start: f64,
+        slope_per_tick: f64,
+    ) -> Self {
+        Self {
+            start_offset,
+            end_offset,
+            density: q_start,
+            kind: CurveBandKind::LinearTaper,
+            slope_per_tick,
+        }
+    }
 }
 
 /// Outcome of placing or anchor-updating one compressed spline object.
