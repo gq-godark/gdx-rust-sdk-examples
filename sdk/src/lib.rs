@@ -26,7 +26,7 @@ pub mod types;
 mod ws_connect;
 
 pub use client::GodarkClient;
-pub use config::{resolve_passphrase, GodarkConfigBuilder, TransportConfig};
+pub use config::{resolve_passphrase, GodarkConfig, GodarkConfigBuilder, TransportConfig};
 pub use enums::{
     CancelReason, OrderStatus, OrderType, OrderUpdateType, PositionUpdateType, Side, TimeInForce,
 };
@@ -35,8 +35,10 @@ pub use order_error_code::{find as find_order_error, OrderErrorEntry, ORDER_ERRO
 pub use rest_client::{GodarkRestClient, GodarkRestClientBuilder};
 pub use rest_transport::RestTransport;
 pub use types::{
-    Balance, BalanceUpdate, FundingRateUpdate, LeverageSetting, LeverageSettings, MarginAlert,
-    MeProfile, OrderAck, OrderUpdate, PositionRow, PositionUpdate, PositionsSnapshot,
-    PositionsSnapshotSource, ReconnectEvent, SettlementBatchStatus, SettlementUpdate,
-    SystemHealthUpdate,
+    AccountMarginSummary, AccountMarginUpdate, Balance, BalanceUpdate, BatchCancelAck,
+    BatchCancelLegResult, BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation,
+    FundingRateUpdate, LeverageSetting, LeverageSettings, MarginAlert, MassQuoteAck,
+    MassQuoteLegInput, MassQuoteLegResult, MeProfile, OrderAck, OrderUpdate, PositionRow,
+    PositionUpdate, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
+    SettlementBatchStatus, SettlementUpdate, SystemHealthUpdate,
 };

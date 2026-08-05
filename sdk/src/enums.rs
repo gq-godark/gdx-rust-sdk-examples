@@ -237,6 +237,9 @@ pub fn request_type_to_proto(s: &str) -> i32 {
         "subscribe" => 4,
         "signing" => 5,
         "update_leverage" => 8,
+        "mass_quote" => 10,
+        "batch_cancel" => 11,
+        "batch_modify" => 12,
         _ => 0,
     }
 }
@@ -262,6 +265,11 @@ pub fn response_message_type_to_proto(s: &str) -> i32 {
         "open_orders_snapshot" => 5,
         "order_history_snapshot" => 6,
         "positions_snapshot" => 7,
+        "balance_and_position" => 8,
+        "account_margin_update" => 9,
+        "mass_quote_ack" => 10,
+        "batch_cancel_ack" => 11,
+        "batch_modify_ack" => 12,
         _ => 0,
     }
 }

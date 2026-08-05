@@ -2,7 +2,9 @@
 
 This reference describes the API surface used by the two examples shipped in
 this distribution. The examples use WebSocket encrypted trading
-via `godark::GodarkClient`. REST and standalone market-data surfaces are
+via `godark::GodarkClient`. Encrypted REST trading is not supported — all order
+flow (place / modify / cancel / mass-quote) runs over the Noise XK WebSocket
+client. Standalone market-data surfaces are
 intentionally excluded.
 
 Order placement support in this MM distribution is limited to `MARKET` and
@@ -50,6 +52,8 @@ The MM examples expect:
 
 - `GODARK_API_KEY_ID` (required)
 - `GODARK_API_SECRET` (required)
+- `GODARK_PASSPHRASE` (required for API key-pair auth)
+- `GDX_NOISE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`
 - `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
 
 Use `.env.example` as the template for your local `.env`.
@@ -65,7 +69,7 @@ distribution; also available under `sdk/` for path-dependency builds).
 |--------|-----------|---------|
 | `builder` | `GodarkClient::builder() -> ConfigBuilder` | Start a new client config |
 | `new` | `GodarkClient::new(config) -> GodarkClient` | Construct the client |
-| `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish encrypted session |
+| `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish Noise XK encrypted WebSocket session |
 | `disconnect` | `async fn disconnect(&mut self)` | Graceful disconnect |
 | `is_connected` | `fn is_connected(&self) -> bool` | Connection state |
 | `user_uuid` | `fn user_uuid(&self) -> Option<&Uuid>` | Authenticated user id |
@@ -147,7 +151,7 @@ MM distribution supports placing only `Market` and `Limit` orders.
 `GodarkError` is the single error type returned from every fallible SDK call:
 
 - `Authentication(String)`
-- `Session(String)`
+- `Session(String)` — Noise XK handshake or rekey failure
 - `Order { message: String, error_code: Option<String> }`
   — also carries the symbolic reason (e.g. `"PRICE_DEVIATION_TOO_LARGE"`,
   `"MARGIN_INSUFFICIENT"`). See the `quickstart` source for the match-and-print
@@ -162,7 +166,7 @@ MM distribution supports placing only `Market` and `Limit` orders.
 | File | Purpose |
 |------|---------|
 | `examples/quickstart.rs` | Minimal connect, place, cancel |
-| `examples/full_trader_example.rs` | Reference bot flow with all 6 push callbacks (positions snapshot, system health, balance, margin, funding rate, settlement) |
+| `examples/full_trader_example.rs` | Reference bot flow: callbacks, place / modify / cancel, mass-quote / batch-cancel |
 | `examples/dotenv.rs` | Shared `.env` loader and symbolic-error printer used by both example mains |
 
 Build from the bundle root with `cargo build --release --examples`. Binaries

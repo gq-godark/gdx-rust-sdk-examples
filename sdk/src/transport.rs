@@ -65,6 +65,23 @@ fn normalize_inbound_value(val: &Value) -> Value {
                 })
             }
         }
+        "noise.handshake" | "noise_handshake" => {
+            if code != 0 {
+                serde_json::json!({
+                    "type": "error",
+                    "message": msg_str.unwrap_or("noise handshake failed")
+                })
+            } else if let Some(d) = data.and_then(|v| v.as_object()) {
+                serde_json::json!({
+                    "type": "noise_handshake_reply",
+                    "conn_id": d.get("conn_id"),
+                    "message": d.get("message").cloned().unwrap_or(Value::String(String::new())),
+                    "established": d.get("established").cloned().unwrap_or(Value::Bool(false))
+                })
+            } else {
+                serde_json::json!({ "type": "error", "message": "invalid noise handshake response" })
+            }
+        }
         "session.setup" | "session_setup" => {
             if code != 0 {
                 serde_json::json!({
@@ -115,21 +132,27 @@ fn normalize_inbound_value(val: &Value) -> Value {
                 serde_json::json!({ "type": "ack", "success": true })
             }
         }
-        "order.place" | "order.cancel" | "order.modify" => {
+        "order.place" | "order.cancel" | "order.modify" | "order.mass_quote"
+        | "order.batch_cancel" | "order.batch_modify" => {
             if code != 0 {
                 serde_json::json!({ "type": "error", "message": msg_str.unwrap_or("order error") })
             } else if let Some(d) = data.and_then(|v| v.as_object()) {
-                if d.get("message_type").and_then(|v| v.as_str()) == Some("ack") {
+                if d.get("message_type").is_some()
+                    && (d.contains_key("ciphertext") || d.contains_key("encrypted_body"))
+                {
                     serde_json::json!({
                         "type": "encrypted_push",
-                        "message_type": "ack",
+                        "message_type": d.get("message_type"),
                         "encrypted_body": d
                             .get("ciphertext")
                             .or_else(|| d.get("encrypted_body"))
                             .cloned()
                             .unwrap_or(Value::Null),
                         "nonce": d.get("nonce").cloned().unwrap_or(Value::from(0u64)),
-                        "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64))
+                        "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64)),
+                        "correlation_id": d.get("correlation_id").cloned().unwrap_or(Value::Null),
+                        "session_seq": d.get("session_seq").cloned().unwrap_or(Value::Null),
+                        "conn_id": d.get("conn_id").cloned().unwrap_or(Value::Null),
                     })
                 } else {
                     serde_json::json!({
@@ -159,9 +182,16 @@ fn normalize_inbound_value(val: &Value) -> Value {
                     return serde_json::json!({
                         "type": "encrypted_push",
                         "message_type": d.get("message_type"),
-                        "encrypted_body": d.get("ciphertext").or_else(|| d.get("encrypted_body")),
+                        "encrypted_body": d
+                            .get("ciphertext")
+                            .or_else(|| d.get("encrypted_body"))
+                            .cloned()
+                            .unwrap_or(Value::Null),
                         "nonce": d.get("nonce").cloned().unwrap_or(Value::from(0u64)),
-                        "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64))
+                        "fencing_epoch": d.get("fencing_epoch").cloned().unwrap_or(Value::from(0u64)),
+                        "correlation_id": d.get("correlation_id").cloned().unwrap_or(Value::Null),
+                        "session_seq": d.get("session_seq").cloned().unwrap_or(Value::Null),
+                        "conn_id": d.get("conn_id").cloned().unwrap_or(Value::Null),
                     });
                 }
             }
@@ -337,8 +367,6 @@ impl EdgeTransport {
     }
 
     pub async fn send_command(&self, payload: &Value) -> Result<Value, GodarkError> {
-        self.send_json(payload).await?;
-
         let (tx, rx) = oneshot::channel();
         let cmd = PendingCommand { tx };
         self.cmd_tx
@@ -347,6 +375,7 @@ impl EdgeTransport {
             .send(cmd)
             .await
             .map_err(|_| GodarkError::Connection("Command channel closed".into()))?;
+        self.send_json(payload).await?;
 
         let cmd_to = self.transport.command_timeout;
         tokio::time::timeout(cmd_to, rx)
@@ -431,8 +460,6 @@ impl EdgeTransport {
                 "data": { "token": token }
             })
         };
-        self.send_json(&payload).await?;
-
         let (tx, rx) = oneshot::channel();
         let cmd = PendingCommand { tx };
         self.cmd_tx
@@ -441,6 +468,7 @@ impl EdgeTransport {
             .send(cmd)
             .await
             .map_err(|_| GodarkError::Connection("Auth channel closed".into()))?;
+        self.send_json(&payload).await?;
 
         let cmd_to = self.transport.command_timeout;
         tokio::time::timeout(cmd_to, rx)
@@ -450,8 +478,6 @@ impl EdgeTransport {
     }
 
     pub async fn send_session_setup(&self, payload: &Value) -> Result<Value, GodarkError> {
-        self.send_json(payload).await?;
-
         let (tx, rx) = oneshot::channel();
         let session = PendingSession { tx };
         self.session_tx
@@ -460,6 +486,7 @@ impl EdgeTransport {
             .send(session)
             .await
             .map_err(|_| GodarkError::Connection("Session channel closed".into()))?;
+        self.send_json(payload).await?;
 
         let cmd_to = self.transport.command_timeout;
         tokio::time::timeout(cmd_to, rx)
@@ -494,6 +521,13 @@ impl EdgeTransport {
 
         loop {
             tokio::select! {
+                biased;
+                Some(cmd) = cmd_rx.recv() => {
+                    pending_cmd = Some(cmd);
+                }
+                Some(session) = session_rx.recv() => {
+                    pending_session = Some(session);
+                }
                 maybe_msg = ws_read.next() => {
                     let Some(result) = maybe_msg else { break };
                     let msg = match result {
@@ -501,8 +535,8 @@ impl EdgeTransport {
                         Err(_) => break,
                     };
                     let Message::Text(ref text) = msg else { continue };
-                    let text = text.as_ref();
-                    let Ok(val) = serde_json::from_str::<Value>(text) else { continue };
+                    let text_str: &str = text.as_ref();
+                    let Ok(val) = serde_json::from_str::<Value>(text_str) else { continue };
 
                     if let Ok(mut g) = last_inbound.lock() {
                         *g = Some(Instant::now());
@@ -516,12 +550,6 @@ impl EdgeTransport {
                         &mut pending_session,
                         &pending_sub,
                     ).await;
-                }
-                Some(cmd) = cmd_rx.recv() => {
-                    pending_cmd = Some(cmd);
-                }
-                Some(session) = session_rx.recv() => {
-                    pending_session = Some(session);
                 }
             }
         }
@@ -555,7 +583,6 @@ impl EdgeTransport {
     ) {
         let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let event = val.get("event").and_then(|v| v.as_str()).unwrap_or("");
-
         match msg_type {
             "pong" => {}
             "auth_result" => {
@@ -574,6 +601,11 @@ impl EdgeTransport {
                         .await;
                 }
             }
+            "noise_handshake_reply" => {
+                if let Some(cmd) = pending_cmd.take() {
+                    let _ = cmd.tx.send(val.clone());
+                }
+            }
             "rekey_required" => {
                 let _ = event_tx
                     .send(TransportEvent::RekeyRequired(val.clone()))
@@ -584,29 +616,35 @@ impl EdgeTransport {
                     .send(TransportEvent::OrderUpdate(val.clone()))
                     .await;
             }
+            // Edge auto-fetches open orders on `orders` subscribe and pushes a
+            // cleartext snapshot. Fan rows out as order_update-shaped events so
+            // callers (and clear helpers) can cancel resting inventory.
+            "open_orders_snapshot" => {
+                if let Some(rows) = val.get("rows").and_then(|r| r.as_array()) {
+                    for row in rows {
+                        let mut update = row.clone();
+                        if let Some(obj) = update.as_object_mut() {
+                            obj.entry("type".to_string())
+                                .or_insert_with(|| Value::String("order_update".into()));
+                            obj.entry("message_type".to_string())
+                                .or_insert_with(|| Value::String("OPEN".into()));
+                        }
+                        let _ = event_tx.send(TransportEvent::OrderUpdate(update)).await;
+                    }
+                }
+            }
             "position_update" => {
                 let _ = event_tx
                     .send(TransportEvent::PositionUpdate(val.clone()))
                     .await;
             }
             "encrypted_push" => {
-                let sub_type = val
-                    .get("message_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if sub_type == "ack" {
-                    if let Some(cmd) = pending_cmd.take() {
-                        let _ = cmd.tx.send(val.clone());
-                    } else {
-                        let _ = event_tx
-                            .send(TransportEvent::EncryptedPush(val.clone()))
-                            .await;
-                    }
-                } else {
-                    let _ = event_tx
-                        .send(TransportEvent::EncryptedPush(val.clone()))
-                        .await;
-                }
+                // Always decrypt on the client event loop in WebSocket arrival
+                // order (web parity). Command waiters are correlation-keyed and
+                // resolved after decrypt — do not divert acks around that path.
+                let _ = event_tx
+                    .send(TransportEvent::EncryptedPush(val.clone()))
+                    .await;
             }
             "ack" | "error" => {
                 if let Some(cmd) = pending_cmd.take() {
@@ -693,7 +731,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        EdgeTransport, PendingCommand, PendingSession, PendingSubscription, TransportEvent,
+        normalize_inbound_value, EdgeTransport, PendingCommand, PendingSession,
+        PendingSubscription, TransportEvent,
     };
 
     // Helper: wraps the pending-sub slot in an Arc<Mutex> the way the
@@ -701,6 +740,45 @@ mod tests {
     // ergonomics (and original assertions) without growing more lines.
     fn make_sub_slot(sub: Option<PendingSubscription>) -> Arc<Mutex<Option<PendingSubscription>>> {
         Arc::new(Mutex::new(sub))
+    }
+
+    #[test]
+    fn test_docs_encrypted_batch_preserves_response_aad_fields() {
+        let normalized = normalize_inbound_value(&json!({
+            "id": "request-1",
+            "op": "order.mass_quote",
+            "code": 0,
+            "data": {
+                "message_type": "mass_quote_ack",
+                "ciphertext": "AAAA",
+                "nonce": 7,
+                "fencing_epoch": 3,
+                "correlation_id": "1339673755198158349044581307228491536",
+                "session_seq": 42
+            }
+        }));
+        assert_eq!(normalized["type"], "encrypted_push");
+        assert_eq!(
+            normalized["correlation_id"],
+            "1339673755198158349044581307228491536"
+        );
+        assert_eq!(normalized["session_seq"], 42);
+    }
+
+    #[test]
+    fn test_docs_batch_error_is_normalized() {
+        let normalized = normalize_inbound_value(&json!({
+            "id": "request-1",
+            "op": "order.mass_quote",
+            "code": 503,
+            "message": "system temporarily unavailable, retry",
+            "data": {}
+        }));
+        assert_eq!(normalized["type"], "error");
+        assert_eq!(
+            normalized["message"],
+            "system temporarily unavailable, retry"
+        );
     }
 
     #[tokio::test]
@@ -1035,15 +1113,17 @@ mod tests {
         )
         .await;
 
+        // Encrypted acks go to the event loop for ordered Noise decrypt; the
+        // transport pending_cmd slot is intentionally left for cleartext paths.
+        match event_rx.recv().await {
+            Some(TransportEvent::EncryptedPush(msg)) => assert_eq!(msg, val),
+            other => panic!("expected EncryptedPush, got {other:?}"),
+        }
         assert!(
-            event_rx.try_recv().is_err(),
-            "ack push must not go to event channel"
+            pending_cmd.is_some(),
+            "encrypted ack must not take pending_cmd"
         );
-        let received = cmd_rx
-            .await
-            .expect("encrypted_push ack should resolve command");
-        assert_eq!(received, val);
-        assert!(pending_cmd.is_none());
+        drop(cmd_rx);
     }
 
     #[tokio::test]
