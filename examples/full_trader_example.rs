@@ -354,6 +354,7 @@ async fn main() {
         .await
     {
         Ok(mq) => {
+            let mut stray_ids: Vec<u64> = Vec::new();
             for r in &mq.results {
                 println!(
                     "  leg {}: status={}  new_order_id={}  fills={}  err={:?}",
@@ -363,6 +364,31 @@ async fn main() {
                     r.fill_count,
                     r.error_code
                 );
+                if r.status == "open" {
+                    if let Some(id) = r.new_order_id.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                        stray_ids.push(id);
+                    }
+                }
+            }
+            if !stray_ids.is_empty() {
+                println!(
+                    "Batch-cancelling {} post_only=false remainder(s)...",
+                    stray_ids.len()
+                );
+                match client.batch_cancel(SYMBOL, &stray_ids).await {
+                    Ok(bc) => {
+                        for r in &bc.results {
+                            println!(
+                                "  cancel id={}: cancelled={} err={:?}",
+                                r.order_id, r.cancelled, r.error_code
+                            );
+                        }
+                    }
+                    Err(e) => dotenv::print_order_error(
+                        "post_only=false remainder cancel rejected",
+                        &e,
+                    ),
+                }
             }
         }
         Err(e) => dotenv::print_order_error("post_only=false mass quote rejected", &e),
