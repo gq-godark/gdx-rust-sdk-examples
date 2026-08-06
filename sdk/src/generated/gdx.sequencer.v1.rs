@@ -137,9 +137,9 @@ pub struct MassQuoteMessage {
     #[prost(bool, optional, tag = "5")]
     pub post_only: ::core::option::Option<bool>,
 }
-/// Half-open tick offset region from the secret anchor. Bid tick x => anchor - x;
-/// ask tick x => anchor + x. For STEP, density is per tick within [start, end).
-/// For LINEAR_TAPER, density is q_start at the first tick and slope_per_tick tapers size.
+/// Half-open instrument-tick region from the secret anchor.
+/// Bid tick x => anchor - (x * tick_size_units); ask => anchor + (x * tick_size_units).
+/// Visited offsets: start, start+step, ... while < end (default step = 1).
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct SplineRegion {
     #[prost(uint32, tag = "1")]
@@ -152,6 +152,8 @@ pub struct SplineRegion {
     pub kind: i32,
     #[prost(double, tag = "5")]
     pub slope_per_tick: f64,
+    #[prost(uint32, tag = "6")]
+    pub step: u32,
 }
 /// Fanout path: same offsets with secret-shared q_start/density and public slope.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -166,6 +168,8 @@ pub struct SplineRegionWire {
     pub kind: i32,
     #[prost(sint64, tag = "5")]
     pub slope_per_tick_scaled: i64,
+    #[prost(uint32, tag = "6")]
+    pub step: u32,
 }
 /// Edge -> sequencer: place one compressed spline (human f64 anchor + regions).
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -212,6 +216,8 @@ pub struct SplineOrderMessage {
     pub leverage: u32,
     #[prost(enumeration = "super::super::common::v1::StpMode", tag = "10")]
     pub stp_mode: i32,
+    #[prost(uint64, tag = "11")]
+    pub tick_size_units: u64,
 }
 /// Edge -> sequencer: refresh only the quote-center anchor on an existing spline.
 #[derive(Clone, PartialEq, ::prost::Message)]

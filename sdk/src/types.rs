@@ -155,12 +155,12 @@ pub enum CurveBandKind {
     LinearTaper,
 }
 
-/// One half-open tick band from the spline anchor.
+/// One half-open instrument-tick band from the spline anchor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SplineRegionInput {
-    /// Inclusive start offset in ticks from the anchor (must be > 0).
+    /// Inclusive start offset in instrument ticks from the anchor (must be > 0).
     pub start_offset: u32,
-    /// Exclusive end offset in ticks from the anchor (must be > start).
+    /// Exclusive end offset in instrument ticks from the anchor (must be > start).
     pub end_offset: u32,
     /// Step density or LinearTaper q_start (human units).
     pub density: f64,
@@ -170,10 +170,17 @@ pub struct SplineRegionInput {
     /// LinearTaper only: signed delta per tick (≤ 0 away from mid).
     #[serde(default)]
     pub slope_per_tick: f64,
+    /// Instrument-tick stride between live offsets (default 1 = every tick).
+    #[serde(default = "default_region_stride")]
+    pub stride: u32,
+}
+
+fn default_region_stride() -> u32 {
+    1
 }
 
 impl SplineRegionInput {
-    /// Build a Step band with uniform per-tick size.
+    /// Build a Step-kind band with uniform per-tick size and stride 1.
     #[must_use]
     pub fn step(start_offset: u32, end_offset: u32, density: f64) -> Self {
         Self {
@@ -182,6 +189,7 @@ impl SplineRegionInput {
             density,
             kind: CurveBandKind::Step,
             slope_per_tick: 0.0,
+            stride: 1,
         }
     }
 
@@ -199,7 +207,15 @@ impl SplineRegionInput {
             density: q_start,
             kind: CurveBandKind::LinearTaper,
             slope_per_tick,
+            stride: 1,
         }
+    }
+
+    /// Set instrument-tick stride (`step` on the wire).
+    #[must_use]
+    pub fn with_stride(mut self, stride: u32) -> Self {
+        self.stride = stride.max(1);
+        self
     }
 }
 

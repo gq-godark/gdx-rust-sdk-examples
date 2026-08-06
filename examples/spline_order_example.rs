@@ -119,8 +119,17 @@ fn spline_shape_from_env() -> String {
         .to_ascii_lowercase()
 }
 
+fn spline_region_stride_from_env() -> u32 {
+    std::env::var("GODARK_SPLINE_REGION_STRIDE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&s| s >= 1)
+        .unwrap_or(1)
+}
+
 fn build_spline_regions(
     shape: &str,
+    stride: u32,
     bid_start: u32,
     bid_end: u32,
     ask_start: u32,
@@ -130,12 +139,14 @@ fn build_spline_regions(
 ) -> (Vec<SplineRegionInput>, Vec<SplineRegionInput>) {
     match shape {
         "linear_taper" | "lineartaper" | "linear-taper" => (
-            vec![SplineRegionInput::linear_taper(bid_start, bid_end, q_start, slope)],
-            vec![SplineRegionInput::linear_taper(ask_start, ask_end, q_start, slope)],
+            vec![SplineRegionInput::linear_taper(bid_start, bid_end, q_start, slope)
+                .with_stride(stride)],
+            vec![SplineRegionInput::linear_taper(ask_start, ask_end, q_start, slope)
+                .with_stride(stride)],
         ),
         _ => (
-            vec![SplineRegionInput::step(bid_start, bid_end, q_start)],
-            vec![SplineRegionInput::step(ask_start, ask_end, q_start)],
+            vec![SplineRegionInput::step(bid_start, bid_end, q_start).with_stride(stride)],
+            vec![SplineRegionInput::step(ask_start, ask_end, q_start).with_stride(stride)],
         ),
     }
 }
@@ -163,6 +174,7 @@ async fn main() -> Result<(), GodarkError> {
     );
 
     let shape = spline_shape_from_env();
+    let region_stride = spline_region_stride_from_env();
     let bid_start = env_u32("GODARK_SPLINE_BID_START", 1);
     let bid_end = env_u32("GODARK_SPLINE_BID_END", 5);
     let ask_start = env_u32("GODARK_SPLINE_ASK_START", 1);
@@ -170,10 +182,17 @@ async fn main() -> Result<(), GodarkError> {
     let q_start = env_f64("GODARK_SPLINE_Q_START", 0.01);
     let slope = env_f64("GODARK_SPLINE_SLOPE_PER_TICK", -0.001);
     let (bid, ask) = build_spline_regions(
-        &shape, bid_start, bid_end, ask_start, ask_end, q_start, slope,
+        &shape,
+        region_stride,
+        bid_start,
+        bid_end,
+        ask_start,
+        ask_end,
+        q_start,
+        slope,
     );
     println!(
-        "Config: shape={shape} q_start={q_start} slope_per_tick={slope}"
+        "Config: shape={shape} region_stride={region_stride} q_start={q_start} slope_per_tick={slope}"
     );
     println!("Config: bid_regions={bid:?}");
     println!("Config: ask_regions={ask:?}");

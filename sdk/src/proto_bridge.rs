@@ -285,6 +285,20 @@ fn qty_at_human(region: &crate::types::SplineRegionInput, offset: u32) -> f64 {
     }
 }
 
+fn live_offsets(start: u32, end: u32, step: u32) -> impl Iterator<Item = u32> {
+    let step = step.max(1);
+    let mut offset = start;
+    std::iter::from_fn(move || {
+        if offset >= end {
+            None
+        } else {
+            let current = offset;
+            offset = offset.saturating_add(step);
+            Some(current)
+        }
+    })
+}
+
 fn spline_region_to_proto(region: &crate::types::SplineRegionInput) -> sequencer::SplineRegion {
     sequencer::SplineRegion {
         start_offset: region.start_offset,
@@ -292,6 +306,7 @@ fn spline_region_to_proto(region: &crate::types::SplineRegionInput) -> sequencer
         density: region.density,
         kind: curve_band_kind_to_proto(region.kind),
         slope_per_tick: region.slope_per_tick,
+        step: region.stride,
     }
 }
 
@@ -337,6 +352,11 @@ fn validate_spline_side_regions(
                 "{name}[{idx}]: density must be > 0"
             )));
         }
+        if region.stride == 0 {
+            return Err(GodarkError::InvalidInput(format!(
+                "{name}[{idx}]: stride must be >= 1"
+            )));
+        }
         validate_region_shape(name, idx, region)?;
         if let Some(prev) = prev_end {
             if region.start_offset < prev {
@@ -374,7 +394,7 @@ fn validate_region_shape(
                     "{name}[{idx}]: LinearTaper slope_per_tick must be <= 0"
                 )));
             }
-            for offset in region.start_offset..region.end_offset {
+            for offset in live_offsets(region.start_offset, region.end_offset, region.stride) {
                 let qty = qty_at_human(region, offset);
                 if !qty.is_finite() || qty <= 0.0 {
                     return Err(GodarkError::InvalidInput(format!(
