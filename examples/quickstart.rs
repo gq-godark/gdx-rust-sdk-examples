@@ -11,9 +11,9 @@
 //!   GODARK_API_KEY_ID=gdk_...
 //!   GODARK_API_SECRET=...
 //!   GODARK_PASSPHRASE=...
-//!   # GODARK_EDGE_URL=wss://api.godark-dex.com   (optional override)
+//!   # GODARK_EDGE_URL=...   (optional; default Environment::Testnet)
 
-use godark::{GodarkClient, GodarkError, OrderType, Side, TimeInForce};
+use godark::{Environment, GodarkClient, GodarkError, OrderType, Side, TimeInForce};
 
 #[path = "dotenv.rs"]
 mod dotenv;
@@ -33,15 +33,17 @@ async fn main() -> Result<(), GodarkError> {
     let passphrase = std::env::var("GODARK_PASSPHRASE").map_err(|_| {
         GodarkError::Config("Set GODARK_PASSPHRASE in your environment or .env file".into())
     })?;
-    let base_url =
-        std::env::var("GODARK_EDGE_URL").unwrap_or_else(|_| "wss://api.godark-dex.com".into());
-
-    let config = GodarkClient::builder()
-        .base_url(&base_url)
+    let mut builder = GodarkClient::builder()
+        .environment(Environment::Testnet)
         .api_key_id(api_key_id)
         .api_secret(api_secret)
-        .passphrase(passphrase)
-        .build()?;
+        .passphrase(passphrase);
+    if let Ok(base_url) = std::env::var("GODARK_EDGE_URL") {
+        if !base_url.trim().is_empty() {
+            builder = builder.base_url(base_url.trim());
+        }
+    }
+    let config = builder.build()?;
 
     let mut client = GodarkClient::new(config);
     client.connect().await?;
