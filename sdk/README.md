@@ -29,19 +29,31 @@ configured base URL. Set the host via the `base_url` builder,
 `GODARK_EDGE_URL`, or `GDX_EDGE_URL`; either `<host>` or `<host>/ws/v1`
 resolve to the same endpoint.
 
-| Environment | Canonical URL |
-|---|---|
-| Testnet (default) | `wss://api.godark-dex.com/ws/v1` |
-| Localnet | `ws://127.0.0.1:4000/ws/v1` |
+| Environment | Canonical URL | Noise pin |
+|---|---|---|
+| Testnet (default) | `wss://api.godark-dex.com/ws/v1` | baked in (testnet pin) |
+| Devnet | `ws://18.143.165.149:13300/ws/v1` | baked in (devnet pin; distinct from testnet) |
+| Localnet | `ws://127.0.0.1:4000/ws/v1` | set via builder / env |
+
+```rust
+use godark::{Environment, GodarkClient};
+
+let config = GodarkClient::builder()
+    .environment(Environment::Testnet) // default; sets URL + Noise pin
+    .api_key_id("gdk_...")
+    .api_secret("...")
+    .passphrase("...")
+    .build()?;
+```
 
 Public mainnet is not currently exposed; testnet is the live network for SDK
-users today, and is the SDK default `base_url`. The public market-data client
-(`MarketDataClient`) continues to target `<host>/ws/gomarket` regardless of
-which suffix the caller supplied.
+users today. The public market-data client (`MarketDataClient`) continues to
+target `<host>/ws/gomarket` regardless of which suffix the caller supplied.
 
-Encrypted WebSocket trading uses **Noise XK** after login. Pin the sequencer
-static public key with `ClientConfig::noise_static_public_key_hex` or
-`GDX_NOISE_STATIC_PUBLIC_KEY`. Encrypted REST order flow is unsupported.
+Encrypted WebSocket trading uses **Noise XK** after login. Preference order for
+the sequencer pin: `.noise_static_public_key_hex(...)` →
+`GDX_NOISE_STATIC_PUBLIC_KEY` (aliases) → baked-in pin from `.environment(...)`.
+Encrypted REST order flow is unsupported.
 
 ## Layout
 

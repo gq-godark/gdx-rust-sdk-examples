@@ -58,6 +58,17 @@ impl RestTransport {
         data_clone_from_env(&v)
     }
 
+    pub async fn instruments_public(&self) -> Result<Value> {
+        let r = self
+            .client
+            .get(self.url("/api/v1/instruments"))
+            .send()
+            .await
+            .map_err(|e| GodarkError::Connection(format!("GET /api/v1/instruments: {e}")))?;
+        let v = parse_ok_json(r).await?;
+        data_clone_from_env(&v)
+    }
+
     pub async fn auth_token_document_body(
         &self,
         grant_type: &str,

@@ -17,7 +17,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::config::resolve_passphrase;
+use crate::config::{resolve_passphrase, Environment};
 use crate::enums::{OrderType, Side, TimeInForce};
 use crate::types::{Balance, LeverageSettings, MeProfile};
 
@@ -28,7 +28,6 @@ use crate::rest_transport::RestTransport;
 use crate::session::CryptoSession;
 use crate::types::OrderAck;
 
-const DEFAULT_REST_BASE_URL: &str = "https://api.godark-dex.com";
 const DEFAULT_SYMBOLS_JSON: &str = include_str!("../shared/symbols.json");
 
 /// Translate a `ws[s]://host[:port][/...]` URL to its sibling `http[s]://`
@@ -52,8 +51,12 @@ fn derive_http_from_ws(url: &str) -> Option<String> {
 ///   2. `GODARK_REST_URL` / `GDX_REST_URL`.
 ///   3. `GODARK_EDGE_URL` / `GDX_EDGE_URL` / `GODARK_BASE_URL` (with
 ///      `ws[s]://` rewritten to `http[s]://`).
-///   4. The production default.
-fn resolve_rest_base_url(explicit: Option<String>) -> String {
+///   4. The environment preset default (testnet unless overridden).
+pub(crate) fn resolve_rest_base_url(explicit: Option<String>) -> String {
+    resolve_rest_base_url_with_default(explicit, Environment::Testnet.rest_base_url())
+}
+
+fn resolve_rest_base_url_with_default(explicit: Option<String>, default: &str) -> String {
     if let Some(url) = explicit {
         let trimmed = url.trim_end_matches('/').to_string();
         if !trimmed.is_empty() {
@@ -78,7 +81,7 @@ fn resolve_rest_base_url(explicit: Option<String>) -> String {
             }
         }
     }
-    DEFAULT_REST_BASE_URL.to_string()
+    default.trim_end_matches('/').to_string()
 }
 
 fn json_u128(value: &Value, key: &str) -> Option<u128> {
@@ -107,8 +110,10 @@ pub struct GodarkRestClientBuilder {
     api_secret: Option<String>,
     passphrase: Option<String>,
     rest_base_url: Option<String>,
+    environment: Environment,
     user_uuid: Option<Uuid>,
     symbol_map: HashMap<String, u64>,
+    explicit_symbol_map: bool,
 }
 
 impl GodarkRestClientBuilder {
@@ -121,9 +126,18 @@ impl GodarkRestClientBuilder {
             api_secret: None,
             passphrase: None,
             rest_base_url: None,
+            environment: Environment::Testnet,
             user_uuid: None,
             symbol_map,
+            explicit_symbol_map: false,
         }
+    }
+
+    /// Select a named deployment. Defaults to [`Environment::Testnet`].
+    /// Explicit `.rest_base_url(...)` / env vars still win over the preset.
+    pub fn environment(mut self, environment: Environment) -> Self {
+        self.environment = environment;
+        self
     }
 
     pub fn api_key(mut self, key: impl Into<String>) -> Self {
@@ -158,6 +172,7 @@ impl GodarkRestClientBuilder {
     }
 
     pub fn symbol(mut self, name: impl Into<String>, id: u64) -> Self {
+        self.explicit_symbol_map = true;
         self.symbol_map.insert(name.into(), id);
         self
     }
@@ -202,7 +217,10 @@ impl GodarkRestClientBuilder {
                 }
             };
 
-        let base_url = resolve_rest_base_url(self.rest_base_url);
+        let base_url = resolve_rest_base_url_with_default(
+            self.rest_base_url,
+            self.environment.rest_base_url(),
+        );
 
         let user_uuid = self.user_uuid.or_else(|| {
             for k in &["GODARK_USER_UUID", "GDX_USER_UUID"] {
@@ -216,13 +234,15 @@ impl GodarkRestClientBuilder {
         });
 
         Ok(GodarkRestClient {
-            http: RestTransport::new(base_url),
+            http: RestTransport::new(base_url.clone()),
+            rest_base_url: base_url,
             session: CryptoSession::new(),
             api_key_id,
             api_secret,
             passphrase,
             legacy_auth_token,
             symbol_map: self.symbol_map,
+            explicit_symbol_map: self.explicit_symbol_map,
             bearer: None,
             user_uuid,
             wallet_address: None,
@@ -240,12 +260,14 @@ impl Default for GodarkRestClientBuilder {
 /// REST trading orchestrator. Encrypts every order client-side; the edge only forwards.
 pub struct GodarkRestClient {
     http: RestTransport,
+    rest_base_url: String,
     session: CryptoSession,
     api_key_id: Option<String>,
     api_secret: Option<String>,
     passphrase: Option<String>,
     legacy_auth_token: Option<String>,
     symbol_map: HashMap<String, u64>,
+    explicit_symbol_map: bool,
     bearer: Option<String>,
     user_uuid: Option<Uuid>,
     /// Cached wallet address from `/auth/me` — avoids repeated lookups in `get_my_balance`.
@@ -288,8 +310,12 @@ impl GodarkRestClient {
             .ok_or_else(|| GodarkError::Session("Not connected — call .connect() first".into()))
     }
 
-    /// `auth/token` → `session/setup` (ECDH). Same crypto path used by WS.
+    /// `auth/token` → optional edge instruments fetch → session setup path.
     pub async fn connect(&mut self) -> Result<(), GodarkError> {
+        if !self.explicit_symbol_map {
+            self.symbol_map =
+                crate::instruments::load_symbol_map_from_edge(&self.rest_base_url).await;
+        }
         let auth_data = if let (Some(id), Some(sec), Some(pp)) =
             (&self.api_key_id, &self.api_secret, &self.passphrase)
         {
@@ -857,6 +883,25 @@ mod tests {
             .build()
             .unwrap();
         assert!(!c.is_session_established());
+    }
+
+    #[test]
+    fn builder_devnet_environment_sets_rest_base_url() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = clear_env(&[
+            "GODARK_REST_URL",
+            "GDX_REST_URL",
+            "GODARK_EDGE_URL",
+            "GDX_EDGE_URL",
+            "GODARK_BASE_URL",
+        ]);
+        let c = GodarkRestClient::builder()
+            .environment(Environment::Devnet)
+            .api_key("k")
+            .build()
+            .unwrap();
+        assert_eq!(c.rest_base_url, "http://18.143.165.149:13300");
+        restore_env(saved);
     }
 
     #[test]

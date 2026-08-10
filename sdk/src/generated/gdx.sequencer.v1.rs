@@ -633,6 +633,78 @@ pub struct BalanceChangeMessage {
     pub tx_signature: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BalanceChangeBatchMessage {
+    #[prost(string, tag = "1")]
+    pub batch_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub changes: ::prost::alloc::vec::Vec<BalanceChangeMessage>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DevWipeEntry {
+    #[prost(bytes = "vec", tag = "1")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub tx_signature: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DevWipeBatchMessage {
+    #[prost(string, tag = "1")]
+    pub batch_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub wipes: ::prost::alloc::vec::Vec<DevWipeEntry>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BalanceChangeLegResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag = "2")]
+    pub ok: bool,
+    #[prost(string, optional, tag = "3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BalanceChangeBatchAck {
+    #[prost(string, tag = "1")]
+    pub batch_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub results: ::prost::alloc::vec::Vec<BalanceChangeLegResult>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DevWipeLegResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag = "2")]
+    pub ok: bool,
+    #[prost(string, optional, tag = "3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DevWipeBatchAck {
+    #[prost(string, tag = "1")]
+    pub batch_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub results: ::prost::alloc::vec::Vec<DevWipeLegResult>,
+}
+/// Scale/dev: hot-update per-user open-order and peg inventory caps (process-local).
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct SetOrderInventoryRequest {
+    #[prost(uint32, tag = "1")]
+    pub max_open_orders_per_user: u32,
+    #[prost(uint32, tag = "2")]
+    pub max_pegs_per_user: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetOrderInventoryAck {
+    #[prost(uint32, tag = "1")]
+    pub max_open_orders_per_user: u32,
+    #[prost(uint32, tag = "2")]
+    pub max_pegs_per_user: u32,
+    #[prost(bool, tag = "3")]
+    pub ok: bool,
+    #[prost(string, optional, tag = "4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PoolWithdrawRequest {
     #[prost(bytes = "vec", tag = "1")]
     pub owner: ::prost::alloc::vec::Vec<u8>,
@@ -879,7 +951,7 @@ pub struct TpslUpdate {
 pub struct EdgeSequencerRequest {
     #[prost(
         oneof = "edge_sequencer_request::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 17, 18, 19, 20, 23, 24, 25, 26, 27, 28"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 17, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 30, 31"
     )]
     pub inner: ::core::option::Option<edge_sequencer_request::Inner>,
 }
@@ -933,6 +1005,12 @@ pub mod edge_sequencer_request {
         CancelTpsl(super::CancelTpslRequest),
         #[prost(message, tag = "28")]
         AmendTpsl(super::AmendTpslRequest),
+        #[prost(message, tag = "29")]
+        BalanceChangeBatch(super::BalanceChangeBatchMessage),
+        #[prost(message, tag = "30")]
+        DevWipeBatch(super::DevWipeBatchMessage),
+        #[prost(message, tag = "31")]
+        SetOrderInventory(super::SetOrderInventoryRequest),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1244,7 +1322,10 @@ pub struct NodeReady {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct NodeResponse {
-    #[prost(oneof = "node_response::Inner", tags = "1, 2, 3, 4, 5, 6, 7, 9, 10, 11")]
+    #[prost(
+        oneof = "node_response::Inner",
+        tags = "1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14"
+    )]
     pub inner: ::core::option::Option<node_response::Inner>,
 }
 /// Nested message and enum types in `NodeResponse`.
@@ -1271,6 +1352,12 @@ pub mod node_response {
         BatchCancelAck(super::BatchCancelAck),
         #[prost(message, tag = "11")]
         BatchModifyAck(super::BatchModifyAck),
+        #[prost(message, tag = "12")]
+        BalanceChangeBatchAck(super::BalanceChangeBatchAck),
+        #[prost(message, tag = "13")]
+        DevWipeBatchAck(super::DevWipeBatchAck),
+        #[prost(message, tag = "14")]
+        SetOrderInventoryAck(super::SetOrderInventoryAck),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
