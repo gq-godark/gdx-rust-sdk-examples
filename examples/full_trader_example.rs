@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use godark::{
-    GodarkClient, MassQuoteLegInput, OrderType, Side, TimeInForce, TransportConfig,
+    Environment, GodarkClient, MassQuoteLegInput, OrderType, Side, TimeInForce, TransportConfig,
 };
 
 #[path = "dotenv.rs"]
@@ -67,10 +67,16 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let base_url =
-        std::env::var("GODARK_EDGE_URL").unwrap_or_else(|_| "wss://api.godark-dex.com".into());
-
-    println!("Endpoint: {base_url}");
+    let edge_override = std::env::var("GODARK_EDGE_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    println!(
+        "Endpoint: {}",
+        edge_override
+            .as_deref()
+            .unwrap_or(Environment::Testnet.edge_base_url())
+    );
 
     let mut headers = HashMap::new();
     headers.insert("X-Trader-Tag".into(), "rust-full-trader-demo".into());
@@ -83,14 +89,16 @@ async fn main() {
         ..TransportConfig::default()
     };
 
-    let config = match GodarkClient::builder()
-        .base_url(&base_url)
+    let mut builder = GodarkClient::builder()
+        .environment(Environment::Testnet)
         .api_key_id(api_key_id)
         .api_secret(api_secret)
         .passphrase(passphrase)
-        .transport(transport)
-        .build()
-    {
+        .transport(transport);
+    if let Some(base_url) = edge_override.as_deref() {
+        builder = builder.base_url(base_url);
+    }
+    let config = match builder.build() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Config error: {e}");
