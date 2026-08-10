@@ -13,13 +13,75 @@ use crate::error::GodarkError;
 ///
 /// Public mainnet is not currently exposed; testnet is the live network for
 /// SDK users today and is the SDK default. For local development, override
-/// to a localnet edge (`ws://127.0.0.1:4000`) via the `base_url` builder,
-/// `GODARK_EDGE_URL`, or `GDX_EDGE_URL`. Either `<host>` or `<host>/ws/v1`
-/// resolve to the same endpoint.
+/// to a localnet edge (`ws://127.0.0.1:4000`) via [`Environment::Localnet`],
+/// the `base_url` builder, `GODARK_EDGE_URL`, or `GDX_EDGE_URL`. Either
+/// `<host>` or `<host>/ws/v1` resolve to the same endpoint.
 const DEFAULT_EDGE_BASE_URL: &str = "wss://api.godark-dex.com";
+const DEVNET_EDGE_BASE_URL: &str = "ws://18.143.165.149:13300";
+const LOCALNET_EDGE_BASE_URL: &str = "ws://127.0.0.1:4000";
+
+/// Sequencer Noise XK static public key for public testnet (64 hex).
+/// This is a public pin, not a user secret.
+const TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX: &str =
+    "a9fdd7f26c0de36d82811e9fe1df2509960cd5b25eef037355e209b9222bea7d";
+
+/// Sequencer Noise XK static public key for public devnet (64 hex).
+/// Distinct from the testnet pin. This is a public pin, not a user secret.
+const DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX: &str =
+    "a6807e2f6cd04b54cc19be2fd4faea2a1239f1e2896912d91222678ab54cdd45";
 
 /// Canonical default perps (shared across SDKs); see `shared/symbols.json`.
 const DEFAULT_SYMBOLS_JSON: &str = include_str!("../shared/symbols.json");
+
+/// Named deployment target. Selects the default edge URL and, when known,
+/// a baked-in sequencer Noise XK public key pin.
+///
+/// Explicit `.base_url(...)` / `.noise_static_public_key_hex(...)` and the
+/// corresponding environment variables still win over these presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Environment {
+    /// Public testnet (`wss://api.godark-dex.com`) with the published Noise pin.
+    #[default]
+    Testnet,
+    /// Public devnet (`ws://18.143.165.149:13300`) with its own Noise pin.
+    Devnet,
+    /// Local edge (`ws://127.0.0.1:4000`). No baked-in Noise pin — set via
+    /// `.noise_static_public_key_hex(...)` or `GDX_NOISE_STATIC_PUBLIC_KEY`.
+    Localnet,
+}
+
+impl Environment {
+    /// Default edge base URL for this environment (host only).
+    #[must_use]
+    pub const fn edge_base_url(self) -> &'static str {
+        match self {
+            Self::Testnet => DEFAULT_EDGE_BASE_URL,
+            Self::Devnet => DEVNET_EDGE_BASE_URL,
+            Self::Localnet => LOCALNET_EDGE_BASE_URL,
+        }
+    }
+
+    /// Default REST base URL for this environment.
+    #[must_use]
+    pub const fn rest_base_url(self) -> &'static str {
+        match self {
+            Self::Testnet => "https://api.godark-dex.com",
+            Self::Devnet => "http://18.143.165.149:13300",
+            Self::Localnet => "http://127.0.0.1:4000",
+        }
+    }
+
+    /// Baked-in sequencer Noise XK static public key (64 hex chars), when known.
+    #[must_use]
+    pub const fn noise_static_public_key_hex(self) -> Option<&'static str> {
+        match self {
+            Self::Testnet => Some(TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX),
+            Self::Devnet => Some(DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX),
+            Self::Localnet => None,
+        }
+    }
+}
 
 /// Tunable WebSocket transport (TLS verify, headers, timeouts).
 #[derive(Debug, Clone)]
@@ -77,6 +139,8 @@ pub struct GodarkConfig {
     /// to skip waiting. Set via
     /// [`GodarkConfigBuilder::place_order_terminal_timeout`].
     pub(crate) place_order_terminal_timeout: Duration,
+    /// When true, caller supplied custom symbols via builder; skip edge fetch.
+    pub(crate) explicit_symbol_map: bool,
 }
 
 impl GodarkConfig {
@@ -94,12 +158,14 @@ pub struct GodarkConfigBuilder {
     api_secret: Option<String>,
     passphrase: Option<String>,
     base_url: Option<String>,
+    environment: Environment,
     auto_reconnect: bool,
     symbol_map: HashMap<String, u64>,
     transport: TransportConfig,
     user_uuid: Option<Uuid>,
     noise_static_public_key_hex: Option<String>,
     place_order_terminal_timeout: Option<Duration>,
+    explicit_symbol_map: bool,
 }
 
 impl GodarkConfigBuilder {
@@ -113,13 +179,23 @@ impl GodarkConfigBuilder {
             api_secret: None,
             passphrase: None,
             base_url: None,
+            environment: Environment::Testnet,
             auto_reconnect: true,
             symbol_map: symbols,
             transport: TransportConfig::default(),
             user_uuid: None,
             noise_static_public_key_hex: None,
             place_order_terminal_timeout: None,
+            explicit_symbol_map: false,
         }
+    }
+
+    /// Select a named deployment. Defaults to [`Environment::Testnet`], which
+    /// supplies the public testnet edge URL and Noise XK pin when those are
+    /// not set explicitly or via environment variables.
+    pub fn environment(mut self, environment: Environment) -> Self {
+        self.environment = environment;
+        self
     }
 
     pub fn transport(mut self, transport: TransportConfig) -> Self {
@@ -181,6 +257,7 @@ impl GodarkConfigBuilder {
     }
 
     pub fn symbol(mut self, name: impl Into<String>, id: u64) -> Self {
+        self.explicit_symbol_map = true;
         self.symbol_map.insert(name.into(), id);
         self
     }
@@ -224,12 +301,20 @@ impl GodarkConfigBuilder {
             }
         };
 
-        let base_url = resolve_edge_base_url(self.base_url.as_deref());
+        let base_url = resolve_edge_base_url_with_default(
+            self.base_url.as_deref(),
+            self.environment.edge_base_url(),
+        );
 
         let user_uuid = self.user_uuid.or_else(resolve_user_uuid_env);
         let noise_static_public_key_hex = self
             .noise_static_public_key_hex
-            .or_else(resolve_noise_static_public_key_env);
+            .or_else(resolve_noise_static_public_key_env)
+            .or_else(|| {
+                self.environment
+                    .noise_static_public_key_hex()
+                    .map(str::to_string)
+            });
 
         let place_order_terminal_timeout = self
             .place_order_terminal_timeout
@@ -248,6 +333,7 @@ impl GodarkConfigBuilder {
             user_uuid,
             noise_static_public_key_hex,
             place_order_terminal_timeout,
+            explicit_symbol_map: self.explicit_symbol_map,
         })
     }
 }
@@ -305,8 +391,13 @@ fn resolve_noise_static_public_key_env() -> Option<String> {
     None
 }
 
-/// Resolve edge base URL: explicit arg > env vars > production default.
+/// Resolve edge base URL: explicit arg > env vars > testnet default.
 pub fn resolve_edge_base_url(explicit: Option<&str>) -> String {
+    resolve_edge_base_url_with_default(explicit, DEFAULT_EDGE_BASE_URL)
+}
+
+/// Resolve edge base URL: explicit arg > env vars > `default`.
+fn resolve_edge_base_url_with_default(explicit: Option<&str>, default: &str) -> String {
     if let Some(url) = explicit {
         let trimmed = url.trim();
         if !trimmed.is_empty() {
@@ -321,7 +412,7 @@ pub fn resolve_edge_base_url(explicit: Option<&str>) -> String {
             }
         }
     }
-    DEFAULT_EDGE_BASE_URL.to_string()
+    default.to_string()
 }
 
 /// Resolve a base URL to the canonical edge WebSocket endpoint `<base>/ws/v1`.
@@ -362,8 +453,9 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        gomarket_url, resolve_edge_base_url, resolve_passphrase, ws_url, GodarkConfigBuilder,
-        GodarkError,
+        gomarket_url, resolve_edge_base_url, resolve_passphrase, ws_url, Environment,
+        GodarkConfigBuilder, GodarkError, DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX,
+        TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX,
     };
 
     /// Serialize tests that mutate process environment variables.
@@ -547,6 +639,103 @@ mod tests {
     fn test_builder_auto_reconnect_default() {
         let cfg = GodarkConfigBuilder::new().api_key("k").build().unwrap();
         assert!(cfg.auto_reconnect);
+    }
+
+    #[test]
+    fn test_builder_default_environment_testnet_noise_pin() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for key in [
+            "GDX_NOISE_STATIC_PUBLIC_KEY",
+            "GDX_NOISE_STATIC_PUBKEY",
+            "GODARK_NOISE_STATIC_PUBLIC_KEY",
+            "GODARK_EDGE_URL",
+            "GDX_EDGE_URL",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        let cfg = GodarkConfigBuilder::new()
+            .api_key_id("id")
+            .api_secret("secret")
+            .passphrase("pp")
+            .build()
+            .unwrap();
+        assert_eq!(cfg.base_url, "wss://api.godark-dex.com");
+        assert_eq!(
+            cfg.noise_static_public_key_hex.as_deref(),
+            Some(TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX)
+        );
+    }
+
+    #[test]
+    fn test_builder_devnet_uses_distinct_noise_pin() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for key in [
+            "GDX_NOISE_STATIC_PUBLIC_KEY",
+            "GDX_NOISE_STATIC_PUBKEY",
+            "GODARK_NOISE_STATIC_PUBLIC_KEY",
+            "GODARK_EDGE_URL",
+            "GDX_EDGE_URL",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        let cfg = GodarkConfigBuilder::new()
+            .environment(Environment::Devnet)
+            .api_key_id("id")
+            .api_secret("secret")
+            .passphrase("pp")
+            .build()
+            .unwrap();
+        assert_eq!(cfg.base_url, "ws://18.143.165.149:13300");
+        assert_eq!(
+            cfg.noise_static_public_key_hex.as_deref(),
+            Some(DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX)
+        );
+        assert_ne!(
+            DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX,
+            TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX
+        );
+    }
+
+    #[test]
+    fn test_builder_localnet_has_no_baked_noise_pin() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for key in [
+            "GDX_NOISE_STATIC_PUBLIC_KEY",
+            "GDX_NOISE_STATIC_PUBKEY",
+            "GODARK_NOISE_STATIC_PUBLIC_KEY",
+            "GODARK_EDGE_URL",
+            "GDX_EDGE_URL",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        let cfg = GodarkConfigBuilder::new()
+            .environment(Environment::Localnet)
+            .api_key_id("id")
+            .api_secret("secret")
+            .passphrase("pp")
+            .build()
+            .unwrap();
+        assert_eq!(cfg.base_url, "ws://127.0.0.1:4000");
+        assert_eq!(cfg.noise_static_public_key_hex, None);
+    }
+
+    #[test]
+    fn test_builder_explicit_noise_overrides_environment() {
+        let cfg = GodarkConfigBuilder::new()
+            .environment(Environment::Testnet)
+            .noise_static_public_key_hex("11".repeat(32))
+            .api_key_id("id")
+            .api_secret("secret")
+            .passphrase("pp")
+            .build()
+            .unwrap();
+        assert_eq!(
+            cfg.noise_static_public_key_hex.as_deref(),
+            Some("1111111111111111111111111111111111111111111111111111111111111111")
+        );
     }
 
     #[test]

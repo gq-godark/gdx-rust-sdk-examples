@@ -493,7 +493,12 @@ pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError>
         | Some(sequencer::node_response::Inner::NodeReady(_))
         | Some(sequencer::node_response::Inner::MassQuoteAck(_))
         | Some(sequencer::node_response::Inner::BatchCancelAck(_))
-        | Some(sequencer::node_response::Inner::BatchModifyAck(_)) => Ok(NodeResponseKind::Unknown),
+        | Some(sequencer::node_response::Inner::BatchModifyAck(_))
+        | Some(sequencer::node_response::Inner::BalanceChangeBatchAck(_))
+        | Some(sequencer::node_response::Inner::DevWipeBatchAck(_))
+        | Some(sequencer::node_response::Inner::SetOrderInventoryAck(_)) => {
+            Ok(NodeResponseKind::Unknown)
+        }
         None => Ok(NodeResponseKind::Unknown),
     }
 }

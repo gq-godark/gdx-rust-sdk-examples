@@ -16,6 +16,7 @@ pub mod pb {
         }
     }
 }
+pub mod instruments;
 pub mod order_error_code;
 pub mod proto_bridge;
 pub mod rest_client;
@@ -26,7 +27,9 @@ pub mod types;
 mod ws_connect;
 
 pub use client::GodarkClient;
-pub use config::{resolve_passphrase, GodarkConfig, GodarkConfigBuilder, TransportConfig};
+pub use config::{
+    resolve_passphrase, Environment, GodarkConfig, GodarkConfigBuilder, TransportConfig,
+};
 pub use enums::{
     CancelReason, OrderStatus, OrderType, OrderUpdateType, PositionUpdateType, Side, TimeInForce,
 };

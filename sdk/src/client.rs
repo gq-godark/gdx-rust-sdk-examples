@@ -212,6 +212,11 @@ impl GodarkClient {
 
     pub async fn connect(&mut self) -> Result<(), GodarkError> {
         self.intentional_close.store(false, Ordering::SeqCst);
+        if !self.config.explicit_symbol_map {
+            let rest =
+                crate::rest_client::resolve_rest_base_url(Some(self.config.base_url.clone()));
+            self.config.symbol_map = crate::instruments::load_symbol_map_from_edge(&rest).await;
+        }
         if let Some(h) = self.event_handle.take() {
             h.abort();
         }
