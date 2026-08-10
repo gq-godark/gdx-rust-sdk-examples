@@ -50,7 +50,9 @@ Required keys:
 
 - `GODARK_API_KEY_ID`
 - `GODARK_API_SECRET`
-- `GODARK_PASSPHRASE` — required for API key-pair auth.
+- `GODARK_PASSPHRASE` — required for API key-pair auth. If it contains `$`,
+  wrap it in single quotes (`GODARK_PASSPHRASE='...'`) — `dotenvy` expands
+  unquoted `$VAR` sequences and will silently truncate the value.
 
 Optional:
 
@@ -105,7 +107,7 @@ get fast incremental builds and IDE go-to-definition into the SDK source.
 
 | Sample | Source | Purpose |
 |--------|--------|---------|
-| `quickstart` | `examples/quickstart.rs` | Minimal connect → LIMIT sell far from touch → cancel; demonstrates the symbolic `OrderError::error_code` reason on rejection |
+| `quickstart` | `examples/quickstart.rs` | Minimal connect → `subscribe(["orders"])` → LIMIT sell far from touch → cancel (book confirmation needs the private orders channel) |
 | `full_trader_example` | `examples/full_trader_example.rs` | Reference bot flow with all 6 sequencer push callbacks, place / modify / cancel, mass-quote / batch-cancel, and queued-update drain |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and

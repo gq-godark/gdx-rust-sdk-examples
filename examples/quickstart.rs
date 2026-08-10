@@ -54,6 +54,9 @@ async fn main() -> Result<(), GodarkError> {
         .unwrap_or_default();
     println!("Connected as user {user}");
 
+    // Book confirmation waits on private order updates; subscribe first.
+    client.subscribe(&["orders"]).await?;
+
     match client
         .place_order(
             SYMBOL,
