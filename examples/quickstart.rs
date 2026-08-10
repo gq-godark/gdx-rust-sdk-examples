@@ -54,6 +54,9 @@ async fn main() -> Result<(), GodarkError> {
         .unwrap_or_default();
     println!("Connected as user {user}");
 
+    // Book confirmation waits on private order updates; subscribe first.
+    client.subscribe(&["orders"]).await?;
+
     match client
         .place_order(
             SYMBOL,
@@ -70,6 +73,8 @@ async fn main() -> Result<(), GodarkError> {
     {
         Ok(ack) => {
             println!("Place OK -- order_id={}", ack.order_id);
+            // Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let cancel = client.cancel_order(&ack.order_id, SYMBOL).await?;
             println!("Cancel OK -- order_id={}", cancel.order_id);
         }
