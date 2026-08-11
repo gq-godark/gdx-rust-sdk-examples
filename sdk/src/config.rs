@@ -47,7 +47,7 @@ pub enum Environment {
     /// Public devnet (`ws://18.143.165.149:13300`) with its own Noise pin.
     Devnet,
     /// Local edge (`ws://127.0.0.1:4000`). No baked-in Noise pin — set via
-    /// `.noise_static_public_key_hex(...)` or `GDX_NOISE_STATIC_PUBLIC_KEY`.
+    /// `.noise_static_public_key_hex(...)` or `GODARK_NOISE_STATIC_PUBLIC_KEY`.
     Localnet,
 }
 
@@ -130,8 +130,8 @@ pub struct GodarkConfig {
     /// `.user_uuid()` builder call or `GODARK_USER_UUID` / `GDX_USER_UUID`.
     pub user_uuid: Option<Uuid>,
     /// Pinned sequencer Noise XK static X25519 public key, encoded as hex.
-    /// Resolved from the builder or `GDX_NOISE_STATIC_PUBLIC_KEY`,
-    /// `GDX_NOISE_STATIC_PUBKEY`, or `GODARK_NOISE_STATIC_PUBLIC_KEY`.
+    /// Resolved from the builder or `GODARK_NOISE_STATIC_PUBLIC_KEY`,
+    /// `GDX_NOISE_STATIC_PUBLIC_KEY`, or `GDX_NOISE_STATIC_PUBKEY`.
     pub noise_static_public_key_hex: Option<String>,
     /// How long [`Confirmation::Book`](crate::types::Confirmation::Book)
     /// waits for an OPEN/reject/fill/cancel update after the fast ack.
@@ -377,9 +377,9 @@ fn resolve_user_uuid_env() -> Option<Uuid> {
 
 fn resolve_noise_static_public_key_env() -> Option<String> {
     for key in &[
+        "GODARK_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBKEY",
-        "GODARK_NOISE_STATIC_PUBLIC_KEY",
     ] {
         if let Ok(value) = env::var(key) {
             let value = value.trim();
