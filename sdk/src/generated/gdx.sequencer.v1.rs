@@ -496,37 +496,34 @@ pub struct PlaceOrderInput {
     /// Edge-only routing / policy fields start at 20.
     #[prost(bytes = "vec", tag = "20")]
     pub user_uuid: ::prost::alloc::vec::Vec<u8>,
-    /// Client-selected leverage multiplier (1 = 1x isolated margin). Edge
-    /// forwards to sequencer, which persists in the open-orders index and
-    /// uses it in pre-trade margin checks.
-    #[prost(uint32, tag = "21")]
-    pub leverage: u32,
-    #[prost(enumeration = "super::super::common::v1::StpMode", tag = "22")]
+    /// Leverage is per-symbol account state via update_leverage; place inherits
+    /// the sequencer-stored setting (not a client field on PlaceOrderInput).
+    #[prost(enumeration = "super::super::common::v1::StpMode", tag = "21")]
     pub stp_mode: i32,
     /// Reduce-only: order must reduce an existing position; rejected if no
     /// position or same-side; quantity clamped to position size.
-    #[prost(bool, tag = "23")]
+    #[prost(bool, tag = "22")]
     pub reduce_only: bool,
     /// Post-only: order must rest on the book as a maker; rejected if it
     /// would immediately cross the spread.
-    #[prost(bool, tag = "24")]
+    #[prost(bool, tag = "23")]
     pub post_only: bool,
     /// Order-attached TP/SL (sequencer-only; stripped before MPC fanout).
     ///
     /// trigger (mark) price
-    #[prost(double, optional, tag = "25")]
+    #[prost(double, optional, tag = "24")]
     pub take_profit_price: ::core::option::Option<f64>,
     /// trigger (mark) price
-    #[prost(double, optional, tag = "26")]
+    #[prost(double, optional, tag = "25")]
     pub stop_loss_price: ::core::option::Option<f64>,
     /// fill guardrail; 0/absent → market-like ceiling
-    #[prost(uint32, optional, tag = "27")]
+    #[prost(uint32, optional, tag = "26")]
     pub tpsl_slippage_bps: ::core::option::Option<u32>,
     /// Price reference source for peg repricing.
-    #[prost(enumeration = "super::super::common::v1::PegReference", tag = "28")]
+    #[prost(enumeration = "super::super::common::v1::PegReference", tag = "27")]
     pub peg_reference: i32,
     /// Signed basis-point offset relative to the peg reference.
-    #[prost(sint32, optional, tag = "29")]
+    #[prost(sint32, optional, tag = "28")]
     pub peg_offset_bps: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -576,11 +573,10 @@ pub struct MassQuoteInput {
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "20")]
     pub user_uuid: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint32, tag = "21")]
-    pub leverage: u32,
-    #[prost(enumeration = "super::super::common::v1::StpMode", tag = "22")]
+    /// Leverage inherited from update_leverage account setting (not client field).
+    #[prost(enumeration = "super::super::common::v1::StpMode", tag = "21")]
     pub stp_mode: i32,
-    #[prost(bool, optional, tag = "23")]
+    #[prost(bool, optional, tag = "22")]
     pub post_only: ::core::option::Option<bool>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1582,6 +1578,27 @@ pub struct AccountMarginUpdate {
     #[prost(message, optional, tag = "3")]
     pub account: ::core::option::Option<AccountMarginSummary>,
 }
+/// One per-symbol leverage preference for a user.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct LeverageSettingRow {
+    #[prost(uint64, tag = "1")]
+    pub symbol_id: u64,
+    #[prost(uint32, tag = "2")]
+    pub leverage: u32,
+}
+/// Authoritative per-user leverage settings (encrypted). Emitted on initial
+/// positions subscribe and after a successful `update_leverage`. Idle-symbol
+/// prefs (no open position) are included so the trade panel can hydrate.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LeverageSettings {
+    #[prost(bytes = "vec", tag = "1")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, repeated, tag = "2")]
+    pub settings: ::prost::alloc::vec::Vec<LeverageSettingRow>,
+    /// Sequencer wall-clock timestamp when the snapshot was assembled, ns.
+    #[prost(uint64, tag = "3")]
+    pub server_timestamp: u64,
+}
 /// Full-user positions batch. Emitted on (a) initial subscribe, (b) the
 /// 5-second periodic sweep, and (c) any position-changing fill for this
 /// user (100ms debounced on the sequencer).
@@ -1778,7 +1795,7 @@ pub struct OrderHistoryInsertMessage {
 pub struct SequencerToEdgeMessage {
     #[prost(
         oneof = "sequencer_to_edge_message::Inner",
-        tags = "1, 4, 5, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19"
+        tags = "1, 4, 5, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20"
     )]
     pub inner: ::core::option::Option<sequencer_to_edge_message::Inner>,
 }
@@ -1822,6 +1839,9 @@ pub mod sequencer_to_edge_message {
         /// Unified health report (Stage 6c successor to legacy system_health pushes).
         #[prost(message, tag = "19")]
         HealthReport(super::super::super::health::v1::HealthReport),
+        /// Authoritative per-user leverage settings (encrypted).
+        #[prost(message, tag = "20")]
+        LeverageSettings(super::LeverageSettings),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
