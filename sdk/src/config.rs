@@ -47,7 +47,7 @@ pub enum Environment {
     /// Public devnet (`ws://18.143.165.149:13300`) with its own Noise pin.
     Devnet,
     /// Local edge (`ws://127.0.0.1:4000`). No baked-in Noise pin — set via
-    /// `.noise_static_public_key_hex(...)` or `GDX_NOISE_STATIC_PUBLIC_KEY`.
+    /// `.noise_static_public_key_hex(...)` or `GODARK_NOISE_STATIC_PUBLIC_KEY`.
     Localnet,
 }
 
@@ -130,8 +130,8 @@ pub struct GodarkConfig {
     /// `.user_uuid()` builder call or `GODARK_USER_UUID` / `GDX_USER_UUID`.
     pub user_uuid: Option<Uuid>,
     /// Pinned sequencer Noise XK static X25519 public key, encoded as hex.
-    /// Resolved from the builder or `GDX_NOISE_STATIC_PUBLIC_KEY`,
-    /// `GDX_NOISE_STATIC_PUBKEY`, or `GODARK_NOISE_STATIC_PUBLIC_KEY`.
+    /// Resolved from the builder or `GODARK_NOISE_STATIC_PUBLIC_KEY`,
+    /// `GDX_NOISE_STATIC_PUBLIC_KEY`, or `GDX_NOISE_STATIC_PUBKEY`.
     pub noise_static_public_key_hex: Option<String>,
     /// How long [`Confirmation::Book`](crate::types::Confirmation::Book)
     /// waits for an OPEN/reject/fill/cancel update after the fast ack.
@@ -377,9 +377,9 @@ fn resolve_user_uuid_env() -> Option<Uuid> {
 
 fn resolve_noise_static_public_key_env() -> Option<String> {
     for key in &[
+        "GODARK_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBKEY",
-        "GODARK_NOISE_STATIC_PUBLIC_KEY",
     ] {
         if let Ok(value) = env::var(key) {
             let value = value.trim();
@@ -436,7 +436,8 @@ pub fn ws_url(base_url: &str) -> String {
 ///
 /// Strips a trailing `/ws/v1` or legacy `/ws` suffix from the base before
 /// appending `/ws/gomarket`, so that any of `<host>`, `<host>/ws`, or
-/// `<host>/ws/v1` resolve to `<host>/ws/gomarket`.
+/// `<host>/ws/v1` resolve to `<host>/ws/gomarket`. Also converts
+/// `http(s)://` to `ws(s)://`.
 pub fn gomarket_url(base_url: &str) -> String {
     let mut url = base_url.trim_end_matches('/').to_string();
     if let Some(stripped) = url.strip_suffix("/ws/v1") {
@@ -444,7 +445,54 @@ pub fn gomarket_url(base_url: &str) -> String {
     } else if let Some(stripped) = url.strip_suffix("/ws") {
         url = stripped.to_string();
     }
+    if let Some(rest) = url.strip_prefix("http://") {
+        url = format!("ws://{rest}");
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        url = format!("wss://{rest}");
+    }
     format!("{url}/ws/gomarket")
+}
+
+fn env_first(keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Ok(v) = env::var(key) {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+fn env_truthy(keys: &[&str]) -> bool {
+    for key in keys {
+        if let Ok(v) = env::var(key) {
+            let raw = v.trim().to_lowercase();
+            if matches!(raw.as_str(), "1" | "true" | "yes" | "on") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Resolve the market-data WebSocket URL.
+///
+/// Hosted edges default to `/ws/v1`. Override with `GODARK_MARKET_DATA_WS_URL`,
+/// or set `GODARK_MARKET_DATA_USE_GOMARKET=1` for `/ws/gomarket`.
+pub fn resolve_market_data_ws_url(base_url: &str) -> String {
+    if let Some(override_url) = env_first(&["GODARK_MARKET_DATA_WS_URL", "GDX_MARKET_DATA_WS_URL"])
+    {
+        return override_url;
+    }
+    if env_truthy(&[
+        "GODARK_MARKET_DATA_USE_GOMARKET",
+        "GDX_MARKET_DATA_USE_GOMARKET",
+    ]) {
+        return gomarket_url(base_url.trim());
+    }
+    ws_url(base_url.trim())
 }
 
 #[cfg(test)]
@@ -453,8 +501,8 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        gomarket_url, resolve_edge_base_url, resolve_passphrase, ws_url, Environment,
-        GodarkConfigBuilder, GodarkError, DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX,
+        gomarket_url, resolve_edge_base_url, resolve_market_data_ws_url, resolve_passphrase,
+        ws_url, Environment, GodarkConfigBuilder, GodarkError, DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX,
         TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX,
     };
 
@@ -803,5 +851,40 @@ mod tests {
             gomarket_url("wss://example.com"),
             "wss://example.com/ws/gomarket"
         );
+    }
+
+    #[test]
+    fn test_resolve_market_data_ws_url_defaults_to_ws_v1() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for key in &[
+            "GODARK_MARKET_DATA_WS_URL",
+            "GDX_MARKET_DATA_WS_URL",
+            "GODARK_MARKET_DATA_USE_GOMARKET",
+            "GDX_MARKET_DATA_USE_GOMARKET",
+        ] {
+            std::env::remove_var(key);
+        }
+        assert_eq!(
+            resolve_market_data_ws_url("wss://api.example"),
+            "wss://api.example/ws/v1"
+        );
+    }
+
+    #[test]
+    fn test_resolve_market_data_ws_url_gomarket_flag() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for key in &[
+            "GODARK_MARKET_DATA_WS_URL",
+            "GDX_MARKET_DATA_WS_URL",
+            "GDX_MARKET_DATA_USE_GOMARKET",
+        ] {
+            std::env::remove_var(key);
+        }
+        std::env::set_var("GODARK_MARKET_DATA_USE_GOMARKET", "1");
+        assert_eq!(
+            resolve_market_data_ws_url("wss://api.example/ws/v1"),
+            "wss://api.example/ws/gomarket"
+        );
+        std::env::remove_var("GODARK_MARKET_DATA_USE_GOMARKET");
     }
 }

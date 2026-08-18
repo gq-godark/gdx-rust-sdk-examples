@@ -270,6 +270,8 @@ pub fn response_message_type_to_proto(s: &str) -> i32 {
         "mass_quote_ack" => 10,
         "batch_cancel_ack" => 11,
         "batch_modify_ack" => 12,
+        "tpsl_update" => 13,
+        "leverage_settings" => 14,
         _ => 0,
     }
 }
@@ -411,6 +413,8 @@ mod tests {
         assert_eq!(response_message_type_to_proto("open_orders_snapshot"), 5);
         assert_eq!(response_message_type_to_proto("order_history_snapshot"), 6);
         assert_eq!(response_message_type_to_proto("positions_snapshot"), 7);
+        assert_eq!(response_message_type_to_proto("tpsl_update"), 13);
+        assert_eq!(response_message_type_to_proto("leverage_settings"), 14);
         assert_eq!(response_message_type_to_proto("unknown"), 0);
     }
 

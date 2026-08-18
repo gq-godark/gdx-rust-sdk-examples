@@ -595,6 +595,9 @@ pub enum ResponseMessageType {
     BatchModifyAck = 12,
     /// Dedicated TP/SL lifecycle push (cancel / amend / trigger).
     TpslUpdate = 13,
+    /// Per-user per-symbol leverage settings snapshot (encrypted).
+    /// See `gdx.sequencer.v1.LeverageSettings`.
+    LeverageSettings = 14,
 }
 impl ResponseMessageType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -616,6 +619,7 @@ impl ResponseMessageType {
             Self::BatchCancelAck => "RESPONSE_MESSAGE_TYPE_BATCH_CANCEL_ACK",
             Self::BatchModifyAck => "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK",
             Self::TpslUpdate => "RESPONSE_MESSAGE_TYPE_TPSL_UPDATE",
+            Self::LeverageSettings => "RESPONSE_MESSAGE_TYPE_LEVERAGE_SETTINGS",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -642,6 +646,7 @@ impl ResponseMessageType {
             "RESPONSE_MESSAGE_TYPE_BATCH_CANCEL_ACK" => Some(Self::BatchCancelAck),
             "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK" => Some(Self::BatchModifyAck),
             "RESPONSE_MESSAGE_TYPE_TPSL_UPDATE" => Some(Self::TpslUpdate),
+            "RESPONSE_MESSAGE_TYPE_LEVERAGE_SETTINGS" => Some(Self::LeverageSettings),
             _ => None,
         }
     }

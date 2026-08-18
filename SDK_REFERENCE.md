@@ -119,8 +119,10 @@ To consume `godark` from your own project outside this repo, either:
 | Method | Signature (abridged) | Purpose |
 |--------|----------------------|---------|
 | `place_order` | `async fn place_order(symbol, side, order_type, quantity, price?, tif, post_only, ...) -> Result<OrderAck>` | Place encrypted order |
+| `update_leverage` | `async fn update_leverage(symbol, leverage) -> Result<OrderAck>` | Set per-symbol account leverage |
 | `cancel_order` | `async fn cancel_order(order_id, symbol) -> Result<OrderAck>` | Cancel order |
 | `modify_order` | `async fn modify_order(order_id, symbol, new_price?, new_quantity?) -> Result<OrderAck>` | Modify order |
+| `mass_quote` | `async fn mass_quote(symbol, legs, post_only?) -> Result<MassQuoteAck>` | Bulk cancel-replace ladder |
 
 ### Subscriptions
 
@@ -379,3 +381,7 @@ After running it, `scripts/package.sh` performs a parity check between the
 vendored `sdk/` and a freshly-built install at the pinned SHA; any drift
 fails the release. Layer 2 automation (`auto-bump-sdk-pin.yml`) wraps this
 loop into a rolling auto-PR triggered by SDK pushes.
+
+## RestClient example
+
+`GodarkRestClient` is exercised by `rest_client_example` / `rest-client-example`: REST auth, `/auth/me`, leverage read, and public funding/OI/volume GETs. Encrypted place/cancel/modify/update-leverage remain WebSocket-only via `GodarkClient`.

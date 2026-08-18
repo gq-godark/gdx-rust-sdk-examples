@@ -28,7 +28,8 @@ mod ws_connect;
 
 pub use client::GodarkClient;
 pub use config::{
-    resolve_passphrase, Environment, GodarkConfig, GodarkConfigBuilder, TransportConfig,
+    gomarket_url, resolve_market_data_ws_url, resolve_passphrase, ws_url, Environment,
+    GodarkConfig, GodarkConfigBuilder, TransportConfig,
 };
 pub use enums::{
     CancelReason, OrderStatus, OrderType, OrderUpdateType, PositionUpdateType, Side, TimeInForce,
@@ -41,7 +42,7 @@ pub use types::{
     AccountMarginSummary, AccountMarginUpdate, Balance, BalanceUpdate, BatchCancelAck,
     BatchCancelLegResult, BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation,
     FundingRateUpdate, LeverageSetting, LeverageSettings, MarginAlert, MassQuoteAck,
-    MassQuoteLegInput, MassQuoteLegResult, MeProfile, OrderAck, OrderUpdate, PositionRow,
-    PositionUpdate, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
-    SettlementBatchStatus, SettlementUpdate, SystemHealthUpdate,
+    MassQuoteLegInput, MassQuoteLegResult, MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck,
+    OrderUpdate, PositionRow, PositionUpdate, PositionsSnapshot, PositionsSnapshotSource,
+    ReconnectEvent, SettlementBatchStatus, SettlementUpdate, SystemHealthUpdate,
 };

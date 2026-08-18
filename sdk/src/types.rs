@@ -34,8 +34,14 @@ pub struct LeverageSetting {
 /// Cached leverage settings for the authenticated user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeverageSettings {
+    /// Present on encrypted WS pushes; absent on REST `GET /api/v1/leverage`.
+    #[serde(default)]
+    pub user_uuid: Uuid,
     #[serde(default)]
     pub settings: Vec<LeverageSetting>,
+    /// Sequencer wall-clock (ns) when the snapshot was assembled (WS only).
+    #[serde(default)]
+    pub server_timestamp: u64,
 }
 
 /// Confirmation boundary for high-level [`crate::GodarkClient::place_order`].
@@ -204,12 +210,16 @@ pub struct MeProfile {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Balance {
-    #[serde(deserialize_with = "deserialize_string_u64")]
+    // The edge omits zero-valued amounts (e.g. no on-chain USDT ATA), so each
+    // field defaults to 0 when absent — matches the JS/Python SDKs, which
+    // coalesce missing keys to 0 rather than erroring.
+    #[serde(default, deserialize_with = "deserialize_string_u64")]
     pub wallet_usdt_raw: u64,
-    #[serde(deserialize_with = "deserialize_string_u64")]
+    #[serde(default, deserialize_with = "deserialize_string_u64")]
     pub pending_deposits_raw: u64,
-    #[serde(deserialize_with = "deserialize_string_u64")]
+    #[serde(default, deserialize_with = "deserialize_string_u64")]
     pub shielded_balance_raw: u64,
+    #[serde(default)]
     pub wallet_usdt_ui: f64,
 }
 
@@ -241,7 +251,25 @@ where
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<u64, E> {
+            if v.is_empty() {
+                return Ok(0);
+            }
             v.parse::<u64>().map_err(de::Error::custom)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> std::result::Result<u64, E> {
+            Ok(0)
+        }
+
+        fn visit_none<E: de::Error>(self) -> std::result::Result<u64, E> {
+            Ok(0)
+        }
+
+        fn visit_some<D: de::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> std::result::Result<u64, D::Error> {
+            deserializer.deserialize_any(self)
         }
     }
 
@@ -302,6 +330,31 @@ pub struct PositionsSnapshot {
     /// Echoed from the original `SubscribePositions` request — present on
     /// `Initial` snapshots only.
     pub correlation_id: Option<u128>,
+}
+
+/// One resting order row inside an [`OpenOrdersSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenOrderRow {
+    pub order_id: String,
+    pub symbol_id: u64,
+    pub leverage: u32,
+    #[serde(default, deserialize_with = "deserialize_null_string")]
+    pub price: String,
+    #[serde(default, deserialize_with = "deserialize_null_string")]
+    pub quantity: String,
+    #[serde(default, deserialize_with = "deserialize_null_string")]
+    pub remaining_qty: String,
+}
+
+/// Encrypted `NodeResponse::OpenOrdersSnapshot` push (subscribe /
+/// UpdateLeverage refresh).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenOrdersSnapshot {
+    pub rows: Vec<OpenOrderRow>,
+    #[serde(default)]
+    pub server_timestamp: u64,
+    #[serde(default)]
+    pub correlation_id: u128,
 }
 
 /// Unified component health report routed via the trading WS.
@@ -395,6 +448,36 @@ pub struct AccountMarginUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_balance_parses_string_amounts() {
+        let bal: Balance = serde_json::from_value(serde_json::json!({
+            "walletUsdtRaw": "12345",
+            "pendingDepositsRaw": "5",
+            "shieldedBalanceRaw": "1000000000000",
+            "walletUsdtUi": 0.012345,
+        }))
+        .unwrap();
+        assert_eq!(bal.wallet_usdt_raw, 12345);
+        assert_eq!(bal.pending_deposits_raw, 5);
+        assert_eq!(bal.shielded_balance_raw, 1_000_000_000_000);
+        assert!((bal.wallet_usdt_ui - 0.012345).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_balance_tolerates_missing_and_null_fields() {
+        // The edge omits zero-valued amounts; missing/null must coalesce to 0
+        // (matches the JS/Python SDKs) instead of erroring.
+        let bal: Balance = serde_json::from_value(serde_json::json!({
+            "shieldedBalanceRaw": "1000000000000",
+            "walletUsdtRaw": null,
+        }))
+        .unwrap();
+        assert_eq!(bal.wallet_usdt_raw, 0);
+        assert_eq!(bal.pending_deposits_raw, 0);
+        assert_eq!(bal.shielded_balance_raw, 1_000_000_000_000);
+        assert_eq!(bal.wallet_usdt_ui, 0.0);
+    }
 
     #[test]
     fn test_order_ack_construction() {

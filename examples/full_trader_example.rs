@@ -180,6 +180,19 @@ async fn main() {
         }
     }
 
+    println!("Setting leverage to 1 via update_leverage...");
+    match client.update_leverage(SYMBOL, 1).await {
+        Ok(ack) => println!(
+            "update_leverage: success={}  order_id={}",
+            ack.success, ack.order_id
+        ),
+        Err(e) => {
+            dotenv::print_order_error("update_leverage rejected", &e);
+            client.disconnect().await;
+            std::process::exit(1);
+        }
+    }
+
     println!("Placing limit BUY @ 67500...");
     let buy_ack = match client
         .place_order(
@@ -285,7 +298,7 @@ async fn main() {
         mk(base * (1.0 - 0.009), 0.02),
     ];
     let mut resting_ids: Vec<u64> = Vec::new();
-    match client.mass_quote(SYMBOL, &ladder, 1, None).await {
+    match client.mass_quote(SYMBOL, &ladder, None).await {
         Ok(mq) => {
             println!(
                 "Mass quote: success={}  sequence={}  legs={}",
@@ -339,7 +352,7 @@ async fn main() {
     let cross_px = base * 1.05;
     println!("Mass-quoting a crossing BUY with post_only=true (expect rejected/2018)...");
     match client
-        .mass_quote(SYMBOL, &[mk(cross_px, 0.001)], 1, Some(true))
+        .mass_quote(SYMBOL, &[mk(cross_px, 0.001)], Some(true))
         .await
     {
         Ok(mq) => {
@@ -358,7 +371,7 @@ async fn main() {
     // Crossing BUY with post_only=false (relaxed): leg takes liquidity, fills>0.
     println!("Mass-quoting a crossing BUY with post_only=false (expect filled, fills>0)...");
     match client
-        .mass_quote(SYMBOL, &[mk(cross_px, 0.003)], 1, Some(false))
+        .mass_quote(SYMBOL, &[mk(cross_px, 0.003)], Some(false))
         .await
     {
         Ok(mq) => {

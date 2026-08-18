@@ -64,7 +64,7 @@ fi
 
 for required in bundle/README.md bundle/SDK_REFERENCE.md bundle/Cargo.toml \
                 .env.example \
-                examples/quickstart.rs examples/full_trader_example.rs examples/dotenv.rs; do
+                examples/quickstart.rs examples/full_trader_example.rs examples/rest_client_example.rs examples/dotenv.rs; do
   if [[ ! -f "${REPO_ROOT}/${required}" ]]; then
     echo "error: required source file missing: ${required}" >&2
     exit 1
@@ -176,10 +176,10 @@ echo "Parity check passed: sdk/src/ matches $UPSTREAM_SRC/src/ (lib.rs trim veri
 # no `build.rs` invocation - because the vendored Cargo.toml has its
 # [build-dependencies] stripped by refresh_sdk.sh. Binaries are not shipped;
 # this step verifies the bundle is build-complete before zipping.
-echo "Smoke-building release examples (quickstart + full_trader_example)..."
+echo "Smoke-building release examples (quickstart + full_trader_example + rest_client_example)..."
 cargo build --release --examples --quiet
 
-for bin in quickstart full_trader_example; do
+for bin in quickstart full_trader_example rest_client_example; do
   built="$REPO_ROOT/target/release/examples/$bin"
   if [[ ! -x "$built" ]]; then
     echo "error: expected example binary missing or non-executable: $built" >&2
@@ -207,6 +207,7 @@ cp "${REPO_ROOT}/bundle/Cargo.toml"             "$DEST/Cargo.toml"
 # bundled sdk/ for their own bot scaffolding.
 cp "${REPO_ROOT}/examples/quickstart.rs"           "$DEST/examples/"
 cp "${REPO_ROOT}/examples/full_trader_example.rs"  "$DEST/examples/"
+cp "${REPO_ROOT}/examples/rest_client_example.rs"  "$DEST/examples/"
 cp "${REPO_ROOT}/examples/dotenv.rs"               "$DEST/examples/"
 
 # Bundled godark crate — copied from $REPO_ROOT/sdk/ after parity check.
