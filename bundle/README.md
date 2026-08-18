@@ -7,7 +7,7 @@ Supported order types in this distribution: `MARKET`, `LIMIT`.
 
 ## Package contents
 
-- `examples/` — `quickstart.rs`, `full_trader_example.rs`, `dotenv.rs`
+- `examples/` — `quickstart.rs`, `full_trader_example.rs`, `rest_client_example.rs`, `dotenv.rs`
 - `sdk/` — bundled `godark` crate
 - `Cargo.toml` — workspace manifest for `cargo build --release --examples`
 - `README.md`, `SDK_REFERENCE.md` — recipient docs
@@ -56,13 +56,15 @@ From inside the unzipped bundle:
 ```bash
 cargo build --release --example quickstart
 cargo build --release --example full_trader_example
+cargo build --release --example rest_client_example
 ```
 
-Then run either binary:
+Then run:
 
 ```bash
 ./target/release/examples/quickstart
 ./target/release/examples/full_trader_example
+./target/release/examples/rest_client_example
 ```
 
 The bundled `Cargo.toml` resolves `godark` from `./sdk`.
