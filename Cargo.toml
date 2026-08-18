@@ -35,3 +35,7 @@ path = "examples/quickstart.rs"
 [[example]]
 name = "full_trader_example"
 path = "examples/full_trader_example.rs"
+
+[[example]]
+name = "rest_client_example"
+path = "examples/rest_client_example.rs"

@@ -90,6 +90,8 @@ impl RestTransport {
         post_json_envelope(&self.client, self.url("/api/v1/auth/token"), None, body).await
     }
 
+    /// Deprecated: ECDH REST session setup is retired (Noise XK is WS-only).
+    /// `GodarkRestClient` never calls this; kept for transport unit tests.
     pub async fn session_setup(&self, bearer: &str, client_ecdh_pubkey: &str) -> Result<Value> {
         let body = json!({ "client_ecdh_pubkey": client_ecdh_pubkey });
         post_json_envelope(
@@ -285,6 +287,57 @@ impl RestTransport {
             .await
             .map_err(|e| GodarkError::Connection(format!("GET /shielded-pool/balances: {e}")))?;
         parse_ok_json(r).await
+    }
+
+    /// `GET /api/v1/market-data/funding-rates` — public raw JSON array (no envelope).
+    pub async fn get_funding_rates(&self) -> Result<Value> {
+        let r = self
+            .client
+            .get(self.url("/api/v1/market-data/funding-rates"))
+            .send()
+            .await
+            .map_err(|e| GodarkError::Connection(format!("GET /market-data/funding-rates: {e}")))?;
+        let v = parse_ok_json(r).await?;
+        if !v.is_array() {
+            return Err(GodarkError::Connection(
+                "expected funding-rates JSON array".into(),
+            ));
+        }
+        Ok(v)
+    }
+
+    /// `GET /api/v1/market-data/open-interest` — public raw JSON array (no envelope).
+    pub async fn get_open_interest(&self) -> Result<Value> {
+        let r = self
+            .client
+            .get(self.url("/api/v1/market-data/open-interest"))
+            .send()
+            .await
+            .map_err(|e| GodarkError::Connection(format!("GET /market-data/open-interest: {e}")))?;
+        let v = parse_ok_json(r).await?;
+        if !v.is_array() {
+            return Err(GodarkError::Connection(
+                "expected open-interest JSON array".into(),
+            ));
+        }
+        Ok(v)
+    }
+
+    /// `GET /api/v1/market-data/volume` — public raw JSON object (no envelope).
+    pub async fn get_volume(&self) -> Result<Value> {
+        let r = self
+            .client
+            .get(self.url("/api/v1/market-data/volume"))
+            .send()
+            .await
+            .map_err(|e| GodarkError::Connection(format!("GET /market-data/volume: {e}")))?;
+        let v = parse_ok_json(r).await?;
+        if !v.is_object() {
+            return Err(GodarkError::Connection(
+                "expected volume JSON object".into(),
+            ));
+        }
+        Ok(v)
     }
 }
 

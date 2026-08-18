@@ -381,3 +381,7 @@ After running it, `scripts/package.sh` performs a parity check between the
 vendored `sdk/` and a freshly-built install at the pinned SHA; any drift
 fails the release. Layer 2 automation (`auto-bump-sdk-pin.yml`) wraps this
 loop into a rolling auto-PR triggered by SDK pushes.
+
+## RestClient example
+
+`GodarkRestClient` is exercised by `rest_client_example` / `rest-client-example`: REST auth, `/auth/me`, leverage read, and public funding/OI/volume GETs. Encrypted place/cancel/modify/update-leverage remain WebSocket-only via `GodarkClient`.

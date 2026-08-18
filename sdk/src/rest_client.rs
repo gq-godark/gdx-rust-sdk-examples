@@ -1,20 +1,17 @@
-//! REST trading client for the GoDark DEX.
+//! REST residual client for the GoDark DEX.
 //!
-//! Mirrors the public docs flow:
+//! Auth + plaintext account reads:
 //!   1. `POST /api/v1/auth/token` (RFC 6749 client credentials).
-//!   2. `POST /api/v1/session/setup` (X25519 ECDH).
-//!   3. Encrypted `POST/DELETE/PATCH /api/v1/orders` (AES-256-GCM).
-//!   4. Plaintext `GET /api/v1/orders/{order_id}` for terminal-status polling.
+//!   2. Plaintext `GET` helpers (`/me`, balance, leverage, order snapshots).
 //!
-//! Reuses the same crypto + protobuf builders as [`crate::GodarkClient`] (WS).
-//! The edge stays a stateless router (Mradul's Zone A) — order contents never
-//! leave this client unencrypted.
+//! Encrypted place/cancel/modify/update-leverage requires a WebSocket-bound
+//! Noise XK session via [`crate::GodarkClient`]. REST cannot establish Noise XK
+//! (legacy ECDH `session/setup` is retired).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use serde_json::{json, Value};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::config::{resolve_passphrase, Environment};
@@ -22,7 +19,6 @@ use crate::enums::{OrderType, Side, TimeInForce};
 use crate::types::{Balance, LeverageSettings, MeProfile};
 
 use crate::error::GodarkError;
-use crate::order_error_code::{make_order_error_from_code, make_order_error_from_json};
 use crate::proto_bridge;
 use crate::rest_transport::RestTransport;
 use crate::session::CryptoSession;
@@ -82,23 +78,6 @@ fn resolve_rest_base_url_with_default(explicit: Option<String>, default: &str) -
         }
     }
     default.trim_end_matches('/').to_string()
-}
-
-fn json_u128(value: &Value, key: &str) -> Option<u128> {
-    value.get(key).and_then(|field| {
-        field
-            .as_u64()
-            .map(u128::from)
-            .or_else(|| field.as_str().and_then(|raw| raw.parse().ok()))
-    })
-}
-
-fn json_u64(value: &Value, key: &str) -> Option<u64> {
-    value.get(key).and_then(|field| {
-        field
-            .as_u64()
-            .or_else(|| field.as_str().and_then(|raw| raw.parse().ok()))
-    })
 }
 
 /// Builder for [`GodarkRestClient`] — separate from `GodarkConfigBuilder` (WS) to
@@ -310,7 +289,10 @@ impl GodarkRestClient {
             .ok_or_else(|| GodarkError::Session("Not connected — call .connect() first".into()))
     }
 
-    /// `auth/token` → optional edge instruments fetch → session setup path.
+    /// Authenticate REST (`auth/token`) and optionally refresh the edge symbol map.
+    ///
+    /// Does not establish Noise XK; encrypted order verbs refuse until the
+    /// caller uses [`crate::GodarkClient`].
     pub async fn connect(&mut self) -> Result<(), GodarkError> {
         if !self.explicit_symbol_map {
             self.symbol_map =
@@ -364,9 +346,8 @@ impl GodarkRestClient {
         Ok(())
     }
 
-    /// Place an encrypted order. `client_order_id` is sent additively (cleartext) only
-    /// for the edge's `client_order_id → order_id` lookup index — it is also embedded
-    /// inside the encrypted `OrderHeader` AAD so the sequencer can dedup.
+    /// Place is refused: encrypted REST trading requires WebSocket Noise XK
+    /// ([`crate::GodarkClient`]).
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order(
         &mut self,
@@ -611,6 +592,21 @@ impl GodarkRestClient {
         self.get_balance(&owner).await
     }
 
+    /// `GET /api/v1/market-data/funding-rates` — public; no `connect` required.
+    pub async fn get_funding_rates(&self) -> Result<Value, GodarkError> {
+        self.http.get_funding_rates().await
+    }
+
+    /// `GET /api/v1/market-data/open-interest` — public; no `connect` required.
+    pub async fn get_open_interest(&self) -> Result<Value, GodarkError> {
+        self.http.get_open_interest().await
+    }
+
+    /// `GET /api/v1/market-data/volume` — public; no `connect` required.
+    pub async fn get_volume(&self) -> Result<Value, GodarkError> {
+        self.http.get_volume().await
+    }
+
     /// Poll [`Self::get_order`] until status is one of `FILLED`, `CANCELLED`, `REJECTED`.
     pub async fn await_terminal_status(
         &self,
@@ -638,152 +634,23 @@ impl GodarkRestClient {
     #[allow(clippy::too_many_arguments)]
     async fn send_encrypted_order(
         &mut self,
-        request_type: &str,
-        symbol_id: u64,
-        plaintext: &[u8],
-        correlation_id: &[u8],
-        place_client_order_id: Option<String>,
-        route: Option<EncryptedRoute>,
-        header_leverage: Option<u32>,
+        _request_type: &str,
+        _symbol_id: u64,
+        _plaintext: &[u8],
+        _correlation_id: &[u8],
+        _place_client_order_id: Option<String>,
+        _route: Option<EncryptedRoute>,
+        _header_leverage: Option<u32>,
     ) -> Result<OrderAck, GodarkError> {
-        let bearer = self.current_bearer()?.to_string();
-        let uuid = self.current_user_uuid()?;
-        let body_length = CryptoSession::body_length_for_plaintext(plaintext.len())?;
-        let nonce_counter = self.session.next_nonce();
-
-        let aad = proto_bridge::build_order_header_aad(
-            uuid.as_bytes(),
-            symbol_id,
-            request_type,
-            nonce_counter as u64,
-            body_length,
-            correlation_id,
-            0,
-        );
-
-        let (actual_nonce, ciphertext) = self
-            .session
-            .encrypt_order(&aad, plaintext)
-            .map_err(|e| GodarkError::Encryption(format!("encrypt: {e}")))?;
-        let body_b64 = BASE64.encode(&ciphertext);
-        let corr_str = if correlation_id.len() == 16 {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(correlation_id);
-            let value = u128::from_be_bytes(arr);
-            (value != 0).then(|| format!("{value:032x}"))
-        } else {
-            None
-        };
-        let mut header = json!({
-            "symbol_id": symbol_id,
-            "request_type": request_type,
-            "nonce": actual_nonce,
-            "body_length": body_length,
-        });
-        if let Some(s) = corr_str {
-            header["correlation_id"] = Value::String(s);
-        }
-        if let Some(lev) = header_leverage {
-            header["leverage"] = json!(lev);
-        }
-        let mut body = json!({ "header": header, "ciphertext": body_b64 });
-        if let Some(coid) = place_client_order_id {
-            body["client_order_id"] = Value::String(coid);
-        }
-
-        let raw = match route {
-            None => self.http.post_orders_encrypted(&bearer, body).await?,
-            Some(EncryptedRoute::PostLeverage) => {
-                self.http.post_leverage_encrypted(&bearer, body).await?
-            }
-            Some(EncryptedRoute::DeletePathId(id)) => {
-                self.http
-                    .delete_orders_encrypted(&bearer, &id, body)
-                    .await?
-            }
-            Some(EncryptedRoute::PatchPathId(id)) => {
-                self.http.patch_orders_encrypted(&bearer, &id, body).await?
-            }
-        };
-        if raw
-            .get("encrypted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-            || raw.get("encrypted_body").is_some()
-        {
-            return self.decrypt_rest_ack(&raw);
-        }
-        parse_order_ack(&raw)
-    }
-
-    /// Decrypt the encrypted ACK returned by REST encrypted-order endpoints
-    /// (Mradul's Zone A: edge never decrypts; SDK decrypts with session key).
-    fn decrypt_rest_ack(&mut self, raw: &Value) -> Result<OrderAck, GodarkError> {
-        let ct_b64 = raw
-            .get("encrypted_body")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let ct = BASE64
-            .decode(ct_b64)
-            .map_err(|e| GodarkError::Encryption(format!("invalid encrypted_body b64: {e}")))?;
-        let nonce = raw.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let message_type = raw
-            .get("message_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("ack");
-        let fencing_epoch = raw
-            .get("fencing_epoch")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let uuid = self.current_user_uuid()?;
-        let aad = proto_bridge::build_response_header_aad(
-            uuid.as_bytes(),
-            message_type,
-            ct.len() as u32,
-            nonce as u64,
-            fencing_epoch,
-            &json_u128(raw, "correlation_id")
-                .filter(|value| *value != 0)
-                .map(|value| value.to_be_bytes().to_vec())
-                .unwrap_or_default(),
-            json_u64(raw, "session_seq").unwrap_or_default(),
-            0,
-        );
-        let plaintext = self
-            .session
-            .decrypt_push(nonce, &aad, &ct)
-            .map_err(|e| GodarkError::Encryption(format!("Failed to decrypt REST ack: {e}")))?;
-        match proto_bridge::parse_node_response(&plaintext)? {
-            proto_bridge::NodeResponseKind::Ack {
-                order_id,
-                success,
-                sequence,
-                error_code,
-                reject_text,
-                ..
-            } => {
-                if !success {
-                    return Err(make_order_error_from_code(
-                        error_code,
-                        reject_text.as_deref(),
-                    ));
-                }
-                Ok(OrderAck {
-                    order_id: order_id.to_string(),
-                    success: true,
-                    sequence: sequence.to_string(),
-                    error_code: None,
-                    error: None,
-                })
-            }
-            _ => Err(GodarkError::Order {
-                message: "Expected ack response".to_string(),
-                error_code: None,
-            }),
-        }
+        // Auth-only REST: Noise XK is WebSocket-bound (matches other SDKs).
+        Err(GodarkError::Session(
+            "encrypted REST trading is unsupported with Noise XK; use GodarkClient over WebSocket instead"
+                .into(),
+        ))
     }
 }
 
+#[allow(dead_code)] // retained so place/cancel/modify call sites stay typed; encrypt path refuses
 enum EncryptedRoute {
     PostLeverage,
     DeletePathId(String),
@@ -800,7 +667,11 @@ fn resolve_order_id_from_lookup(v: &Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+// Plaintext ACK parser retained for tests; encrypted REST verbs now refuse
+// before any ACK is produced (Noise XK is WebSocket-only).
+#[cfg(test)]
 fn parse_order_ack(v: &Value) -> Result<OrderAck, GodarkError> {
+    use crate::order_error_code::make_order_error_from_json;
     let success = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
     if !success {
         let reason = v.get("error").and_then(|x| x.as_str()).map(String::from);
@@ -845,6 +716,7 @@ fn timestamp_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());

@@ -1480,7 +1480,7 @@ async fn setup_noise_session_with_transport(
 ) -> Result<(), GodarkError> {
     let pin_hex = config.noise_static_public_key_hex.as_deref().ok_or_else(|| {
         GodarkError::Config(
-            "Noise static public key unset; pass .noise_static_public_key_hex() or set GDX_NOISE_STATIC_PUBLIC_KEY".into(),
+            "Noise static public key unset; pass .noise_static_public_key_hex() or set GODARK_NOISE_STATIC_PUBLIC_KEY".into(),
         )
     })?;
     let remote_static = parse_pinned_static_public_key(pin_hex)?;
