@@ -47,8 +47,10 @@ let config = GodarkClient::builder()
 ```
 
 Public mainnet is not currently exposed; testnet is the live network for SDK
-users today. The public market-data client (`MarketDataClient`) continues to
-target `<host>/ws/gomarket` regardless of which suffix the caller supplied.
+users today. The public market-data client (`MarketDataClient`) defaults to
+`<host>/ws/v1` (docs wire). Set `GODARK_MARKET_DATA_USE_GOMARKET=1` for the
+legacy `<host>/ws/gomarket` multiplex, or `GODARK_MARKET_DATA_WS_URL` for a
+full override.
 
 Encrypted WebSocket trading uses **Noise XK** after login. Preference order for
 the sequencer pin: `.noise_static_public_key_hex(...)` →

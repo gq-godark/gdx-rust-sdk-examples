@@ -417,14 +417,32 @@ fn resolve_edge_base_url_with_default(explicit: Option<&str>, default: &str) -> 
 
 /// Resolve a base URL to the canonical edge WebSocket endpoint `<base>/ws/v1`.
 ///
+/// Rewrite `http(s)://` to `ws(s)://`.
+fn rewrite_http_scheme(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else {
+        url.to_string()
+    }
+}
+
+/// True when the resolved URL is the public-docs `/ws/v1` path (ignores trailing slash / query).
+pub fn is_docs_wire_url(url: &str) -> bool {
+    let cut = url.split(['?', '#']).next().unwrap_or(url);
+    cut.trim_end_matches('/').ends_with("/ws/v1")
+}
+
 /// Trailing slashes are stripped first, then:
+/// - `http(s)://` is rewritten to `ws(s)://`;
 /// - if the input already ends with `/ws/v1` it is returned unchanged;
 /// - if the input ends with the legacy `/ws` suffix it is upgraded to `/ws/v1`;
 /// - otherwise `/ws/v1` is appended.
 pub fn ws_url(base_url: &str) -> String {
-    let url = base_url.trim_end_matches('/');
+    let url = rewrite_http_scheme(base_url.trim_end_matches('/'));
     if url.ends_with("/ws/v1") {
-        url.to_string()
+        url
     } else if let Some(stripped) = url.strip_suffix("/ws") {
         format!("{stripped}/ws/v1")
     } else {
@@ -830,6 +848,19 @@ mod tests {
     #[test]
     fn test_ws_url_trailing_slash_v1() {
         assert_eq!(ws_url("wss://x.com/ws/v1/"), "wss://x.com/ws/v1");
+    }
+
+    #[test]
+    fn test_ws_url_rewrites_https() {
+        assert_eq!(ws_url("https://api.example"), "wss://api.example/ws/v1");
+        assert_eq!(ws_url("http://localhost:4000"), "ws://localhost:4000/ws/v1");
+    }
+
+    #[test]
+    fn test_is_docs_wire_url_ignores_slash_and_query() {
+        assert!(super::is_docs_wire_url("wss://x.com/ws/v1/"));
+        assert!(super::is_docs_wire_url("wss://x.com/ws/v1?x=1"));
+        assert!(!super::is_docs_wire_url("wss://x.com/ws/gomarket"));
     }
 
     #[test]
