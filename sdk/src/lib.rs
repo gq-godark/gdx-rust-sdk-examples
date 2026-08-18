@@ -41,7 +41,7 @@ pub use types::{
     AccountMarginSummary, AccountMarginUpdate, Balance, BalanceUpdate, BatchCancelAck,
     BatchCancelLegResult, BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation,
     FundingRateUpdate, LeverageSetting, LeverageSettings, MarginAlert, MassQuoteAck,
-    MassQuoteLegInput, MassQuoteLegResult, MeProfile, OrderAck, OrderUpdate, PositionRow,
-    PositionUpdate, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
-    SettlementBatchStatus, SettlementUpdate, SystemHealthUpdate,
+    MassQuoteLegInput, MassQuoteLegResult, MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck,
+    OrderUpdate, PositionRow, PositionUpdate, PositionsSnapshot, PositionsSnapshotSource,
+    ReconnectEvent, SettlementBatchStatus, SettlementUpdate, SystemHealthUpdate,
 };

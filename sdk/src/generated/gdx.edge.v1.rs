@@ -18,6 +18,9 @@ pub struct OrderHeader {
     /// Per-edge-connection id (Noise session / fanout routing).
     #[prost(uint64, tag = "7")]
     pub conn_id: u64,
+    /// Unix epoch nanoseconds when the edge received this request; 0 if unset.
+    #[prost(uint64, tag = "8")]
+    pub edge_ingress_at: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EncryptedEdgeRequest {

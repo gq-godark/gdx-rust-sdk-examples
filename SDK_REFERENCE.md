@@ -119,8 +119,10 @@ To consume `godark` from your own project outside this repo, either:
 | Method | Signature (abridged) | Purpose |
 |--------|----------------------|---------|
 | `place_order` | `async fn place_order(symbol, side, order_type, quantity, price?, tif, post_only, ...) -> Result<OrderAck>` | Place encrypted order |
+| `update_leverage` | `async fn update_leverage(symbol, leverage) -> Result<OrderAck>` | Set per-symbol account leverage |
 | `cancel_order` | `async fn cancel_order(order_id, symbol) -> Result<OrderAck>` | Cancel order |
 | `modify_order` | `async fn modify_order(order_id, symbol, new_price?, new_quantity?) -> Result<OrderAck>` | Modify order |
+| `mass_quote` | `async fn mass_quote(symbol, legs, post_only?) -> Result<MassQuoteAck>` | Bulk cancel-replace ladder |
 
 ### Subscriptions
 

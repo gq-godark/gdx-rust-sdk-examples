@@ -34,8 +34,14 @@ pub struct LeverageSetting {
 /// Cached leverage settings for the authenticated user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeverageSettings {
+    /// Present on encrypted WS pushes; absent on REST `GET /api/v1/leverage`.
+    #[serde(default)]
+    pub user_uuid: Uuid,
     #[serde(default)]
     pub settings: Vec<LeverageSetting>,
+    /// Sequencer wall-clock (ns) when the snapshot was assembled (WS only).
+    #[serde(default)]
+    pub server_timestamp: u64,
 }
 
 /// Confirmation boundary for high-level [`crate::GodarkClient::place_order`].
@@ -302,6 +308,31 @@ pub struct PositionsSnapshot {
     /// Echoed from the original `SubscribePositions` request — present on
     /// `Initial` snapshots only.
     pub correlation_id: Option<u128>,
+}
+
+/// One resting order row inside an [`OpenOrdersSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenOrderRow {
+    pub order_id: String,
+    pub symbol_id: u64,
+    pub leverage: u32,
+    #[serde(default, deserialize_with = "deserialize_null_string")]
+    pub price: String,
+    #[serde(default, deserialize_with = "deserialize_null_string")]
+    pub quantity: String,
+    #[serde(default, deserialize_with = "deserialize_null_string")]
+    pub remaining_qty: String,
+}
+
+/// Encrypted `NodeResponse::OpenOrdersSnapshot` push (subscribe /
+/// UpdateLeverage refresh).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenOrdersSnapshot {
+    pub rows: Vec<OpenOrderRow>,
+    #[serde(default)]
+    pub server_timestamp: u64,
+    #[serde(default)]
+    pub correlation_id: u128,
 }
 
 /// Unified component health report routed via the trading WS.

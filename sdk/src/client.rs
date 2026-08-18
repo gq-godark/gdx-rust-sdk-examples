@@ -25,8 +25,9 @@ use crate::session::{
 };
 use crate::transport::{EdgeTransport, TransportEvent};
 use crate::types::{
-    BalanceUpdate, Confirmation, FundingRateUpdate, MarginAlert, OrderAck, OrderUpdate,
-    PositionUpdate, PositionsSnapshot, ReconnectEvent, SettlementUpdate, SystemHealthUpdate,
+    BalanceUpdate, Confirmation, FundingRateUpdate, LeverageSettings, MarginAlert,
+    OpenOrdersSnapshot, OrderAck, OrderUpdate, PositionUpdate, PositionsSnapshot, ReconnectEvent,
+    SettlementUpdate, SystemHealthUpdate,
 };
 
 const NOISE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,6 +62,9 @@ pub struct GodarkClient {
     positions_snapshot_tx: mpsc::Sender<PositionsSnapshot>,
     positions_snapshot_rx: Option<mpsc::Receiver<PositionsSnapshot>>,
     #[allow(dead_code)]
+    open_orders_snapshot_tx: mpsc::Sender<OpenOrdersSnapshot>,
+    open_orders_snapshot_rx: Option<mpsc::Receiver<OpenOrdersSnapshot>>,
+    #[allow(dead_code)]
     system_health_tx: mpsc::Sender<SystemHealthUpdate>,
     system_health_rx: Option<mpsc::Receiver<SystemHealthUpdate>>,
     #[allow(dead_code)]
@@ -75,6 +79,9 @@ pub struct GodarkClient {
     #[allow(dead_code)]
     settlement_tx: mpsc::Sender<SettlementUpdate>,
     settlement_rx: Option<mpsc::Receiver<SettlementUpdate>>,
+    #[allow(dead_code)]
+    leverage_settings_tx: mpsc::Sender<LeverageSettings>,
+    leverage_settings_rx: Option<mpsc::Receiver<LeverageSettings>>,
     #[allow(dead_code)]
     error_tx: mpsc::Sender<GodarkError>,
     error_rx: Option<mpsc::Receiver<GodarkError>>,
@@ -101,11 +108,13 @@ impl GodarkClient {
         let (order_tx, order_rx) = mpsc::channel(256);
         let (position_tx, position_rx) = mpsc::channel(256);
         let (positions_snapshot_tx, positions_snapshot_rx) = mpsc::channel(64);
+        let (open_orders_snapshot_tx, open_orders_snapshot_rx) = mpsc::channel(64);
         let (system_health_tx, system_health_rx) = mpsc::channel(64);
         let (balance_tx, balance_rx) = mpsc::channel(64);
         let (margin_alert_tx, margin_alert_rx) = mpsc::channel(64);
         let (funding_rate_tx, funding_rate_rx) = mpsc::channel(64);
         let (settlement_tx, settlement_rx) = mpsc::channel(64);
+        let (leverage_settings_tx, leverage_settings_rx) = mpsc::channel(64);
         let (error_tx, error_rx) = mpsc::channel(256);
         let (reconnect_tx, reconnect_rx) = mpsc::channel(256);
         Self {
@@ -123,6 +132,8 @@ impl GodarkClient {
             position_rx: Some(position_rx),
             positions_snapshot_tx,
             positions_snapshot_rx: Some(positions_snapshot_rx),
+            open_orders_snapshot_tx,
+            open_orders_snapshot_rx: Some(open_orders_snapshot_rx),
             system_health_tx,
             system_health_rx: Some(system_health_rx),
             balance_tx,
@@ -133,6 +144,8 @@ impl GodarkClient {
             funding_rate_rx: Some(funding_rate_rx),
             settlement_tx,
             settlement_rx: Some(settlement_rx),
+            leverage_settings_tx,
+            leverage_settings_rx: Some(leverage_settings_rx),
             error_tx,
             error_rx: Some(error_rx),
             event_handle: None,
@@ -171,6 +184,14 @@ impl GodarkClient {
         self.positions_snapshot_rx.take()
     }
 
+    /// Receive encrypted `NodeResponse::OpenOrdersSnapshot` batches (subscribe /
+    /// UpdateLeverage refresh).
+    pub fn take_open_orders_snapshot_receiver(
+        &mut self,
+    ) -> Option<mpsc::Receiver<OpenOrdersSnapshot>> {
+        self.open_orders_snapshot_rx.take()
+    }
+
     /// Receive sequencer / MPC node health pulses.
     pub fn take_system_health_receiver(&mut self) -> Option<mpsc::Receiver<SystemHealthUpdate>> {
         self.system_health_rx.take()
@@ -194,6 +215,12 @@ impl GodarkClient {
     /// Receive settlement batch lifecycle updates.
     pub fn take_settlement_receiver(&mut self) -> Option<mpsc::Receiver<SettlementUpdate>> {
         self.settlement_rx.take()
+    }
+
+    /// Receive authoritative per-user leverage settings (initial positions
+    /// subscribe and after successful `update_leverage`).
+    pub fn take_leverage_settings_receiver(&mut self) -> Option<mpsc::Receiver<LeverageSettings>> {
+        self.leverage_settings_rx.take()
     }
 
     /// Receive non-fatal background errors (rekey failures, push decrypt/parse failures).
@@ -444,6 +471,36 @@ impl GodarkClient {
             .await
     }
 
+    /// Set per-symbol account leverage (Noise XK WebSocket).
+    ///
+    /// Place / mass-quote inherit this setting server-side. Always uses the
+    /// legacy `encrypted_order` frame because the docs-wire op surface does not
+    /// include `update_leverage`.
+    pub async fn update_leverage(
+        &self,
+        symbol: &str,
+        leverage: u32,
+    ) -> Result<OrderAck, GodarkError> {
+        self.ensure_ready()?;
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let lev = leverage.max(1);
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+        let plaintext =
+            proto_bridge::build_update_leverage_proto(uuid.as_bytes(), symbol_id, lev, &corr_id);
+        let response = self
+            .send_encrypted_command_ex(
+                "update_leverage",
+                symbol_id,
+                &plaintext,
+                &corr_id,
+                true,
+                Some(serde_json::json!({ "leverage": lev })),
+            )
+            .await?;
+        self.parse_order_response(&response)
+    }
+
     // ------------------------------------------------------------------
     // Mass quote / batch operations
     // ------------------------------------------------------------------
@@ -470,8 +527,9 @@ impl GodarkClient {
 
     /// Bulk cancel-replace (market-maker mass quote) on one symbol.
     ///
-    /// Up to 20 legs per batch, fused into one MPC round. `post_only` selects
-    /// the batch matching mode: `None` keeps the node default (post-only), where
+    /// Up to 20 legs per batch, fused into one MPC round. Per-symbol leverage is
+    /// account state; set it with [`Self::update_leverage`] before
+    /// placing or mass-quoting. `post_only` selects the batch matching mode: `None` keeps the node default (post-only), where
     /// a leg that would cross is rejected as `failed`; `Some(false)` enables the
     /// relaxed path, where a crossing leg takes liquidity up to its limit and
     /// rests the remainder (per-leg taker fills are surfaced as `fill_count`).
@@ -480,7 +538,6 @@ impl GodarkClient {
         &self,
         symbol: &str,
         legs: &[crate::types::MassQuoteLegInput],
-        leverage: u32,
         post_only: Option<bool>,
     ) -> Result<crate::types::MassQuoteAck, GodarkError> {
         Self::validate_batch_len("mass quote", legs.len())?;
@@ -494,7 +551,6 @@ impl GodarkClient {
             uuid.as_bytes(),
             legs,
             &corr_id,
-            leverage,
             post_only,
         );
         let response = self
@@ -631,6 +687,26 @@ impl GodarkClient {
         plaintext: &[u8],
         correlation_id: &[u8],
     ) -> Result<Value, GodarkError> {
+        self.send_encrypted_command_ex(
+            request_type,
+            symbol_id,
+            plaintext,
+            correlation_id,
+            false,
+            None,
+        )
+        .await
+    }
+
+    async fn send_encrypted_command_ex(
+        &self,
+        request_type: &str,
+        symbol_id: u64,
+        plaintext: &[u8],
+        correlation_id: &[u8],
+        force_legacy: bool,
+        header_extra: Option<Value>,
+    ) -> Result<Value, GodarkError> {
         let body_length = CryptoSession::body_length_for_plaintext(plaintext.len())?;
         let uuid = self.current_user_uuid()?;
         let corr_u128 = if correlation_id.len() == 16 {
@@ -680,14 +756,23 @@ impl GodarkClient {
 
             let body_b64 = BASE64.encode(&ciphertext);
             let corr_hex = format!("{corr_key:032x}");
-            let header_json = serde_json::json!({
+            let mut header_json = serde_json::json!({
                 "symbol_id": symbol_id,
                 "request_type": request_type,
                 "nonce": actual_nonce,
                 "body_length": body_length,
                 "correlation_id": corr_hex,
             });
-            let payload = if self.config.transport.use_docs_wire {
+            if let Some(extra) = header_extra {
+                if let (Some(obj), Some(extra_obj)) =
+                    (header_json.as_object_mut(), extra.as_object())
+                {
+                    for (k, v) in extra_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            let payload = if self.config.transport.use_docs_wire && !force_legacy {
                 let wire_op = match request_type {
                     "place" => "order.place",
                     "cancel" => "order.cancel",
@@ -1061,11 +1146,13 @@ impl GodarkClient {
         let order_tx = self.order_tx.clone();
         let position_tx = self.position_tx.clone();
         let positions_snapshot_tx = self.positions_snapshot_tx.clone();
+        let open_orders_snapshot_tx = self.open_orders_snapshot_tx.clone();
         let system_health_tx = self.system_health_tx.clone();
         let balance_tx = self.balance_tx.clone();
         let margin_alert_tx = self.margin_alert_tx.clone();
         let funding_rate_tx = self.funding_rate_tx.clone();
         let settlement_tx = self.settlement_tx.clone();
+        let leverage_settings_tx = self.leverage_settings_tx.clone();
         let error_tx = self.error_tx.clone();
         let session = Arc::clone(&self.session);
         let user_uuid = Arc::clone(&self.user_uuid);
@@ -1156,6 +1243,9 @@ impl GodarkClient {
                                         DecodedPush::PositionsSnapshot(snap) => {
                                             let _ = positions_snapshot_tx.send(snap).await;
                                         }
+                                        DecodedPush::OpenOrdersSnapshot(snap) => {
+                                            let _ = open_orders_snapshot_tx.send(snap).await;
+                                        }
                                         DecodedPush::SystemHealth(health) => {
                                             let _ = system_health_tx.send(health).await;
                                         }
@@ -1170,6 +1260,9 @@ impl GodarkClient {
                                         }
                                         DecodedPush::Settlement(s) => {
                                             let _ = settlement_tx.send(s).await;
+                                        }
+                                        DecodedPush::LeverageSettings(s) => {
+                                            let _ = leverage_settings_tx.send(s).await;
                                         }
                                         DecodedPush::Ignored => {}
                                     }
@@ -1586,11 +1679,13 @@ enum DecodedPush {
     Order(OrderUpdate),
     Position(PositionUpdate),
     PositionsSnapshot(PositionsSnapshot),
+    OpenOrdersSnapshot(OpenOrdersSnapshot),
     SystemHealth(SystemHealthUpdate),
     Balance(BalanceUpdate),
     MarginAlert(MarginAlert),
     FundingRate(FundingRateUpdate),
     Settlement(SettlementUpdate),
+    LeverageSettings(LeverageSettings),
     /// Recognized-but-unhandled push (e.g. a future variant we don't decode);
     /// silently dropped instead of being flagged as an error.
     Ignored,
@@ -1654,6 +1749,11 @@ fn decode_decrypted_push(message_type: &str, plaintext: &[u8]) -> Result<Decoded
         return Ok(DecodedPush::Ignored);
     }
 
+    if message_type == "open_orders_snapshot" {
+        return proto_bridge::parse_open_orders_snapshot(plaintext)
+            .map(DecodedPush::OpenOrdersSnapshot);
+    }
+
     match proto_bridge::parse_sequencer_to_edge_message(plaintext)? {
         EdgeMessage::OrderUpdate(update) => Ok(DecodedPush::Order(update)),
         EdgeMessage::PositionUpdate(update) => Ok(DecodedPush::Position(update)),
@@ -1663,6 +1763,7 @@ fn decode_decrypted_push(message_type: &str, plaintext: &[u8]) -> Result<Decoded
         EdgeMessage::MarginAlert(a) => Ok(DecodedPush::MarginAlert(a)),
         EdgeMessage::FundingRateUpdate(f) => Ok(DecodedPush::FundingRate(f)),
         EdgeMessage::SettlementUpdate(s) => Ok(DecodedPush::Settlement(s)),
+        EdgeMessage::LeverageSettings(s) => Ok(DecodedPush::LeverageSettings(s)),
         EdgeMessage::AccountMarginUpdate(_) => Ok(DecodedPush::Ignored),
         EdgeMessage::Unknown => Ok(DecodedPush::Ignored),
     }
