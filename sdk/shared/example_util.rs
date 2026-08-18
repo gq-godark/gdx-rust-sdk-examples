@@ -27,8 +27,8 @@ pub fn default_edge_url() -> String {
 
 pub fn noise_pin() -> Option<String> {
     env_first_many(&[
-        "GDX_NOISE_STATIC_PUBLIC_KEY",
         "GODARK_NOISE_STATIC_PUBLIC_KEY",
+        "GDX_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBKEY",
     ])
 }
