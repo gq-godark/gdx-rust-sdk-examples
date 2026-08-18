@@ -37,9 +37,9 @@ async fn main() {
     println!("{sep}");
     println!("Order-type support in this distribution: MARKET, LIMIT");
 
-    let api_key_id = match std::env::var("GODARK_API_KEY_ID") {
-        Ok(v) if !v.is_empty() => v,
-        _ => {
+    let api_key_id = match dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]) {
+        Some(v) => v,
+        None => {
             eprintln!(
                 "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
                  (or provide them in .env)."
@@ -47,9 +47,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let api_secret = match std::env::var("GODARK_API_SECRET") {
-        Ok(v) if !v.is_empty() => v,
-        _ => {
+    let api_secret = match dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]) {
+        Some(v) => v,
+        None => {
             eprintln!(
                 "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
                  (or provide them in .env)."
@@ -57,9 +57,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let passphrase = match std::env::var("GODARK_PASSPHRASE") {
-        Ok(v) if !v.is_empty() => v,
-        _ => {
+    let passphrase = match dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]) {
+        Some(v) => v,
+        None => {
             eprintln!(
                 "Missing credentials. Set GODARK_PASSPHRASE \
                  (or provide it in .env)."
@@ -67,10 +67,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let edge_override = std::env::var("GODARK_EDGE_URL")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let edge_override = dotenv::env_first(&["GODARK_EDGE_URL", "GDX_EDGE_URL"]);
     println!(
         "Endpoint: {}",
         edge_override

@@ -24,13 +24,13 @@ const SYMBOL: &str = "BTC-USDC-PERP";
 async fn main() -> Result<(), GodarkError> {
     dotenv::load_dotenv();
 
-    let api_key_id = std::env::var("GODARK_API_KEY_ID").map_err(|_| {
+    let api_key_id = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).ok_or_else(|| {
         GodarkError::Config("Set GODARK_API_KEY_ID in your environment or .env file".into())
     })?;
-    let api_secret = std::env::var("GODARK_API_SECRET").map_err(|_| {
+    let api_secret = dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).ok_or_else(|| {
         GodarkError::Config("Set GODARK_API_SECRET in your environment or .env file".into())
     })?;
-    let passphrase = std::env::var("GODARK_PASSPHRASE").map_err(|_| {
+    let passphrase = dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).ok_or_else(|| {
         GodarkError::Config("Set GODARK_PASSPHRASE in your environment or .env file".into())
     })?;
     let mut builder = GodarkClient::builder()
@@ -38,10 +38,8 @@ async fn main() -> Result<(), GodarkError> {
         .api_key_id(api_key_id)
         .api_secret(api_secret)
         .passphrase(passphrase);
-    if let Ok(base_url) = std::env::var("GODARK_EDGE_URL") {
-        if !base_url.trim().is_empty() {
-            builder = builder.base_url(base_url.trim());
-        }
+    if let Some(base_url) = dotenv::env_first(&["GODARK_EDGE_URL", "GDX_EDGE_URL"]) {
+        builder = builder.base_url(base_url);
     }
     let config = builder.build()?;
 
@@ -63,7 +61,7 @@ async fn main() -> Result<(), GodarkError> {
             Side::Sell,
             OrderType::Limit,
             0.01,
-            Some(999_999.0),
+            Some(69515.2),
             TimeInForce::Gtc,
             false,
             None,
