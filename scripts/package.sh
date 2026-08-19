@@ -31,6 +31,7 @@
 #   |-- examples/
 #   |   |-- quickstart.rs
 #   |   |-- full_trader_example.rs
+#   |   |-- rest_client_example.rs
 #   |   `-- dotenv.rs
 #   `-- sdk/
 #       |-- Cargo.toml             (godark crate manifest)
@@ -313,6 +314,7 @@ for required in \
   "${DIST_NAME}/\\.env\\.example" \
   "${DIST_NAME}/examples/quickstart\\.rs" \
   "${DIST_NAME}/examples/full_trader_example\\.rs" \
+  "${DIST_NAME}/examples/rest_client_example\\.rs" \
   "${DIST_NAME}/examples/dotenv\\.rs" \
   "${DIST_NAME}/sdk/Cargo\\.toml" \
   "${DIST_NAME}/sdk/src/lib\\.rs"; do

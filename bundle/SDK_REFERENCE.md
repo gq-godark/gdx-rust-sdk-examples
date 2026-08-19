@@ -167,7 +167,8 @@ MM distribution supports placing only `Market` and `Limit` orders.
 |------|---------|
 | `examples/quickstart.rs` | Minimal connect, place, cancel |
 | `examples/full_trader_example.rs` | Reference bot flow: callbacks, place / modify / cancel, mass-quote / batch-cancel |
-| `examples/dotenv.rs` | Shared `.env` loader and symbolic-error printer used by both example mains |
+| `examples/rest_client_example.rs` | REST auth, account reads, and public funding/OI/volume GETs (`GodarkRestClient`) |
+| `examples/dotenv.rs` | Shared `.env` loader and symbolic-error printer used by the example mains |
 
 Build from the bundle root with `cargo build --release --examples`. Binaries
 land in `target/release/examples/`.
