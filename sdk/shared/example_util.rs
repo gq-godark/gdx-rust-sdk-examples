@@ -1,9 +1,33 @@
-//! Shared env helpers for in-repo examples (edge URL, Noise XK pin, JWT login).
+//! Shared env helpers for in-repo examples (edge URL, HPKE pin, JWT login).
 
 use std::env;
 use std::time::Duration;
 
 use godark::{GodarkConfig, GodarkConfigBuilder, GodarkError, TransportConfig};
+
+/// Load `gdx-sdk/gdx-rust-sdk/.env` into the process env (does not override
+/// variables already set). No-op if the file is missing.
+pub fn load_dotenv() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().trim_matches('"');
+        if key.is_empty() {
+            continue;
+        }
+        env::set_var(key, value);
+    }
+}
 
 pub fn env_first(primary: &str, fallback: &str) -> Option<String> {
     env::var(primary)
@@ -21,15 +45,15 @@ pub fn env_first_many(names: &[&str]) -> Option<String> {
 }
 
 pub fn default_edge_url() -> String {
-    env_first("GODARK_EDGE_URL", "GDX_EDGE_URL")
-        .unwrap_or_else(|| "wss://api.godark-dex.com".into())
+    env_first("GODARK_EDGE_URL", "GDX_EDGE_URL").unwrap_or_else(|| "ws://127.0.0.1:13300".into())
 }
 
-pub fn noise_pin() -> Option<String> {
+pub fn hpke_pin() -> Option<String> {
     env_first_many(&[
-        "GODARK_NOISE_STATIC_PUBLIC_KEY",
-        "GDX_NOISE_STATIC_PUBLIC_KEY",
-        "GDX_NOISE_STATIC_PUBKEY",
+        "GDX_HPKE_STATIC_PUBLIC_KEY",
+        "GODARK_HPKE_STATIC_PUBLIC_KEY",
+        "GDX_HPKE_STATIC_PUBKEY",
+        "VITE_GDX_HPKE_STATIC_PUBKEY",
     ])
 }
 
@@ -44,6 +68,7 @@ pub fn rest_base_from_edge(edge_ws: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub async fn issue_ws_token(
     edge_url: &str,
     api_key_id: &str,
@@ -80,35 +105,33 @@ pub async fn issue_ws_token(
         })
 }
 
-pub fn apply_noise_pin(mut builder: GodarkConfigBuilder) -> GodarkConfigBuilder {
-    if let Some(pin) = noise_pin() {
-        builder = builder.noise_static_public_key_hex(pin);
+pub fn apply_hpke_pin(mut builder: GodarkConfigBuilder) -> GodarkConfigBuilder {
+    if let Some(pin) = hpke_pin() {
+        builder = builder.hpke_static_public_key_hex(pin);
     }
     builder
 }
 
 pub async fn local_trading_config(transport: TransportConfig) -> Result<GodarkConfig, GodarkError> {
+    load_dotenv();
     let edge = default_edge_url();
     let mut builder = GodarkConfigBuilder::new()
         .base_url(&edge)
         .auto_reconnect(false)
         .transport(transport);
-    builder = apply_noise_pin(builder);
+    builder = apply_hpke_pin(builder);
 
     let api_key_id = env_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID");
     let api_secret = env_first("GODARK_API_SECRET", "GDX_API_SECRET");
     let passphrase = env_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE");
     if let (Some(id), Some(sec), Some(pass)) = (api_key_id, api_secret, passphrase) {
-        match issue_ws_token(&edge, &id, &sec, &pass).await {
-            Ok(token) => return builder.api_key(token).build(),
-            Err(_) => {
-                return builder
-                    .api_key_id(id)
-                    .api_secret(sec)
-                    .passphrase(pass)
-                    .build();
-            }
-        }
+        // WS login takes `key_id:secret:passphrase`. Do not send a REST JWT —
+        // `/auth/token` succeeds but the trading socket rejects that bearer.
+        return builder
+            .api_key_id(id)
+            .api_secret(sec)
+            .passphrase(pass)
+            .build();
     }
 
     if let Some(legacy) = env_first_many(&["GODARK_API_KEY", "GDX_API_KEY"]) {

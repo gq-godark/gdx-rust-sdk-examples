@@ -15,12 +15,9 @@ pub struct OrderHeader {
     /// Big-endian u128 for distributed tracing; empty means CorrelationId(0).
     #[prost(bytes = "vec", tag = "6")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
-    /// Per-edge-connection id (Noise session / fanout routing).
+    /// Per-edge-connection id (HPKE session / fanout routing).
     #[prost(uint64, tag = "7")]
     pub conn_id: u64,
-    /// Unix epoch nanoseconds when the edge received this request; 0 if unset.
-    #[prost(uint64, tag = "8")]
-    pub edge_ingress_at: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EncryptedEdgeRequest {
@@ -50,7 +47,7 @@ pub struct ResponseHeader {
     /// Monotonic per-edge-connection sequence for gap-free ack delivery (Stage 15).
     #[prost(uint64, tag = "7")]
     pub session_seq: u64,
-    /// Per-edge-connection id (Noise session / fanout routing).
+    /// Per-edge-connection id (HPKE session / fanout routing).
     #[prost(uint64, tag = "8")]
     pub conn_id: u64,
 }
@@ -69,26 +66,24 @@ pub struct SessionControl {
     #[prost(uint64, tag = "1")]
     pub last_applied_seq: u64,
 }
-/// Noise XK opaque handshake relay (edge stamps user_uuid + conn_id).
+/// HPKE Base setup relay (edge stamps user_uuid + conn_id).
+/// `encapped_key` is the 32-byte DHKEM(X25519) encapsulation.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct NoiseHandshake {
+pub struct HpkeSetup {
     /// 16-byte UUID
     #[prost(bytes = "vec", tag = "1")]
     pub user_uuid: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub conn_id: u64,
-    /// opaque Noise message bytes
+    /// opaque HPKE encapped key
     #[prost(bytes = "vec", tag = "3")]
-    pub message: ::prost::alloc::vec::Vec<u8>,
+    pub encapped_key: ::prost::alloc::vec::Vec<u8>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct NoiseHandshakeReply {
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HpkeSetupReply {
     #[prost(uint64, tag = "1")]
     pub conn_id: u64,
-    /// opaque Noise message bytes
-    #[prost(bytes = "vec", tag = "2")]
-    pub message: ::prost::alloc::vec::Vec<u8>,
-    /// true when transport is ready (no further handshake msgs)
+    /// true when sealed session is ready
     #[prost(bool, tag = "3")]
     pub established: bool,
 }
@@ -98,4 +93,62 @@ pub struct SessionClose {
     pub user_uuid: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub conn_id: u64,
+}
+/// REST one-shot HPKE (`info` = gdx-hpke/v1/rest\0 ‖ user_uuid ‖ request_id_be).
+/// OrderHeader.conn_id MUST be 0.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RestEncryptedEdgeRequest {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(message, optional, tag = "2")]
+    pub header: ::core::option::Option<OrderHeader>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub encapped_key: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub request_id: u64,
+    #[prost(bytes = "vec", tag = "5")]
+    pub encrypted_body: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RestEncryptedEdgeResponse {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(message, optional, tag = "2")]
+    pub header: ::core::option::Option<ResponseHeader>,
+    #[prost(uint64, tag = "3")]
+    pub request_id: u64,
+    #[prost(bytes = "vec", tag = "4")]
+    pub encrypted_body: ::prost::alloc::vec::Vec<u8>,
+}
+/// Client↔edge trading WebSocket binary frames (security-critical path).
+/// Encrypted orders/pushes, HPKE setup, and session control MUST use this
+/// frame (WS Message::Binary). Text JSON is only for control/market ops
+/// (login, subscribe, ping, volume/OI/funding, etc.).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TradingWsBinaryFrame {
+    /// Edge cleartext orders-stream stamps; 0 = absent.
+    #[prost(uint64, tag = "10")]
+    pub subscription_epoch: u64,
+    #[prost(uint64, tag = "11")]
+    pub stream_seq: u64,
+    #[prost(oneof = "trading_ws_binary_frame::Body", tags = "1, 2, 3, 4, 5, 6")]
+    pub body: ::core::option::Option<trading_ws_binary_frame::Body>,
+}
+/// Nested message and enum types in `TradingWsBinaryFrame`.
+pub mod trading_ws_binary_frame {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "1")]
+        EncryptedOrder(super::EncryptedEdgeRequest),
+        #[prost(message, tag = "2")]
+        EncryptedPush(super::EncryptedEdgeResponse),
+        #[prost(message, tag = "3")]
+        HpkeSetup(super::HpkeSetup),
+        #[prost(message, tag = "4")]
+        HpkeSetupReply(super::HpkeSetupReply),
+        #[prost(message, tag = "5")]
+        SessionClose(super::SessionClose),
+        #[prost(message, tag = "6")]
+        SessionControl(super::SessionControl),
+    }
 }

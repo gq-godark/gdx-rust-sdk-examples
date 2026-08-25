@@ -47,9 +47,9 @@ pub enum OrderType {
     Unspecified = 0,
     Market = 1,
     Limit = 2,
-    PegToMid = 3,
-    PegToBid = 4,
-    PegToAsk = 5,
+    Peg = 3,
+    StopMarket = 4,
+    StopLimit = 5,
 }
 impl OrderType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -61,9 +61,9 @@ impl OrderType {
             Self::Unspecified => "ORDER_TYPE_UNSPECIFIED",
             Self::Market => "ORDER_TYPE_MARKET",
             Self::Limit => "ORDER_TYPE_LIMIT",
-            Self::PegToMid => "ORDER_TYPE_PEG_TO_MID",
-            Self::PegToBid => "ORDER_TYPE_PEG_TO_BID",
-            Self::PegToAsk => "ORDER_TYPE_PEG_TO_ASK",
+            Self::Peg => "ORDER_TYPE_PEG",
+            Self::StopMarket => "ORDER_TYPE_STOP_MARKET",
+            Self::StopLimit => "ORDER_TYPE_STOP_LIMIT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -72,9 +72,9 @@ impl OrderType {
             "ORDER_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
             "ORDER_TYPE_MARKET" => Some(Self::Market),
             "ORDER_TYPE_LIMIT" => Some(Self::Limit),
-            "ORDER_TYPE_PEG_TO_MID" => Some(Self::PegToMid),
-            "ORDER_TYPE_PEG_TO_BID" => Some(Self::PegToBid),
-            "ORDER_TYPE_PEG_TO_ASK" => Some(Self::PegToAsk),
+            "ORDER_TYPE_PEG" => Some(Self::Peg),
+            "ORDER_TYPE_STOP_MARKET" => Some(Self::StopMarket),
+            "ORDER_TYPE_STOP_LIMIT" => Some(Self::StopLimit),
             _ => None,
         }
     }
@@ -114,8 +114,8 @@ impl TimeInForce {
         }
     }
 }
-/// Self-trade prevention policy for an order. Same-user detection uses
-/// `user_commitment`; `STP_MODE_UNSPECIFIED` maps to cancel-resting.
+/// Self-trade prevention policy for an order. Same-user detection uses the
+/// account UUID; `STP_MODE_UNSPECIFIED` maps to cancel-resting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum StpMode {
@@ -144,42 +144,6 @@ impl StpMode {
             "STP_MODE_CANCEL_RESTING" => Some(Self::CancelResting),
             "STP_MODE_CANCEL_AGGRESSOR" => Some(Self::CancelAggressor),
             "STP_MODE_CANCEL_BOTH" => Some(Self::CancelBoth),
-            _ => None,
-        }
-    }
-}
-/// Price reference source for pegged order repricing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum PegReference {
-    Unspecified = 0,
-    Pyth = 1,
-    Bbo = 2,
-    Hyperliquid = 3,
-    Binance = 4,
-}
-impl PegReference {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "PEG_REFERENCE_UNSPECIFIED",
-            Self::Pyth => "PEG_REFERENCE_PYTH",
-            Self::Bbo => "PEG_REFERENCE_BBO",
-            Self::Hyperliquid => "PEG_REFERENCE_HYPERLIQUID",
-            Self::Binance => "PEG_REFERENCE_BINANCE",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "PEG_REFERENCE_UNSPECIFIED" => Some(Self::Unspecified),
-            "PEG_REFERENCE_PYTH" => Some(Self::Pyth),
-            "PEG_REFERENCE_BBO" => Some(Self::Bbo),
-            "PEG_REFERENCE_HYPERLIQUID" => Some(Self::Hyperliquid),
-            "PEG_REFERENCE_BINANCE" => Some(Self::Binance),
             _ => None,
         }
     }
@@ -348,7 +312,7 @@ pub enum PositionsSnapshotSource {
     Unspecified = 0,
     /// First snapshot delivered in reply to a `SubscribePositions` request.
     Initial = 1,
-    /// Background 5-second sweep refresh (mark-price / unrealized-PnL tick).
+    /// Periodic sweep (`interval_seconds`).
     Periodic = 2,
     /// Fill / flip / close events that actually changed position state.
     Event = 3,
@@ -416,8 +380,7 @@ impl PositionStatus {
         }
     }
 }
-/// Margin mode for a position. Only ISOLATED is supported today; CROSS is
-/// reserved for a future cross-margin model.
+/// Per-symbol margin mode. Selected per (user, symbol).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum MarginMode {
@@ -425,7 +388,7 @@ pub enum MarginMode {
     /// the zero value intentionally omits the *_UNSPECIFIED suffix.
     /// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
     Isolated = 0,
-    /// Account-wide cross margin (future).
+    /// Symbol participates in the account cross collateral pool.
     Cross = 1,
 }
 impl MarginMode {
@@ -450,71 +413,34 @@ impl MarginMode {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
-pub enum PositionUpdateType {
-    Unspecified = 0,
-    Snapshot = 1,
-    Open = 2,
-    Increase = 3,
-    Decrease = 4,
-    Close = 5,
-    FundingApplied = 6,
-}
-impl PositionUpdateType {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "POSITION_UPDATE_TYPE_UNSPECIFIED",
-            Self::Snapshot => "POSITION_UPDATE_TYPE_SNAPSHOT",
-            Self::Open => "POSITION_UPDATE_TYPE_OPEN",
-            Self::Increase => "POSITION_UPDATE_TYPE_INCREASE",
-            Self::Decrease => "POSITION_UPDATE_TYPE_DECREASE",
-            Self::Close => "POSITION_UPDATE_TYPE_CLOSE",
-            Self::FundingApplied => "POSITION_UPDATE_TYPE_FUNDING_APPLIED",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "POSITION_UPDATE_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
-            "POSITION_UPDATE_TYPE_SNAPSHOT" => Some(Self::Snapshot),
-            "POSITION_UPDATE_TYPE_OPEN" => Some(Self::Open),
-            "POSITION_UPDATE_TYPE_INCREASE" => Some(Self::Increase),
-            "POSITION_UPDATE_TYPE_DECREASE" => Some(Self::Decrease),
-            "POSITION_UPDATE_TYPE_CLOSE" => Some(Self::Close),
-            "POSITION_UPDATE_TYPE_FUNDING_APPLIED" => Some(Self::FundingApplied),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
 pub enum RequestType {
     Unspecified = 0,
     Place = 1,
     Cancel = 2,
     Modify = 3,
     Subscribe = 4,
-    Signing = 5,
-    GetOpenOrders = 6,
-    /// Synchronous order-history snapshot request (sequencer-local RPC,
-    /// never fanned out to MPC nodes). Paired with
-    /// RESPONSE_MESSAGE_TYPE_ORDER_HISTORY_SNAPSHOT on the reply.
-    GetOrderHistory = 7,
-    UpdateLeverage = 8,
-    AdjustMargin = 9,
-    MassQuote = 10,
-    BatchCancel = 11,
-    BatchModify = 12,
-    /// Delegated settlement session upload (Model 2): encrypted delegated keys plus
-    /// collateral note openings (required for shield deposits). E2E only.
-    SessionUpload = 13,
+    GetOpenOrders = 5,
+    UpdateLeverage = 6,
+    AdjustMargin = 7,
+    MassQuote = 8,
+    BatchCancel = 9,
+    BatchModify = 10,
     /// Cancel order-attached TP/SL without cancelling the parent entry.
-    CancelTpsl = 14,
+    CancelTpsl = 11,
     /// Amend TP/SL triggers on an existing Pending/Active attachment (CEX-style).
-    AmendTpsl = 15,
+    AmendTpsl = 12,
+    /// Update per-(user, symbol) margin mode (isolated ↔ cross). Requires flat symbol.
+    UpdateMarginMode = 13,
+    /// Synchronous full-user positions snapshot (sequencer-local RPC).
+    GetPositions = 14,
+    /// Synchronous account-margin snapshot (sequencer-local RPC).
+    GetAccount = 15,
+    /// Cancel every working order for the session user (optional symbol filter).
+    CancelAll = 16,
+    /// Close every open position for the session user (optional symbol filter).
+    CloseAll = 17,
+    /// Flip one symbol: evict reduce-only, market IOC 2× live size, not reduce-only.
+    Reverse = 18,
 }
 impl RequestType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -528,17 +454,20 @@ impl RequestType {
             Self::Cancel => "REQUEST_TYPE_CANCEL",
             Self::Modify => "REQUEST_TYPE_MODIFY",
             Self::Subscribe => "REQUEST_TYPE_SUBSCRIBE",
-            Self::Signing => "REQUEST_TYPE_SIGNING",
             Self::GetOpenOrders => "REQUEST_TYPE_GET_OPEN_ORDERS",
-            Self::GetOrderHistory => "REQUEST_TYPE_GET_ORDER_HISTORY",
             Self::UpdateLeverage => "REQUEST_TYPE_UPDATE_LEVERAGE",
             Self::AdjustMargin => "REQUEST_TYPE_ADJUST_MARGIN",
             Self::MassQuote => "REQUEST_TYPE_MASS_QUOTE",
             Self::BatchCancel => "REQUEST_TYPE_BATCH_CANCEL",
             Self::BatchModify => "REQUEST_TYPE_BATCH_MODIFY",
-            Self::SessionUpload => "REQUEST_TYPE_SESSION_UPLOAD",
             Self::CancelTpsl => "REQUEST_TYPE_CANCEL_TPSL",
             Self::AmendTpsl => "REQUEST_TYPE_AMEND_TPSL",
+            Self::UpdateMarginMode => "REQUEST_TYPE_UPDATE_MARGIN_MODE",
+            Self::GetPositions => "REQUEST_TYPE_GET_POSITIONS",
+            Self::GetAccount => "REQUEST_TYPE_GET_ACCOUNT",
+            Self::CancelAll => "REQUEST_TYPE_CANCEL_ALL",
+            Self::CloseAll => "REQUEST_TYPE_CLOSE_ALL",
+            Self::Reverse => "REQUEST_TYPE_REVERSE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -549,17 +478,20 @@ impl RequestType {
             "REQUEST_TYPE_CANCEL" => Some(Self::Cancel),
             "REQUEST_TYPE_MODIFY" => Some(Self::Modify),
             "REQUEST_TYPE_SUBSCRIBE" => Some(Self::Subscribe),
-            "REQUEST_TYPE_SIGNING" => Some(Self::Signing),
             "REQUEST_TYPE_GET_OPEN_ORDERS" => Some(Self::GetOpenOrders),
-            "REQUEST_TYPE_GET_ORDER_HISTORY" => Some(Self::GetOrderHistory),
             "REQUEST_TYPE_UPDATE_LEVERAGE" => Some(Self::UpdateLeverage),
             "REQUEST_TYPE_ADJUST_MARGIN" => Some(Self::AdjustMargin),
             "REQUEST_TYPE_MASS_QUOTE" => Some(Self::MassQuote),
             "REQUEST_TYPE_BATCH_CANCEL" => Some(Self::BatchCancel),
             "REQUEST_TYPE_BATCH_MODIFY" => Some(Self::BatchModify),
-            "REQUEST_TYPE_SESSION_UPLOAD" => Some(Self::SessionUpload),
             "REQUEST_TYPE_CANCEL_TPSL" => Some(Self::CancelTpsl),
             "REQUEST_TYPE_AMEND_TPSL" => Some(Self::AmendTpsl),
+            "REQUEST_TYPE_UPDATE_MARGIN_MODE" => Some(Self::UpdateMarginMode),
+            "REQUEST_TYPE_GET_POSITIONS" => Some(Self::GetPositions),
+            "REQUEST_TYPE_GET_ACCOUNT" => Some(Self::GetAccount),
+            "REQUEST_TYPE_CANCEL_ALL" => Some(Self::CancelAll),
+            "REQUEST_TYPE_CLOSE_ALL" => Some(Self::CloseAll),
+            "REQUEST_TYPE_REVERSE" => Some(Self::Reverse),
             _ => None,
         }
     }
@@ -569,35 +501,25 @@ impl RequestType {
 pub enum ResponseMessageType {
     Unspecified = 0,
     OrderUpdate = 1,
-    SystemHealth = 3,
-    Ack = 4,
-    /// GitHub issue #46: synchronous working-orders snapshot reply.
-    /// Sequencer emits a NodeResponse::OpenOrdersSnapshot over the same
-    /// encrypted-edge response envelope so the edge can route the frame
-    /// without decrypting it.
-    OpenOrdersSnapshot = 5,
-    /// Order-history snapshot reply paired with
-    /// REQUEST_TYPE_GET_ORDER_HISTORY. Same envelope/AAD conventions as
-    /// OPEN_ORDERS_SNAPSHOT; carries a newest-first page of terminal-state
-    /// orders plus an optional cursor for the next older page.
-    OrderHistorySnapshot = 6,
-    /// Full-user positions batch: emitted on subscribe, every 5s, and on
-    /// position-changing events. Carries server-computed mark price and
-    /// unrealized PnL. See `gdx.sequencer.v1.PositionsSnapshot`.
-    PositionsSnapshot = 7,
+    SystemHealth = 2,
+    Ack = 3,
+    /// Synchronous working-orders snapshot reply (encrypted-edge bidi).
+    OpenOrdersSnapshot = 4,
+    /// Full-user positions batch. See `gdx.sequencer.v1.PositionsSnapshot`.
+    PositionsSnapshot = 5,
     /// Atomic balance + positions envelope.
-    BalanceAndPosition = 8,
-    /// Dedicated account-margin push (collateral / used / reserved / free).
-    /// See `gdx.sequencer.v1.AccountMarginUpdate`.
-    AccountMarginUpdate = 9,
-    MassQuoteAck = 10,
-    BatchCancelAck = 11,
-    BatchModifyAck = 12,
+    BalanceAndPosition = 6,
+    /// Dedicated account-margin push. See `gdx.sequencer.v1.AccountMarginUpdate`.
+    AccountMarginUpdate = 7,
+    MassQuoteAck = 8,
+    BatchCancelAck = 9,
+    BatchModifyAck = 10,
     /// Dedicated TP/SL lifecycle push (cancel / amend / trigger).
-    TpslUpdate = 13,
-    /// Per-user per-symbol leverage settings snapshot (encrypted).
-    /// See `gdx.sequencer.v1.LeverageSettings`.
-    LeverageSettings = 14,
+    TpslUpdate = 11,
+    LeverageSettings = 12,
+    CancelAllAck = 13,
+    CloseAllAck = 14,
+    ReverseAck = 15,
 }
 impl ResponseMessageType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -611,7 +533,6 @@ impl ResponseMessageType {
             Self::SystemHealth => "RESPONSE_MESSAGE_TYPE_SYSTEM_HEALTH",
             Self::Ack => "RESPONSE_MESSAGE_TYPE_ACK",
             Self::OpenOrdersSnapshot => "RESPONSE_MESSAGE_TYPE_OPEN_ORDERS_SNAPSHOT",
-            Self::OrderHistorySnapshot => "RESPONSE_MESSAGE_TYPE_ORDER_HISTORY_SNAPSHOT",
             Self::PositionsSnapshot => "RESPONSE_MESSAGE_TYPE_POSITIONS_SNAPSHOT",
             Self::BalanceAndPosition => "RESPONSE_MESSAGE_TYPE_BALANCE_AND_POSITION",
             Self::AccountMarginUpdate => "RESPONSE_MESSAGE_TYPE_ACCOUNT_MARGIN_UPDATE",
@@ -620,6 +541,9 @@ impl ResponseMessageType {
             Self::BatchModifyAck => "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK",
             Self::TpslUpdate => "RESPONSE_MESSAGE_TYPE_TPSL_UPDATE",
             Self::LeverageSettings => "RESPONSE_MESSAGE_TYPE_LEVERAGE_SETTINGS",
+            Self::CancelAllAck => "RESPONSE_MESSAGE_TYPE_CANCEL_ALL_ACK",
+            Self::CloseAllAck => "RESPONSE_MESSAGE_TYPE_CLOSE_ALL_ACK",
+            Self::ReverseAck => "RESPONSE_MESSAGE_TYPE_REVERSE_ACK",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -631,9 +555,6 @@ impl ResponseMessageType {
             "RESPONSE_MESSAGE_TYPE_ACK" => Some(Self::Ack),
             "RESPONSE_MESSAGE_TYPE_OPEN_ORDERS_SNAPSHOT" => {
                 Some(Self::OpenOrdersSnapshot)
-            }
-            "RESPONSE_MESSAGE_TYPE_ORDER_HISTORY_SNAPSHOT" => {
-                Some(Self::OrderHistorySnapshot)
             }
             "RESPONSE_MESSAGE_TYPE_POSITIONS_SNAPSHOT" => Some(Self::PositionsSnapshot),
             "RESPONSE_MESSAGE_TYPE_BALANCE_AND_POSITION" => {
@@ -647,6 +568,9 @@ impl ResponseMessageType {
             "RESPONSE_MESSAGE_TYPE_BATCH_MODIFY_ACK" => Some(Self::BatchModifyAck),
             "RESPONSE_MESSAGE_TYPE_TPSL_UPDATE" => Some(Self::TpslUpdate),
             "RESPONSE_MESSAGE_TYPE_LEVERAGE_SETTINGS" => Some(Self::LeverageSettings),
+            "RESPONSE_MESSAGE_TYPE_CANCEL_ALL_ACK" => Some(Self::CancelAllAck),
+            "RESPONSE_MESSAGE_TYPE_CLOSE_ALL_ACK" => Some(Self::CloseAllAck),
+            "RESPONSE_MESSAGE_TYPE_REVERSE_ACK" => Some(Self::ReverseAck),
             _ => None,
         }
     }
@@ -665,8 +589,8 @@ pub enum CancelReason {
     Expired = 4,
     System = 5,
     Adl = 6,
-    Liquidation = 7,
-    MarginInsufficient = 8,
+    LiquidatedCanceled = 7,
+    MarginCanceled = 8,
 }
 impl CancelReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -682,8 +606,8 @@ impl CancelReason {
             Self::Expired => "CANCEL_REASON_EXPIRED",
             Self::System => "CANCEL_REASON_SYSTEM",
             Self::Adl => "CANCEL_REASON_ADL",
-            Self::Liquidation => "CANCEL_REASON_LIQUIDATION",
-            Self::MarginInsufficient => "CANCEL_REASON_MARGIN_INSUFFICIENT",
+            Self::LiquidatedCanceled => "CANCEL_REASON_LIQUIDATED_CANCELED",
+            Self::MarginCanceled => "CANCEL_REASON_MARGIN_CANCELED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -696,8 +620,8 @@ impl CancelReason {
             "CANCEL_REASON_EXPIRED" => Some(Self::Expired),
             "CANCEL_REASON_SYSTEM" => Some(Self::System),
             "CANCEL_REASON_ADL" => Some(Self::Adl),
-            "CANCEL_REASON_LIQUIDATION" => Some(Self::Liquidation),
-            "CANCEL_REASON_MARGIN_INSUFFICIENT" => Some(Self::MarginInsufficient),
+            "CANCEL_REASON_LIQUIDATED_CANCELED" => Some(Self::LiquidatedCanceled),
+            "CANCEL_REASON_MARGIN_CANCELED" => Some(Self::MarginCanceled),
             _ => None,
         }
     }

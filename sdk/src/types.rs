@@ -1,11 +1,11 @@
-// Domain types — mirrors Python SDK types.py
+// Domain types for the public SDK surface.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::enums::{CancelReason, OrderStatus, OrderUpdateType, PositionUpdateType, Side};
+use crate::enums::{CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce};
 
 /// Lifecycle notifications for trading client reconnect (and market data reconnect).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub enum ReconnectEvent {
         attempt: u32,
         delay: Duration,
     },
-    /// Reconnect and session setup succeeded.
+    /// Reconnect and HPKE session setup succeeded.
     Reconnected,
     /// A reconnect attempt failed (another attempt may follow).
     Failed { error: String },
@@ -34,14 +34,8 @@ pub struct LeverageSetting {
 /// Cached leverage settings for the authenticated user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeverageSettings {
-    /// Present on encrypted WS pushes; absent on REST `GET /api/v1/leverage`.
-    #[serde(default)]
-    pub user_uuid: Uuid,
     #[serde(default)]
     pub settings: Vec<LeverageSetting>,
-    /// Sequencer wall-clock (ns) when the snapshot was assembled (WS only).
-    #[serde(default)]
-    pub server_timestamp: u64,
 }
 
 /// Confirmation boundary for high-level [`crate::GodarkClient::place_order`].
@@ -171,22 +165,7 @@ pub struct OrderUpdate {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PositionUpdate {
-    pub user_uuid: Uuid,
-    pub symbol_id: u64,
-    pub side: Side,
-    pub update_type: PositionUpdateType,
-    pub size: String,
-    pub entry_price: String,
-    pub previous_size: String,
-    pub fill_price: String,
-    pub fill_qty: String,
-    pub correlation_id: u128,
-    pub timestamp: u64,
-}
-
-/// User profile returned by `GET /api/v1/auth/me`.
+/// Authenticated user profile (`GET` platform `/auth/me` when available).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeProfile {
     #[serde(default, deserialize_with = "deserialize_null_string")]
@@ -203,84 +182,24 @@ pub struct MeProfile {
     pub tier: String,
 }
 
-/// On-chain balance snapshot from `GET /api/v1/shielded-pool/balances/{owner}`.
-///
-/// The wire format uses camelCase keys; raw u64 amounts arrive as JSON strings
-/// to avoid precision loss in JavaScript clients.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Balance {
-    // The edge omits zero-valued amounts (e.g. no on-chain USDT ATA), so each
-    // field defaults to 0 when absent — matches the JS/Python SDKs, which
-    // coalesce missing keys to 0 rather than erroring.
-    #[serde(default, deserialize_with = "deserialize_string_u64")]
-    pub wallet_usdt_raw: u64,
-    #[serde(default, deserialize_with = "deserialize_string_u64")]
-    pub pending_deposits_raw: u64,
-    #[serde(default, deserialize_with = "deserialize_string_u64")]
-    pub shielded_balance_raw: u64,
-    #[serde(default)]
-    pub wallet_usdt_ui: f64,
-}
-
-fn deserialize_string_u64<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct StringU64Visitor;
-
-    impl<'de> de::Visitor<'de> for StringU64Visitor {
-        type Value = u64;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a u64 as a string or number")
-        }
-
-        fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<u64, E> {
-            Ok(v)
-        }
-
-        fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<u64, E> {
-            u64::try_from(v).map_err(|_| E::custom("negative value"))
-        }
-
-        fn visit_f64<E: de::Error>(self, v: f64) -> std::result::Result<u64, E> {
-            Ok(v as u64)
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<u64, E> {
-            if v.is_empty() {
-                return Ok(0);
-            }
-            v.parse::<u64>().map_err(de::Error::custom)
-        }
-
-        fn visit_unit<E: de::Error>(self) -> std::result::Result<u64, E> {
-            Ok(0)
-        }
-
-        fn visit_none<E: de::Error>(self) -> std::result::Result<u64, E> {
-            Ok(0)
-        }
-
-        fn visit_some<D: de::Deserializer<'de>>(
-            self,
-            deserializer: D,
-        ) -> std::result::Result<u64, D::Error> {
-            deserializer.deserialize_any(self)
-        }
-    }
-
-    deserializer.deserialize_any(StringU64Visitor)
-}
-
 fn deserialize_null_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Sequencer trading-collateral snapshot (`BalanceUpdateMessage`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BalanceUpdate {
+    pub user_uuid: Uuid,
+    /// Collateral in SPL raw token units (6 dp).
+    pub balance_raw: u64,
+    pub timestamp: u64,
+    /// Human-readable internal USDT collateral.
+    pub balance: String,
+    pub signed_balance_8dp: i64,
+    pub free_collateral_8dp: u64,
 }
 
 /// Why a [`PositionsSnapshot`] was emitted by the sequencer.
@@ -332,31 +251,6 @@ pub struct PositionsSnapshot {
     pub correlation_id: Option<u128>,
 }
 
-/// One resting order row inside an [`OpenOrdersSnapshot`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenOrderRow {
-    pub order_id: String,
-    pub symbol_id: u64,
-    pub leverage: u32,
-    #[serde(default, deserialize_with = "deserialize_null_string")]
-    pub price: String,
-    #[serde(default, deserialize_with = "deserialize_null_string")]
-    pub quantity: String,
-    #[serde(default, deserialize_with = "deserialize_null_string")]
-    pub remaining_qty: String,
-}
-
-/// Encrypted `NodeResponse::OpenOrdersSnapshot` push (subscribe /
-/// UpdateLeverage refresh).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenOrdersSnapshot {
-    pub rows: Vec<OpenOrderRow>,
-    #[serde(default)]
-    pub server_timestamp: u64,
-    #[serde(default)]
-    pub correlation_id: u128,
-}
-
 /// Unified component health report routed via the trading WS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemHealthUpdate {
@@ -369,30 +263,6 @@ pub struct SystemHealthUpdate {
     pub schema_version: u32,
 }
 
-/// Updated shielded balance for the authenticated user.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BalanceUpdate {
-    pub user_uuid: Uuid,
-    pub shielded_balance_raw: u64,
-    pub timestamp: u64,
-}
-
-/// Margin tier transition / recovery for `(owner, symbol_id)`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MarginAlert {
-    pub owner: Uuid,
-    pub symbol_id: u64,
-    pub tier: u32,
-    pub margin_ratio_bps: u32,
-    pub mark_price: String,
-    pub liquidation_price: String,
-    pub ts: i64,
-    pub state_version: u64,
-    /// True when the position recovered to `Healthy` — UI clears the tier
-    /// badge for this `(owner, symbol_id)`. `tier` is `Unspecified` here.
-    pub recovered: bool,
-}
-
 /// Funding rate tick for a symbol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FundingRateUpdate {
@@ -403,23 +273,35 @@ pub struct FundingRateUpdate {
     pub timestamp: u64,
 }
 
-/// Status of a settlement batch tx.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SettlementBatchStatus {
-    Unspecified,
-    Submitted,
-    Confirmed,
-    Failed,
+/// One working order from a [`OpenOrdersSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenOrderRow {
+    pub order_id: String,
+    pub symbol_id: u64,
+    pub side: Side,
+    pub order_type: OrderType,
+    pub price: String,
+    pub quantity: String,
+    pub filled_qty: String,
+    pub remaining_qty: String,
+    pub order_status: OrderStatus,
+    pub time_in_force: TimeInForce,
+    pub leverage: u32,
+    pub timestamp: u64,
+    pub correlation_id: u128,
+    pub expiry_time: Option<u64>,
+    pub reduce_only: bool,
+    pub post_only: bool,
+    pub take_profit: Option<String>,
+    pub stop_loss: Option<String>,
 }
 
-/// Settlement batch lifecycle update from the sequencer.
+/// Reply to encrypted `POST /api/v1/openOrders` (`GetOpenOrders`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SettlementUpdate {
-    pub batch_id: u64,
-    pub status: SettlementBatchStatus,
-    pub tx_signature: String,
-    pub timestamp: u64,
-    pub affected_user_uuids: Vec<Uuid>,
+pub struct OpenOrdersSnapshot {
+    pub rows: Vec<OpenOrderRow>,
+    pub server_timestamp: u64,
+    pub correlation_id: u128,
 }
 
 /// Authoritative account-level margin summary. All amounts are decimal strings.
@@ -448,36 +330,6 @@ pub struct AccountMarginUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_balance_parses_string_amounts() {
-        let bal: Balance = serde_json::from_value(serde_json::json!({
-            "walletUsdtRaw": "12345",
-            "pendingDepositsRaw": "5",
-            "shieldedBalanceRaw": "1000000000000",
-            "walletUsdtUi": 0.012345,
-        }))
-        .unwrap();
-        assert_eq!(bal.wallet_usdt_raw, 12345);
-        assert_eq!(bal.pending_deposits_raw, 5);
-        assert_eq!(bal.shielded_balance_raw, 1_000_000_000_000);
-        assert!((bal.wallet_usdt_ui - 0.012345).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_balance_tolerates_missing_and_null_fields() {
-        // The edge omits zero-valued amounts; missing/null must coalesce to 0
-        // (matches the JS/Python SDKs) instead of erroring.
-        let bal: Balance = serde_json::from_value(serde_json::json!({
-            "shieldedBalanceRaw": "1000000000000",
-            "walletUsdtRaw": null,
-        }))
-        .unwrap();
-        assert_eq!(bal.wallet_usdt_raw, 0);
-        assert_eq!(bal.pending_deposits_raw, 0);
-        assert_eq!(bal.shielded_balance_raw, 1_000_000_000_000);
-        assert_eq!(bal.wallet_usdt_ui, 0.0);
-    }
 
     #[test]
     fn test_order_ack_construction() {
@@ -533,34 +385,6 @@ mod tests {
     }
 
     #[test]
-    fn test_position_update_all_fields() {
-        let p = PositionUpdate {
-            user_uuid: Uuid::nil(),
-            symbol_id: 2,
-            side: Side::Buy,
-            update_type: PositionUpdateType::Increase,
-            size: "5".to_string(),
-            entry_price: "2.0".to_string(),
-            previous_size: "3".to_string(),
-            fill_price: "2.1".to_string(),
-            fill_qty: "2".to_string(),
-            correlation_id: 42,
-            timestamp: 12345,
-        };
-        assert_eq!(p.user_uuid, Uuid::nil());
-        assert_eq!(p.symbol_id, 2);
-        assert_eq!(p.side, Side::Buy);
-        assert_eq!(p.update_type, PositionUpdateType::Increase);
-        assert_eq!(p.size, "5");
-        assert_eq!(p.entry_price, "2.0");
-        assert_eq!(p.previous_size, "3");
-        assert_eq!(p.fill_price, "2.1");
-        assert_eq!(p.fill_qty, "2");
-        assert_eq!(p.correlation_id, 42);
-        assert_eq!(p.timestamp, 12345);
-    }
-
-    #[test]
     fn test_types_clone_and_debug() {
         let ack = OrderAck {
             order_id: "a".into(),
@@ -592,22 +416,6 @@ mod tests {
         };
         let _ = ou.clone();
         let _ = format!("{:?}", ou);
-
-        let pu = PositionUpdate {
-            user_uuid: Uuid::nil(),
-            symbol_id: 0,
-            side: Side::Buy,
-            update_type: PositionUpdateType::Snapshot,
-            size: "0".into(),
-            entry_price: "0".into(),
-            previous_size: "0".into(),
-            fill_price: "0".into(),
-            fill_qty: "0".into(),
-            correlation_id: 0,
-            timestamp: 0,
-        };
-        let _ = pu.clone();
-        let _ = format!("{:?}", pu);
     }
 
     #[test]

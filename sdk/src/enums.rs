@@ -1,4 +1,4 @@
-// Trading enums with protobuf integer conversions — mirrors Python SDK enums.py
+// Trading enums with protobuf integer conversions.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,16 +44,6 @@ pub enum OrderUpdateType {
     Modified,
     CancelRejected,
     ModifyRejected,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum PositionUpdateType {
-    Snapshot,
-    Open,
-    Increase,
-    Decrease,
-    Close,
-    FundingApplied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -180,31 +170,6 @@ impl OrderUpdateType {
     }
 }
 
-impl PositionUpdateType {
-    pub fn from_proto(v: i32) -> Self {
-        match v {
-            1 => Self::Snapshot,
-            2 => Self::Open,
-            3 => Self::Increase,
-            4 => Self::Decrease,
-            5 => Self::Close,
-            6 => Self::FundingApplied,
-            _ => Self::Snapshot,
-        }
-    }
-
-    pub fn to_proto(self) -> i32 {
-        match self {
-            Self::Snapshot => 1,
-            Self::Open => 2,
-            Self::Increase => 3,
-            Self::Decrease => 4,
-            Self::Close => 5,
-            Self::FundingApplied => 6,
-        }
-    }
-}
-
 impl CancelReason {
     pub fn from_proto(v: i32) -> Option<Self> {
         match v {
@@ -229,49 +194,44 @@ impl CancelReason {
 }
 
 /// Maps a request type string to its proto integer.
-pub fn request_type_to_proto(s: &str) -> i32 {
+pub(crate) fn request_type_to_proto(s: &str) -> i32 {
     match s {
         "place" => 1,
         "cancel" => 2,
         "modify" => 3,
         "subscribe" => 4,
-        "signing" => 5,
-        "update_leverage" => 8,
-        "mass_quote" => 10,
-        "batch_cancel" => 11,
-        "batch_modify" => 12,
+        "get_open_orders" => 5,
+        "update_leverage" => 6,
+        "adjust_margin" => 7,
+        "mass_quote" => 8,
+        "batch_cancel" => 9,
+        "batch_modify" => 10,
+        "cancel_tpsl" => 11,
+        "amend_tpsl" => 12,
+        "update_margin_mode" => 13,
+        "get_positions" => 14,
+        "get_account" => 15,
         _ => 0,
     }
 }
 
 /// Maps a response message type string to its proto integer.
 ///
-/// Source of truth: `gdx-core/crates/gdx-wire/src/convert/common.rs`
-/// (`response_message_type_to_proto`). The discriminant `2` is reserved
-/// (retired `PositionUpdate`); positions now flow as `PositionsSnapshot = 7`.
-///
-/// **CRITICAL**: this mapping is used to build the AAD (Additional
-/// Authenticated Data) that protects every encrypted response from the
-/// sequencer. If a string maps to the wrong integer (or to the default
-/// `0` for an unknown type) the SDK will rebuild a different AAD than
-/// the sequencer used and AES-GCM authentication will fail with
-/// `aead::Error`. Keep this list in sync with the proto enum on the
-/// sequencer side and with the Python/JS/C++ SDKs.
-pub fn response_message_type_to_proto(s: &str) -> i32 {
+/// Source of truth: `gdx.common.v1.ResponseMessageType` in gdx-proto.
+pub(crate) fn response_message_type_to_proto(s: &str) -> i32 {
     match s {
         "order_update" => 1,
-        "system_health" => 3,
-        "ack" => 4,
-        "open_orders_snapshot" => 5,
-        "order_history_snapshot" => 6,
-        "positions_snapshot" => 7,
-        "balance_and_position" => 8,
-        "account_margin_update" => 9,
-        "mass_quote_ack" => 10,
-        "batch_cancel_ack" => 11,
-        "batch_modify_ack" => 12,
-        "tpsl_update" => 13,
-        "leverage_settings" => 14,
+        "system_health" => 2,
+        "ack" => 3,
+        "open_orders_snapshot" => 4,
+        "positions_snapshot" => 5,
+        "balance_and_position" => 6,
+        "account_margin_update" => 7,
+        "mass_quote_ack" => 8,
+        "batch_cancel_ack" => 9,
+        "batch_modify_ack" => 10,
+        "tpsl_update" => 11,
+        "leverage_settings" => 12,
         _ => 0,
     }
 }
@@ -347,30 +307,6 @@ mod tests {
     }
 
     #[test]
-    fn test_position_update_type_from_proto_all_variants() {
-        let variants = [
-            PositionUpdateType::Snapshot,
-            PositionUpdateType::Open,
-            PositionUpdateType::Increase,
-            PositionUpdateType::Decrease,
-            PositionUpdateType::Close,
-            PositionUpdateType::FundingApplied,
-        ];
-        for v in variants {
-            assert_eq!(PositionUpdateType::from_proto(v.to_proto()), v);
-        }
-    }
-
-    #[test]
-    fn test_position_update_type_funding_applied_wire_value() {
-        assert_eq!(PositionUpdateType::FundingApplied.to_proto(), 6);
-        assert_eq!(
-            PositionUpdateType::from_proto(6),
-            PositionUpdateType::FundingApplied
-        );
-    }
-
-    #[test]
     fn test_cancel_reason_from_proto_all_variants() {
         let variants = [
             CancelReason::UserRequested,
@@ -396,7 +332,10 @@ mod tests {
         assert_eq!(request_type_to_proto("place"), 1);
         assert_eq!(request_type_to_proto("cancel"), 2);
         assert_eq!(request_type_to_proto("modify"), 3);
-        assert_eq!(request_type_to_proto("update_leverage"), 8);
+        assert_eq!(request_type_to_proto("get_open_orders"), 5);
+        assert_eq!(request_type_to_proto("update_leverage"), 6);
+        assert_eq!(request_type_to_proto("get_positions"), 14);
+        assert_eq!(request_type_to_proto("get_account"), 15);
         assert_eq!(request_type_to_proto("unknown"), 0);
     }
 
@@ -407,14 +346,10 @@ mod tests {
         // here causes `aead::Error` decrypts on the affected push type
         // because the SDK's reconstructed AAD diverges from the sequencer's.
         assert_eq!(response_message_type_to_proto("order_update"), 1);
-        // 2 reserved (retired position_update)
-        assert_eq!(response_message_type_to_proto("system_health"), 3);
-        assert_eq!(response_message_type_to_proto("ack"), 4);
-        assert_eq!(response_message_type_to_proto("open_orders_snapshot"), 5);
-        assert_eq!(response_message_type_to_proto("order_history_snapshot"), 6);
-        assert_eq!(response_message_type_to_proto("positions_snapshot"), 7);
-        assert_eq!(response_message_type_to_proto("tpsl_update"), 13);
-        assert_eq!(response_message_type_to_proto("leverage_settings"), 14);
+        assert_eq!(response_message_type_to_proto("system_health"), 2);
+        assert_eq!(response_message_type_to_proto("ack"), 3);
+        assert_eq!(response_message_type_to_proto("open_orders_snapshot"), 4);
+        assert_eq!(response_message_type_to_proto("positions_snapshot"), 5);
         assert_eq!(response_message_type_to_proto("unknown"), 0);
     }
 

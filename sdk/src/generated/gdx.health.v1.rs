@@ -70,22 +70,14 @@ pub struct SymbolCapacity {
     pub total_outstanding: u32,
     #[prost(uint32, tag = "8")]
     pub admit_headroom: u32,
+    /// Oracle freshness for this symbol (edge risk-increasing admission).
+    #[prost(bool, tag = "9")]
+    pub oracle_healthy: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CapacitySignal {
     #[prost(message, repeated, tag = "1")]
     pub symbols: ::prost::alloc::vec::Vec<SymbolCapacity>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ReplicationSignal {
-    #[prost(bool, tag = "1")]
-    pub standby_expected: bool,
-    #[prost(bool, tag = "2")]
-    pub standby_healthy: bool,
-    #[prost(uint64, tag = "3")]
-    pub replication_lag_sequences: u64,
-    #[prost(string, tag = "4")]
-    pub durable_mode: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HealthSignals {
@@ -103,8 +95,6 @@ pub struct HealthSignals {
     pub fleet: ::core::option::Option<FleetSignal>,
     #[prost(message, optional, tag = "7")]
     pub capacity: ::core::option::Option<CapacitySignal>,
-    #[prost(message, optional, tag = "8")]
-    pub replication: ::core::option::Option<ReplicationSignal>,
 }
 /// Unified health report published at /health and pushed over QUIC.
 #[derive(Clone, PartialEq, ::prost::Message)]

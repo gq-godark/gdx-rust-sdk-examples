@@ -1,4 +1,4 @@
-// GodarkClient — main entry point, mirrors Python SDK client.py
+//! `GodarkClient` — WebSocket trading client.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
@@ -14,24 +14,21 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::config::{self, GodarkConfig, GodarkConfigBuilder};
-use crate::enums::{
-    CancelReason, OrderStatus, OrderType, OrderUpdateType, PositionUpdateType, Side, TimeInForce,
-};
+use crate::enums::{CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce};
 use crate::error::GodarkError;
+use crate::generated::edge::v1 as edge;
+use crate::hpke::parse_pinned_static_public_key;
 use crate::proto_bridge::{self, EdgeMessage};
-use crate::session::{
-    build_initiator, parse_pinned_static_public_key, prologue_for_user, read_handshake,
-    write_handshake, CryptoSession,
-};
+use crate::session::CryptoSession;
 use crate::transport::{EdgeTransport, TransportEvent};
 use crate::types::{
-    BalanceUpdate, Confirmation, FundingRateUpdate, LeverageSettings, MarginAlert,
-    OpenOrdersSnapshot, OrderAck, OrderUpdate, PositionUpdate, PositionsSnapshot, ReconnectEvent,
-    SettlementUpdate, SystemHealthUpdate,
+    AccountMarginUpdate, BalanceUpdate, Confirmation, FundingRateUpdate, OrderAck, OrderUpdate,
+    PositionsSnapshot, ReconnectEvent, SystemHealthUpdate,
 };
+use crate::wire;
 
-const NOISE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const _MAX_BACKOFF: Duration = Duration::from_secs(15);
+const HPKE_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_BACKOFF: Duration = Duration::from_secs(15);
 struct PlaceOutcomeWaiter {
     token: u64,
     order_id: Option<String>,
@@ -52,37 +49,18 @@ pub struct GodarkClient {
     user_uuid: Arc<Mutex<Option<Uuid>>>,
     connected: Arc<AtomicBool>,
     desired_channels: Arc<Mutex<HashSet<String>>>,
-    #[allow(dead_code)]
     order_tx: mpsc::Sender<OrderUpdate>,
     order_rx: Option<mpsc::Receiver<OrderUpdate>>,
-    #[allow(dead_code)]
-    position_tx: mpsc::Sender<PositionUpdate>,
-    position_rx: Option<mpsc::Receiver<PositionUpdate>>,
-    #[allow(dead_code)]
     positions_snapshot_tx: mpsc::Sender<PositionsSnapshot>,
     positions_snapshot_rx: Option<mpsc::Receiver<PositionsSnapshot>>,
-    #[allow(dead_code)]
-    open_orders_snapshot_tx: mpsc::Sender<OpenOrdersSnapshot>,
-    open_orders_snapshot_rx: Option<mpsc::Receiver<OpenOrdersSnapshot>>,
-    #[allow(dead_code)]
     system_health_tx: mpsc::Sender<SystemHealthUpdate>,
     system_health_rx: Option<mpsc::Receiver<SystemHealthUpdate>>,
-    #[allow(dead_code)]
     balance_tx: mpsc::Sender<BalanceUpdate>,
     balance_rx: Option<mpsc::Receiver<BalanceUpdate>>,
-    #[allow(dead_code)]
-    margin_alert_tx: mpsc::Sender<MarginAlert>,
-    margin_alert_rx: Option<mpsc::Receiver<MarginAlert>>,
-    #[allow(dead_code)]
     funding_rate_tx: mpsc::Sender<FundingRateUpdate>,
     funding_rate_rx: Option<mpsc::Receiver<FundingRateUpdate>>,
-    #[allow(dead_code)]
-    settlement_tx: mpsc::Sender<SettlementUpdate>,
-    settlement_rx: Option<mpsc::Receiver<SettlementUpdate>>,
-    #[allow(dead_code)]
-    leverage_settings_tx: mpsc::Sender<LeverageSettings>,
-    leverage_settings_rx: Option<mpsc::Receiver<LeverageSettings>>,
-    #[allow(dead_code)]
+    account_margin_tx: mpsc::Sender<AccountMarginUpdate>,
+    account_margin_rx: Option<mpsc::Receiver<AccountMarginUpdate>>,
     error_tx: mpsc::Sender<GodarkError>,
     error_rx: Option<mpsc::Receiver<GodarkError>>,
     event_handle: Option<JoinHandle<()>>,
@@ -93,7 +71,7 @@ pub struct GodarkClient {
     place_outcomes: Arc<Mutex<PlaceOutcomeState>>,
     /// Correlation-keyed waiters for encrypted command acks (web parity).
     encrypted_ack_waiters: Arc<Mutex<HashMap<u128, oneshot::Sender<Value>>>>,
-    /// Serializes Noise encrypt + WS send so ciphertext nonces hit the wire
+    /// Serializes HPKE encrypt + WS send so ciphertext nonces hit the wire
     /// in order under concurrent place/cancel/modify.
     encrypted_send_lock: Arc<AsyncMutex<()>>,
 }
@@ -106,15 +84,11 @@ impl GodarkClient {
     pub fn new(config: GodarkConfig) -> Self {
         let ws_url = config::ws_url(&config.base_url);
         let (order_tx, order_rx) = mpsc::channel(256);
-        let (position_tx, position_rx) = mpsc::channel(256);
         let (positions_snapshot_tx, positions_snapshot_rx) = mpsc::channel(64);
-        let (open_orders_snapshot_tx, open_orders_snapshot_rx) = mpsc::channel(64);
         let (system_health_tx, system_health_rx) = mpsc::channel(64);
         let (balance_tx, balance_rx) = mpsc::channel(64);
-        let (margin_alert_tx, margin_alert_rx) = mpsc::channel(64);
         let (funding_rate_tx, funding_rate_rx) = mpsc::channel(64);
-        let (settlement_tx, settlement_rx) = mpsc::channel(64);
-        let (leverage_settings_tx, leverage_settings_rx) = mpsc::channel(64);
+        let (account_margin_tx, account_margin_rx) = mpsc::channel(64);
         let (error_tx, error_rx) = mpsc::channel(256);
         let (reconnect_tx, reconnect_rx) = mpsc::channel(256);
         Self {
@@ -128,24 +102,16 @@ impl GodarkClient {
             desired_channels: Arc::new(Mutex::new(HashSet::new())),
             order_tx,
             order_rx: Some(order_rx),
-            position_tx,
-            position_rx: Some(position_rx),
             positions_snapshot_tx,
             positions_snapshot_rx: Some(positions_snapshot_rx),
-            open_orders_snapshot_tx,
-            open_orders_snapshot_rx: Some(open_orders_snapshot_rx),
             system_health_tx,
             system_health_rx: Some(system_health_rx),
             balance_tx,
             balance_rx: Some(balance_rx),
-            margin_alert_tx,
-            margin_alert_rx: Some(margin_alert_rx),
             funding_rate_tx,
             funding_rate_rx: Some(funding_rate_rx),
-            settlement_tx,
-            settlement_rx: Some(settlement_rx),
-            leverage_settings_tx,
-            leverage_settings_rx: Some(leverage_settings_rx),
+            account_margin_tx,
+            account_margin_rx: Some(account_margin_rx),
             error_tx,
             error_rx: Some(error_rx),
             event_handle: None,
@@ -172,10 +138,6 @@ impl GodarkClient {
         self.order_rx.take()
     }
 
-    pub fn take_position_receiver(&mut self) -> Option<mpsc::Receiver<PositionUpdate>> {
-        self.position_rx.take()
-    }
-
     /// Receive full per-user [`PositionsSnapshot`] batches (initial / periodic /
     /// event-triggered) from the sequencer.
     pub fn take_positions_snapshot_receiver(
@@ -184,27 +146,14 @@ impl GodarkClient {
         self.positions_snapshot_rx.take()
     }
 
-    /// Receive encrypted `NodeResponse::OpenOrdersSnapshot` batches (subscribe /
-    /// UpdateLeverage refresh).
-    pub fn take_open_orders_snapshot_receiver(
-        &mut self,
-    ) -> Option<mpsc::Receiver<OpenOrdersSnapshot>> {
-        self.open_orders_snapshot_rx.take()
-    }
-
     /// Receive sequencer / MPC node health pulses.
     pub fn take_system_health_receiver(&mut self) -> Option<mpsc::Receiver<SystemHealthUpdate>> {
         self.system_health_rx.take()
     }
 
-    /// Receive shielded balance updates for the authenticated user.
+    /// Receive sequencer trading-collateral updates.
     pub fn take_balance_receiver(&mut self) -> Option<mpsc::Receiver<BalanceUpdate>> {
         self.balance_rx.take()
-    }
-
-    /// Receive margin tier transitions / recoveries.
-    pub fn take_margin_alert_receiver(&mut self) -> Option<mpsc::Receiver<MarginAlert>> {
-        self.margin_alert_rx.take()
     }
 
     /// Receive per-symbol funding rate ticks.
@@ -212,15 +161,9 @@ impl GodarkClient {
         self.funding_rate_rx.take()
     }
 
-    /// Receive settlement batch lifecycle updates.
-    pub fn take_settlement_receiver(&mut self) -> Option<mpsc::Receiver<SettlementUpdate>> {
-        self.settlement_rx.take()
-    }
-
-    /// Receive authoritative per-user leverage settings (initial positions
-    /// subscribe and after successful `update_leverage`).
-    pub fn take_leverage_settings_receiver(&mut self) -> Option<mpsc::Receiver<LeverageSettings>> {
-        self.leverage_settings_rx.take()
+    /// Receive account-level margin summaries.
+    pub fn take_account_margin_receiver(&mut self) -> Option<mpsc::Receiver<AccountMarginUpdate>> {
+        self.account_margin_rx.take()
     }
 
     /// Receive non-fatal background errors (rekey failures, push decrypt/parse failures).
@@ -289,7 +232,7 @@ impl GodarkClient {
     pub async fn logout(&mut self) -> Result<(), GodarkError> {
         self.intentional_close.store(true, Ordering::SeqCst);
         let result = async {
-            if self.connected.load(Ordering::SeqCst) && self.config.transport.use_docs_wire {
+            if self.connected.load(Ordering::SeqCst) {
                 let payload = serde_json::json!({
                     "id": Uuid::new_v4().to_string(),
                     "op": "logout",
@@ -471,36 +414,6 @@ impl GodarkClient {
             .await
     }
 
-    /// Set per-symbol account leverage (Noise XK WebSocket).
-    ///
-    /// Place / mass-quote inherit this setting server-side. Always uses the
-    /// legacy `encrypted_order` frame because the docs-wire op surface does not
-    /// include `update_leverage`.
-    pub async fn update_leverage(
-        &self,
-        symbol: &str,
-        leverage: u32,
-    ) -> Result<OrderAck, GodarkError> {
-        self.ensure_ready()?;
-        let symbol_id = self.resolve_symbol(symbol)?;
-        let lev = leverage.max(1);
-        let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
-        let plaintext =
-            proto_bridge::build_update_leverage_proto(uuid.as_bytes(), symbol_id, lev, &corr_id);
-        let response = self
-            .send_encrypted_command_ex(
-                "update_leverage",
-                symbol_id,
-                &plaintext,
-                &corr_id,
-                true,
-                Some(serde_json::json!({ "leverage": lev })),
-            )
-            .await?;
-        self.parse_order_response(&response)
-    }
-
     // ------------------------------------------------------------------
     // Mass quote / batch operations
     // ------------------------------------------------------------------
@@ -527,9 +440,8 @@ impl GodarkClient {
 
     /// Bulk cancel-replace (market-maker mass quote) on one symbol.
     ///
-    /// Up to 20 legs per batch, fused into one MPC round. Per-symbol leverage is
-    /// account state; set it with [`Self::update_leverage`] before
-    /// placing or mass-quoting. `post_only` selects the batch matching mode: `None` keeps the node default (post-only), where
+    /// Up to 20 legs per batch, fused into one MPC round. `post_only` selects
+    /// the batch matching mode: `None` keeps the node default (post-only), where
     /// a leg that would cross is rejected as `failed`; `Some(false)` enables the
     /// relaxed path, where a crossing leg takes liquidity up to its limit and
     /// rests the remainder (per-leg taker fills are surfaced as `fill_count`).
@@ -657,10 +569,6 @@ impl GodarkClient {
     }
 
     // ------------------------------------------------------------------
-    // Internals: ECDH session
-    // ------------------------------------------------------------------
-
-    // ------------------------------------------------------------------
     // Internals: encrypted order pipeline
     // ------------------------------------------------------------------
 
@@ -687,26 +595,6 @@ impl GodarkClient {
         plaintext: &[u8],
         correlation_id: &[u8],
     ) -> Result<Value, GodarkError> {
-        self.send_encrypted_command_ex(
-            request_type,
-            symbol_id,
-            plaintext,
-            correlation_id,
-            false,
-            None,
-        )
-        .await
-    }
-
-    async fn send_encrypted_command_ex(
-        &self,
-        request_type: &str,
-        symbol_id: u64,
-        plaintext: &[u8],
-        correlation_id: &[u8],
-        force_legacy: bool,
-        header_extra: Option<Value>,
-    ) -> Result<Value, GodarkError> {
         let body_length = CryptoSession::body_length_for_plaintext(plaintext.len())?;
         let uuid = self.current_user_uuid()?;
         let corr_u128 = if correlation_id.len() == 16 {
@@ -726,83 +614,46 @@ impl GodarkClient {
         let (tx, rx) = oneshot::channel();
 
         // Encrypt + register waiter + send under one lock so concurrent callers
-        // cannot interleave Noise send nonces on the wire.
+        // cannot interleave HPKE send nonces on the wire.
         {
             let _send_guard = self.encrypted_send_lock.lock().await;
-            let (actual_nonce, ciphertext) = {
+            let (actual_nonce, ciphertext, conn_id) = {
                 let mut session = self
                     .session
                     .lock()
                     .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?;
                 let nonce_counter = session.next_nonce();
-                let conn_id = session.conn_id().ok_or_else(|| {
-                    GodarkError::Session("Noise XK session not established".into())
-                })?;
+                let conn_id = session
+                    .conn_id()
+                    .ok_or_else(|| GodarkError::Session("HPKE session not established".into()))?;
 
                 let aad = proto_bridge::build_order_header_aad(
                     uuid.as_bytes(),
                     symbol_id,
                     request_type,
-                    nonce_counter as u64,
+                    nonce_counter,
                     body_length,
                     correlation_id,
                     conn_id,
                 );
 
-                session
-                    .encrypt_order(&aad, plaintext)
-                    .map_err(|e| GodarkError::Encryption(format!("Failed to encrypt order: {e}")))?
+                let (nonce, ct) = session.encrypt_order(&aad, plaintext).map_err(|e| {
+                    GodarkError::Encryption(format!("Failed to encrypt order: {e}"))
+                })?;
+                (nonce, ct, conn_id)
             };
 
-            let body_b64 = BASE64.encode(&ciphertext);
-            let corr_hex = format!("{corr_key:032x}");
-            let mut header_json = serde_json::json!({
-                "symbol_id": symbol_id,
-                "request_type": request_type,
-                "nonce": actual_nonce,
-                "body_length": body_length,
-                "correlation_id": corr_hex,
-            });
-            if let Some(extra) = header_extra {
-                if let (Some(obj), Some(extra_obj)) =
-                    (header_json.as_object_mut(), extra.as_object())
-                {
-                    for (k, v) in extra_obj {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-            let payload = if self.config.transport.use_docs_wire && !force_legacy {
-                let wire_op = match request_type {
-                    "place" => "order.place",
-                    "cancel" => "order.cancel",
-                    "modify" => "order.modify",
-                    "mass_quote" => "order.mass_quote",
-                    "batch_cancel" => "order.batch_cancel",
-                    "batch_modify" => "order.batch_modify",
-                    other => {
-                        return Err(GodarkError::Config(format!(
-                            "invalid encrypted request_type: {other}"
-                        )));
-                    }
-                };
-                serde_json::json!({
-                    "id": Uuid::new_v4().to_string(),
-                    "op": wire_op,
-                    "args": {
-                        "header": header_json,
-                        "ciphertext": body_b64,
-                    }
-                })
-            } else {
-                serde_json::json!({
-                    "type": "encrypted_order",
-                    "data": {
-                        "header": header_json,
-                        "encrypted_body": body_b64,
-                    }
-                })
+            let header = edge::OrderHeader {
+                user_uuid: uuid.as_bytes().to_vec(),
+                symbol_id,
+                request_type: crate::enums::request_type_to_proto(request_type),
+                nonce: actual_nonce,
+                body_length,
+                correlation_id: correlation_id.to_vec(),
+                conn_id,
             };
+            let frame =
+                wire::encode_encrypted_order(wire::encrypted_order_request(header, ciphertext));
 
             {
                 let mut waiters = self.encrypted_ack_waiters.lock().map_err(|_| {
@@ -811,7 +662,7 @@ impl GodarkClient {
                 waiters.insert(corr_key, tx);
             }
 
-            if let Err(err) = self.transport.lock().await.send_json(&payload).await {
+            if let Err(err) = self.transport.lock().await.send_binary(frame).await {
                 let _ = self
                     .encrypted_ack_waiters
                     .lock()
@@ -908,7 +759,7 @@ impl GodarkClient {
             let ct = BASE64
                 .decode(ct_b64)
                 .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
-            let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
             let user_uuid_bytes = self.current_user_uuid_bytes();
             let message_type = msg
                 .get("message_type")
@@ -923,7 +774,7 @@ impl GodarkClient {
                 &user_uuid_bytes,
                 message_type,
                 ct.len() as u32,
-                nonce as u64,
+                nonce,
                 fencing_epoch,
                 &response_correlation_id_bytes(msg),
                 json_u64(msg, "session_seq").unwrap_or_default(),
@@ -1012,7 +863,7 @@ impl GodarkClient {
         let ct = BASE64
             .decode(ct_b64)
             .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
-        let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
         let user_uuid_bytes = self.current_user_uuid_bytes();
         let message_type = msg
             .get("message_type")
@@ -1027,7 +878,7 @@ impl GodarkClient {
             &user_uuid_bytes,
             message_type,
             ct.len() as u32,
-            nonce as u64,
+            nonce,
             fencing_epoch,
             &response_correlation_id_bytes(msg),
             json_u64(msg, "session_seq").unwrap_or_default(),
@@ -1144,15 +995,11 @@ impl GodarkClient {
         let config = self.config.clone();
         let transport = Arc::clone(&self.transport);
         let order_tx = self.order_tx.clone();
-        let position_tx = self.position_tx.clone();
         let positions_snapshot_tx = self.positions_snapshot_tx.clone();
-        let open_orders_snapshot_tx = self.open_orders_snapshot_tx.clone();
         let system_health_tx = self.system_health_tx.clone();
         let balance_tx = self.balance_tx.clone();
-        let margin_alert_tx = self.margin_alert_tx.clone();
         let funding_rate_tx = self.funding_rate_tx.clone();
-        let settlement_tx = self.settlement_tx.clone();
-        let leverage_settings_tx = self.leverage_settings_tx.clone();
+        let account_margin_tx = self.account_margin_tx.clone();
         let error_tx = self.error_tx.clone();
         let session = Arc::clone(&self.session);
         let user_uuid = Arc::clone(&self.user_uuid);
@@ -1171,11 +1018,6 @@ impl GodarkClient {
                         if let Some(update) = parse_cleartext_order_update(&val) {
                             observe_place_order_update(&place_outcomes, &update);
                             let _ = order_tx.send(update).await;
-                        }
-                    }
-                    TransportEvent::PositionUpdate(val) => {
-                        if let Some(update) = parse_cleartext_position_update(&val) {
-                            let _ = position_tx.send(update).await;
                         }
                     }
                     TransportEvent::EncryptedPush(val) => {
@@ -1237,14 +1079,8 @@ impl GodarkClient {
                                             observe_place_order_update(&place_outcomes, &update);
                                             let _ = order_tx.send(update).await;
                                         }
-                                        DecodedPush::Position(update) => {
-                                            let _ = position_tx.send(update).await;
-                                        }
                                         DecodedPush::PositionsSnapshot(snap) => {
                                             let _ = positions_snapshot_tx.send(snap).await;
-                                        }
-                                        DecodedPush::OpenOrdersSnapshot(snap) => {
-                                            let _ = open_orders_snapshot_tx.send(snap).await;
                                         }
                                         DecodedPush::SystemHealth(health) => {
                                             let _ = system_health_tx.send(health).await;
@@ -1252,17 +1088,19 @@ impl GodarkClient {
                                         DecodedPush::Balance(b) => {
                                             let _ = balance_tx.send(b).await;
                                         }
-                                        DecodedPush::MarginAlert(a) => {
-                                            let _ = margin_alert_tx.send(a).await;
-                                        }
                                         DecodedPush::FundingRate(f) => {
                                             let _ = funding_rate_tx.send(f).await;
                                         }
-                                        DecodedPush::Settlement(s) => {
-                                            let _ = settlement_tx.send(s).await;
+                                        DecodedPush::AccountMargin(a) => {
+                                            let _ = account_margin_tx.send(a).await;
                                         }
-                                        DecodedPush::LeverageSettings(s) => {
-                                            let _ = leverage_settings_tx.send(s).await;
+                                        DecodedPush::BalanceAndPosition { balance, positions } => {
+                                            if let Some(b) = balance {
+                                                let _ = balance_tx.send(b).await;
+                                            }
+                                            if let Some(snap) = positions {
+                                                let _ = positions_snapshot_tx.send(snap).await;
+                                            }
                                         }
                                         DecodedPush::Ignored => {}
                                     }
@@ -1271,7 +1109,7 @@ impl GodarkClient {
                             Err(e) => {
                                 tracing::warn!("Encrypted push error: {e}");
                                 // Unblock a waiting command so callers fail fast instead of
-                                // hanging for the full command timeout after a Noise desync.
+                                // hanging for the full command timeout after a decrypt failure.
                                 if val
                                     .get("message_type")
                                     .and_then(|v| v.as_str())
@@ -1299,7 +1137,8 @@ impl GodarkClient {
                             }
                         }
                     }
-                    TransportEvent::RekeyRequired(_) => {
+                    TransportEvent::RekeyRequired(payload) => {
+                        tracing::debug!(?payload, "rekey required");
                         // Inflight encrypted commands cannot complete across rekey.
                         fail_encrypted_ack_waiters(
                             &encrypted_ack_waiters,
@@ -1309,8 +1148,12 @@ impl GodarkClient {
                         if let Some(uid) = current_uuid {
                             if let Err(err) = {
                                 let transport = transport.lock().await;
-                                setup_noise_session_with_transport(
-                                    &uid, &config, &transport, &session,
+                                setup_hpke_session_with_transport(
+                                    &uid,
+                                    session.lock().ok().and_then(|s| s.conn_id()).unwrap_or(0),
+                                    &config,
+                                    &transport,
+                                    &session,
                                 )
                                 .await
                             } {
@@ -1355,7 +1198,15 @@ impl GodarkClient {
                         }
                         break;
                     }
-                    TransportEvent::AuthResult(_) | TransportEvent::SessionEstablished(_) => {}
+                    TransportEvent::AuthResult(payload) => {
+                        tracing::debug!(?payload, "ignoring late auth_result");
+                    }
+                    TransportEvent::HpkeSetupReply {
+                        conn_id,
+                        established,
+                    } => {
+                        tracing::debug!(conn_id, established, "hpke setup reply already applied");
+                    }
                 }
             }
         }));
@@ -1383,9 +1234,7 @@ impl GodarkClient {
             .lock()
             .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?;
         if !session.is_established() {
-            return Err(GodarkError::Session(
-                "Noise XK session not established".into(),
-            ));
+            return Err(GodarkError::Session("HPKE session not established".into()));
         }
         Ok(())
     }
@@ -1459,7 +1308,15 @@ async fn establish_transport_connection(
         *guard = Some(uid);
     }
 
-    if let Err(err) = setup_noise_session_with_transport(&uid, config, &transport, session).await {
+    if let Err(err) = setup_hpke_session_with_transport(
+        &uid,
+        parse_conn_id_from_auth(&auth_result)?,
+        config,
+        &transport,
+        session,
+    )
+    .await
+    {
         transport.disconnect().await;
         if let Ok(mut guard) = user_uuid_slot.lock() {
             *guard = None;
@@ -1472,108 +1329,44 @@ async fn establish_transport_connection(
         .ok_or_else(|| GodarkError::Session("No event receiver after connect".into()))
 }
 
-async fn setup_noise_session_with_transport(
+async fn setup_hpke_session_with_transport(
     user_uuid: &Uuid,
+    conn_id: u64,
     config: &GodarkConfig,
     transport: &EdgeTransport,
     session: &Arc<Mutex<CryptoSession>>,
 ) -> Result<(), GodarkError> {
-    let pin_hex = config.noise_static_public_key_hex.as_deref().ok_or_else(|| {
+    let pin_hex = config.hpke_static_public_key_hex.as_deref().ok_or_else(|| {
         GodarkError::Config(
-            "Noise static public key unset; pass .noise_static_public_key_hex() or set GODARK_NOISE_STATIC_PUBLIC_KEY".into(),
+            "HPKE static public key unset; pass .hpke_static_public_key_hex() or set GDX_HPKE_STATIC_PUBLIC_KEY".into(),
         )
     })?;
     let remote_static = parse_pinned_static_public_key(pin_hex)?;
-    let mut initiator = build_initiator(&remote_static, &prologue_for_user(user_uuid))?;
-
-    let send_handshake = |message: Vec<u8>| async move {
-        let message = BASE64.encode(message);
-        let payload = if transport.use_docs_wire() {
-            serde_json::json!({
-                "id": Uuid::new_v4().to_string(),
-                "op": "noise.handshake",
-                "args": { "message": message },
-            })
-        } else {
-            serde_json::json!({
-                "type": "noise_handshake",
-                "data": { "message": message },
-            })
-        };
-        tokio::time::timeout(NOISE_HANDSHAKE_TIMEOUT, transport.send_command(&payload))
-            .await
-            .map_err(|_| GodarkError::Session("Noise handshake timed out".into()))?
+    let encapped = {
+        let mut sess = session
+            .lock()
+            .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?;
+        sess.setup(&remote_static, *user_uuid, conn_id)?
     };
-
-    let reply1 = send_handshake(write_handshake(&mut initiator)?).await?;
-    ensure_noise_reply(&reply1, false)?;
-    let conn_id = noise_reply_conn_id(&reply1)?;
-    let msg2 = decode_noise_reply_message(&reply1)?;
-    read_handshake(&mut initiator, &msg2)?;
-
-    let reply2 = send_handshake(write_handshake(&mut initiator)?).await?;
-    ensure_noise_reply(&reply2, true)?;
-    if noise_reply_conn_id(&reply2)? != conn_id {
-        return Err(GodarkError::Session(
-            "noise_handshake_reply conn_id changed during handshake".into(),
-        ));
+    let frame = wire::encode_hpke_setup(user_uuid.as_bytes(), conn_id, &encapped);
+    let reply = tokio::time::timeout(HPKE_SETUP_TIMEOUT, transport.send_hpke_setup(frame))
+        .await
+        .map_err(|_| GodarkError::Session("HPKE setup timed out".into()))??;
+    if reply.get("established").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(GodarkError::Session("HPKE setup not established".into()));
     }
-    let transport_state = initiator
-        .into_transport_mode()
-        .map_err(|e| GodarkError::Session(format!("Noise transport: {e}")))?;
-    session
-        .lock()
-        .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?
-        .establish(transport_state, conn_id)?;
-    tracing::info!("Noise XK session established (conn_id={conn_id})");
+    tracing::info!("HPKE session established (conn_id={conn_id})");
     Ok(())
 }
 
-fn noise_reply_conn_id(reply: &Value) -> Result<u64, GodarkError> {
-    reply
-        .get("conn_id")
+fn parse_conn_id_from_auth(msg: &Value) -> Result<u64, GodarkError> {
+    msg.get("conn_id")
         .and_then(|v| {
             v.as_u64()
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         })
         .filter(|id| *id != 0)
-        .ok_or_else(|| GodarkError::Session("noise_handshake_reply missing valid conn_id".into()))
-}
-
-fn decode_noise_reply_message(reply: &Value) -> Result<Vec<u8>, GodarkError> {
-    let message = reply
-        .get("message")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| GodarkError::Session("noise_handshake_reply missing message".into()))?;
-    BASE64
-        .decode(message)
-        .map_err(|e| GodarkError::Session(format!("invalid Noise handshake message: {e}")))
-}
-
-fn ensure_noise_reply(reply: &Value, expected_established: bool) -> Result<(), GodarkError> {
-    if reply.get("type").and_then(|v| v.as_str()) == Some("error") {
-        let message = reply
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("noise handshake failed");
-        return Err(GodarkError::Session(message.into()));
-    }
-    if reply.get("type").and_then(|v| v.as_str()) != Some("noise_handshake_reply") {
-        return Err(GodarkError::Session(
-            "invalid Noise handshake response".into(),
-        ));
-    }
-    if reply.get("established").and_then(|v| v.as_bool()) != Some(expected_established) {
-        return Err(GodarkError::Session(
-            if expected_established {
-                "noise_handshake_reply expected established after message 3"
-            } else {
-                "noise_handshake_reply unexpectedly established after message 1"
-            }
-            .into(),
-        ));
-    }
-    Ok(())
+        .ok_or_else(|| GodarkError::Session("login response missing conn_id".into()))
 }
 
 async fn resubscribe_desired_channels(
@@ -1598,7 +1391,7 @@ async fn resubscribe_desired_channels(
 }
 
 fn reconnect_backoff_delay(attempt: u32) -> Duration {
-    let secs = (1u64 << attempt.min(4)).min(_MAX_BACKOFF.as_secs());
+    let secs = (1u64 << attempt.min(4)).min(MAX_BACKOFF.as_secs());
     Duration::from_secs(secs.max(1))
 }
 
@@ -1677,17 +1470,15 @@ async fn reconnect_transport(
 
 enum DecodedPush {
     Order(OrderUpdate),
-    Position(PositionUpdate),
     PositionsSnapshot(PositionsSnapshot),
-    OpenOrdersSnapshot(OpenOrdersSnapshot),
     SystemHealth(SystemHealthUpdate),
     Balance(BalanceUpdate),
-    MarginAlert(MarginAlert),
     FundingRate(FundingRateUpdate),
-    Settlement(SettlementUpdate),
-    LeverageSettings(LeverageSettings),
-    /// Recognized-but-unhandled push (e.g. a future variant we don't decode);
-    /// silently dropped instead of being flagged as an error.
+    AccountMargin(AccountMarginUpdate),
+    BalanceAndPosition {
+        balance: Option<BalanceUpdate>,
+        positions: Option<PositionsSnapshot>,
+    },
     Ignored,
 }
 
@@ -1703,8 +1494,8 @@ fn decrypt_push_plaintext(
     let ct = BASE64
         .decode(ct_b64)
         .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
-    let nonce = json_u64(msg, "nonce")
-        .ok_or_else(|| GodarkError::Encryption("missing nonce".into()))? as u32;
+    let nonce =
+        json_u64(msg, "nonce").ok_or_else(|| GodarkError::Encryption("missing nonce".into()))?;
     let user_uuid_bytes = user_uuid_slot
         .lock()
         .ok()
@@ -1730,7 +1521,7 @@ fn decrypt_push_plaintext(
         &user_uuid_bytes,
         message_type,
         ct.len() as u32,
-        nonce as u64,
+        nonce,
         fencing_epoch,
         &corr_bytes,
         session_seq,
@@ -1749,22 +1540,16 @@ fn decode_decrypted_push(message_type: &str, plaintext: &[u8]) -> Result<Decoded
         return Ok(DecodedPush::Ignored);
     }
 
-    if message_type == "open_orders_snapshot" {
-        return proto_bridge::parse_open_orders_snapshot(plaintext)
-            .map(DecodedPush::OpenOrdersSnapshot);
-    }
-
     match proto_bridge::parse_sequencer_to_edge_message(plaintext)? {
         EdgeMessage::OrderUpdate(update) => Ok(DecodedPush::Order(update)),
-        EdgeMessage::PositionUpdate(update) => Ok(DecodedPush::Position(update)),
         EdgeMessage::PositionsSnapshot(snap) => Ok(DecodedPush::PositionsSnapshot(snap)),
         EdgeMessage::SystemHealth(h) => Ok(DecodedPush::SystemHealth(h)),
         EdgeMessage::BalanceUpdate(b) => Ok(DecodedPush::Balance(b)),
-        EdgeMessage::MarginAlert(a) => Ok(DecodedPush::MarginAlert(a)),
         EdgeMessage::FundingRateUpdate(f) => Ok(DecodedPush::FundingRate(f)),
-        EdgeMessage::SettlementUpdate(s) => Ok(DecodedPush::Settlement(s)),
-        EdgeMessage::LeverageSettings(s) => Ok(DecodedPush::LeverageSettings(s)),
-        EdgeMessage::AccountMarginUpdate(_) => Ok(DecodedPush::Ignored),
+        EdgeMessage::AccountMarginUpdate(a) => Ok(DecodedPush::AccountMargin(a)),
+        EdgeMessage::BalanceAndPosition { balance, positions } => {
+            Ok(DecodedPush::BalanceAndPosition { balance, positions })
+        }
         EdgeMessage::Unknown => Ok(DecodedPush::Ignored),
     }
 }
@@ -1873,26 +1658,6 @@ fn parse_cleartext_order_update(msg: &Value) -> Option<OrderUpdate> {
     })
 }
 
-fn parse_cleartext_position_update(msg: &Value) -> Option<PositionUpdate> {
-    Some(PositionUpdate {
-        user_uuid: json_uuid(msg),
-        symbol_id: json_u64(msg, "symbol_id").unwrap_or_default(),
-        side: parse_side(msg.get("side").and_then(Value::as_str).unwrap_or("BUY")),
-        update_type: parse_position_update_type(
-            msg.get("update_type")
-                .and_then(Value::as_str)
-                .unwrap_or("SNAPSHOT"),
-        ),
-        size: json_string(msg, "size", "0"),
-        entry_price: json_string(msg, "entry_price", "0"),
-        previous_size: json_string(msg, "previous_size", "0"),
-        fill_price: json_string(msg, "fill_price", "0"),
-        fill_qty: json_string(msg, "fill_qty", "0"),
-        correlation_id: json_u128(msg, "correlation_id").unwrap_or_default(),
-        timestamp: json_u64(msg, "timestamp").unwrap_or_default(),
-    })
-}
-
 /// Parse UUID from auth_result JSON — tries `user_uuid` (string) first, falls back to `user_id`.
 fn parse_user_uuid_from_auth(msg: &Value) -> Result<Uuid, GodarkError> {
     if let Some(s) = msg.get("user_uuid").and_then(|v| v.as_str()) {
@@ -1908,21 +1673,6 @@ fn parse_user_uuid_from_auth(msg: &Value) -> Result<Uuid, GodarkError> {
     Err(GodarkError::Authentication(
         "authentication succeeded but user_uuid missing".into(),
     ))
-}
-
-/// Extract user UUID bytes from a push JSON message for AAD construction.
-#[allow(dead_code)]
-fn parse_user_uuid_bytes(msg: &Value) -> Vec<u8> {
-    if let Some(s) = msg
-        .get("user_uuid")
-        .or_else(|| msg.get("user_id"))
-        .and_then(|v| v.as_str())
-    {
-        if let Ok(u) = Uuid::parse_str(s) {
-            return u.as_bytes().to_vec();
-        }
-    }
-    vec![0u8; 16]
 }
 
 /// Parse a UUID from the `user_uuid` or `user_id` JSON field.
@@ -2007,17 +1757,6 @@ fn parse_order_update_type(raw: &str) -> OrderUpdateType {
         "CANCEL_REJECTED" => OrderUpdateType::CancelRejected,
         "MODIFY_REJECTED" => OrderUpdateType::ModifyRejected,
         _ => OrderUpdateType::Open,
-    }
-}
-
-fn parse_position_update_type(raw: &str) -> PositionUpdateType {
-    match raw {
-        "OPEN" => PositionUpdateType::Open,
-        "INCREASE" => PositionUpdateType::Increase,
-        "DECREASE" => PositionUpdateType::Decrease,
-        "CLOSE" => PositionUpdateType::Close,
-        "FUNDING_APPLIED" => PositionUpdateType::FundingApplied,
-        _ => PositionUpdateType::Snapshot,
     }
 }
 
@@ -2269,10 +2008,10 @@ mod tests {
     }
 
     #[test]
-    fn test_take_position_receiver() {
+    fn test_take_positions_snapshot_receiver() {
         let mut client = GodarkClient::new(test_config());
-        assert!(client.take_position_receiver().is_some());
-        assert!(client.take_position_receiver().is_none());
+        assert!(client.take_positions_snapshot_receiver().is_some());
+        assert!(client.take_positions_snapshot_receiver().is_none());
     }
 
     #[tokio::test]
@@ -2363,47 +2102,6 @@ mod tests {
         assert_eq!(update.cancel_reason, Some(CancelReason::UserRequested));
         assert_eq!(update.correlation_id, 99);
         assert_eq!(update.timestamp, 123);
-    }
-
-    #[tokio::test]
-    async fn test_start_event_loop_routes_position_updates() {
-        let mut client = GodarkClient::new(test_config());
-        let mut position_rx = client.take_position_receiver().expect("position receiver");
-        let (event_tx, event_rx) = mpsc::channel(8);
-
-        client.start_event_loop(event_rx);
-        event_tx
-            .send(TransportEvent::PositionUpdate(json!({
-                "type": "position_update",
-                "user_uuid": "00000000-0000-0000-0000-000000000007",
-                "symbol_id": 1,
-                "side": "BUY",
-                "update_type": "INCREASE",
-                "size": "2",
-                "entry_price": "100",
-                "previous_size": "1",
-                "fill_price": "101",
-                "fill_qty": "1",
-                "correlation_id": "1234",
-                "timestamp": 456
-            })))
-            .await
-            .expect("send event");
-
-        let update = tokio::time::timeout(Duration::from_millis(100), position_rx.recv())
-            .await
-            .expect("receive timeout")
-            .expect("position update");
-
-        assert_eq!(
-            update.user_uuid,
-            Uuid::parse_str("00000000-0000-0000-0000-000000000007").unwrap()
-        );
-        assert_eq!(update.symbol_id, 1);
-        assert_eq!(update.side, Side::Buy);
-        assert_eq!(update.update_type, PositionUpdateType::Increase);
-        assert_eq!(update.correlation_id, 1234);
-        assert_eq!(update.timestamp, 456);
     }
 
     #[tokio::test]

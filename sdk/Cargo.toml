@@ -34,14 +34,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 base64 = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 
-# Crypto (versions match gdx-core; x25519-dalek v1 had RUSTSEC-2021-0121)
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+# Crypto — HPKE Base (RFC 9180) matching gdx-crypto
+hpke = { version = "0.14", default-features = false, features = ["alloc", "getrandom", "x25519", "aes"] }
 aes-gcm = { version = "0.10", features = ["std"] }
-hkdf = "0.12"
-sha2 = "0.10"
-snow = "0.10"
 zeroize = { version = "1", features = ["derive"] }
-rand = "0.9"
+hex = "0.4"
 
 # Observability + errors
 tracing = "0.1"
