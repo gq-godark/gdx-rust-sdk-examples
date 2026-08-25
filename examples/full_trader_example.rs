@@ -2,7 +2,7 @@
 //!
 //! Demonstrates:
 //!   1. Load credentials from `.env` / environment
-//!   2. Connect and authenticate (Noise XK encrypted WebSocket session)
+//!   2. Connect and authenticate (HPKE WebSocket session)
 //!   3. Take receivers for order, position, and all 6 sequencer push streams
 //!   4. Subscribe to the private order + position channels
 //!   5. Place, modify, and cancel `MARKET` / `LIMIT` orders
@@ -133,7 +133,7 @@ async fn main() {
         .user_uuid()
         .map(|u| u.to_string())
         .unwrap_or_default();
-    println!("Authenticated as user_uuid={user}  (Noise XK session)");
+    println!("Authenticated as user_uuid={user}  (HPKE session)");
 
     if let Err(e) = client.subscribe(&["orders", "positions"]).await {
         eprintln!("Subscribe failed: {e}");

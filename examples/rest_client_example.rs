@@ -1,7 +1,7 @@
 //! Minimal GodarkRestClient demo — auth + account reads + public market data.
 //!
 //! Encrypted place/cancel/modify/update_leverage require GodarkClient (WebSocket /
-//! Noise XK); see `quickstart` / `full_trader_example`.
+//! HPKE); see `quickstart` / `full_trader_example`.
 //!
 //! ```text
 //! cargo run --release --example rest_client_example
@@ -85,7 +85,7 @@ async fn main() -> Result<(), GodarkError> {
     }
 
     println!("REST reads succeeded.");
-    println!("Encrypted trading requires GodarkClient over WebSocket (Noise XK).");
+    println!("Encrypted trading requires GodarkClient over WebSocket (HPKE).");
     client.disconnect().await?;
     Ok(())
 }
