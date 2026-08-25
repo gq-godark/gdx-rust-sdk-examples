@@ -20,6 +20,12 @@ mod dotenv;
 
 const SYMBOL: &str = "BTC-USDC-PERP";
 
+fn live_mark_price() -> f64 {
+    dotenv::env_first(&["GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE"])
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(79_000.0)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), GodarkError> {
     dotenv::load_dotenv();
@@ -55,13 +61,15 @@ async fn main() -> Result<(), GodarkError> {
     // Book confirmation waits on private order updates; subscribe first.
     client.subscribe(&["orders"]).await?;
 
+    let mark = live_mark_price();
+    let sell_px = (mark * 1.03 * 10.0).round() / 10.0;
     match client
         .place_order(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
             0.01,
-            Some(69515.2),
+            Some(sell_px),
             TimeInForce::Gtc,
             false,
             None,
@@ -70,13 +78,20 @@ async fn main() -> Result<(), GodarkError> {
         .await
     {
         Ok(ack) => {
-            println!("Place OK -- order_id={}", ack.order_id);
+            println!(
+                "Place OK -- order_id={} (limit SELL @ {sell_px}, mark={mark})",
+                ack.order_id
+            );
             // Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let cancel = client.cancel_order(&ack.order_id, SYMBOL).await?;
             println!("Cancel OK -- order_id={}", cancel.order_id);
         }
-        Err(e) => dotenv::print_order_error("Order rejected", &e),
+        Err(e) => {
+            dotenv::print_order_error("Order rejected", &e);
+            client.disconnect().await;
+            return Err(e);
+        }
     }
 
     client.disconnect().await;
