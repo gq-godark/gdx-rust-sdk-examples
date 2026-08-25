@@ -88,8 +88,10 @@ pub fn encrypted_push_to_json(push: &edge::EncryptedEdgeResponse) -> Option<serd
 }
 
 pub fn decode_binary_frame(bytes: &[u8]) -> Result<DecodedBinary, GodarkError> {
-    let frame = edge::TradingWsBinaryFrame::decode(bytes)
-        .map_err(|e| GodarkError::Connection(format!("binary frame: {e}")))?;
+    let frame = match edge::TradingWsBinaryFrame::decode(bytes) {
+        Ok(frame) => frame,
+        Err(_) => return Ok(DecodedBinary::Ignored),
+    };
     Ok(match frame.body {
         Some(edge::trading_ws_binary_frame::Body::EncryptedPush(push)) => {
             DecodedBinary::EncryptedPush(push)

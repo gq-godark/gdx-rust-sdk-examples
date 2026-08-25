@@ -917,7 +917,24 @@ impl GodarkClient {
         msg: &Value,
     ) -> Result<crate::types::BatchModifyAck, GodarkError> {
         let plaintext = self.decrypt_command_plaintext(msg, "batch_modify_ack")?;
-        proto_bridge::parse_batch_modify_ack(&plaintext)
+        match proto_bridge::parse_batch_modify_ack(&plaintext) {
+            Ok(ack) => Ok(ack),
+            Err(first) => {
+                if let Ok(proto_bridge::NodeResponseKind::Ack {
+                    success: false,
+                    error_code,
+                    reject_text,
+                    ..
+                }) = proto_bridge::parse_node_response(&plaintext)
+                {
+                    return Err(crate::order_error_code::make_order_error_from_code(
+                        error_code,
+                        reject_text.as_deref(),
+                    ));
+                }
+                Err(first)
+            }
+        }
     }
 
     fn register_place_outcome_waiter(
@@ -1349,11 +1366,44 @@ async fn setup_hpke_session_with_transport(
         sess.setup(&remote_static, *user_uuid, conn_id)?
     };
     let frame = wire::encode_hpke_setup(user_uuid.as_bytes(), conn_id, &encapped);
-    let reply = tokio::time::timeout(HPKE_SETUP_TIMEOUT, transport.send_hpke_setup(frame))
-        .await
-        .map_err(|_| GodarkError::Session("HPKE setup timed out".into()))??;
+    let reply = match tokio::time::timeout(HPKE_SETUP_TIMEOUT, transport.send_hpke_setup(frame)).await {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(err)) => {
+            if let Ok(mut sess) = session.lock() {
+                sess.abort_setup();
+            }
+            return Err(err);
+        }
+        Err(_) => {
+            if let Ok(mut sess) = session.lock() {
+                sess.abort_setup();
+            }
+            return Err(GodarkError::Session("HPKE setup timed out".into()));
+        }
+    };
+    let reply_conn_id = reply
+        .get("conn_id")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(0);
+    if reply_conn_id != conn_id {
+        if let Ok(mut sess) = session.lock() {
+            sess.abort_setup();
+        }
+        return Err(GodarkError::Session(format!(
+            "HPKE setup conn_id mismatch: expected {conn_id}, got {reply_conn_id}"
+        )));
+    }
     if reply.get("established").and_then(|v| v.as_bool()) != Some(true) {
+        if let Ok(mut sess) = session.lock() {
+            sess.abort_setup();
+        }
         return Err(GodarkError::Session("HPKE setup not established".into()));
+    }
+    {
+        let mut sess = session
+            .lock()
+            .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?;
+        sess.establish()?;
     }
     tracing::info!("HPKE session established (conn_id={conn_id})");
     Ok(())

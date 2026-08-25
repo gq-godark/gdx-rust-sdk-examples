@@ -1,5 +1,7 @@
 //! Per-connection HPKE sealed session.
 
+use std::collections::HashSet;
+
 use uuid::Uuid;
 
 use crate::error::GodarkError;
@@ -7,16 +9,22 @@ use crate::hpke::{self, SealedSession, TAG_LEN};
 
 pub struct CryptoSession {
     sealed: Option<SealedSession>,
+    pending_sealed: Option<SealedSession>,
+    pending_conn_id: u64,
     send_counter: u64,
     conn_id: u64,
+    seen_recv_nonces: HashSet<u64>,
 }
 
 impl CryptoSession {
     pub fn new() -> Self {
         Self {
             sealed: None,
-            send_counter: 0,
+            pending_sealed: None,
+            pending_conn_id: 0,
+            send_counter: 1,
             conn_id: 0,
+            seen_recv_nonces: HashSet::new(),
         }
     }
 
@@ -38,6 +46,9 @@ impl CryptoSession {
     }
 
     /// HPKE Base setup against the pinned sequencer public key.
+    ///
+    /// Returns the encapped key for ``hpke_setup``; the session is not
+    /// established until [`Self::establish`] confirms the peer reply.
     pub fn setup(
         &mut self,
         recipient_public: &[u8; 32],
@@ -49,10 +60,29 @@ impl CryptoSession {
         }
         let info = hpke::info_for_conn(user_uuid, conn_id);
         let (encapped, sealed) = hpke::setup_session(recipient_public, &info)?;
-        self.sealed = Some(sealed);
-        self.send_counter = 0;
-        self.conn_id = conn_id;
+        self.pending_sealed = Some(sealed);
+        self.pending_conn_id = conn_id;
         Ok(encapped)
+    }
+
+    /// Commit a pending HPKE setup after the sequencer confirms.
+    pub fn establish(&mut self) -> Result<(), GodarkError> {
+        let sealed = self
+            .pending_sealed
+            .take()
+            .ok_or_else(|| GodarkError::Session("HPKE setup not pending peer confirmation".into()))?;
+        self.sealed = Some(sealed);
+        self.conn_id = self.pending_conn_id;
+        self.pending_conn_id = 0;
+        self.send_counter = 1;
+        self.seen_recv_nonces.clear();
+        Ok(())
+    }
+
+    /// Discard a pending HPKE setup (timeout, rejection, or mismatch).
+    pub fn abort_setup(&mut self) {
+        self.pending_sealed = None;
+        self.pending_conn_id = 0;
     }
 
     /// One-shot REST HPKE (conn_id is 0 on the order header).
@@ -84,7 +114,7 @@ impl CryptoSession {
     }
 
     pub fn decrypt_push(
-        &self,
+        &mut self,
         nonce: u64,
         aad: &[u8],
         ciphertext: &[u8],
@@ -93,13 +123,23 @@ impl CryptoSession {
             .sealed
             .as_ref()
             .ok_or_else(|| GodarkError::Session("HPKE session not established".into()))?;
-        sealed.open_s2c(&hpke::nonce_from_u64(nonce), aad, ciphertext)
+        if self.seen_recv_nonces.contains(&nonce) {
+            return Err(GodarkError::Encryption(format!(
+                "replay detected: push nonce {nonce} already seen"
+            )));
+        }
+        let pt = sealed.open_s2c(&hpke::nonce_from_u64(nonce), aad, ciphertext)?;
+        self.seen_recv_nonces.insert(nonce);
+        Ok(pt)
     }
 
     pub fn reset(&mut self) {
         self.sealed = None;
-        self.send_counter = 0;
+        self.pending_sealed = None;
+        self.pending_conn_id = 0;
+        self.send_counter = 1;
         self.conn_id = 0;
+        self.seen_recv_nonces.clear();
     }
 }
 
@@ -120,11 +160,13 @@ mod tests {
         let user = Uuid::from_u128(1);
         let mut client = CryptoSession::new();
         let enc = client.setup(seq.public_key(), user, 9).unwrap();
+        assert!(!client.is_established());
+        client.establish().unwrap();
         let server = hpke::open_session(&seq, &enc, &hpke::info_for_conn(user, 9)).unwrap();
 
         let aad = b"order-header";
         let (nonce, ct) = client.encrypt_order(aad, b"place").unwrap();
-        assert_eq!(nonce, 0);
+        assert_eq!(nonce, 1);
         assert_eq!(
             server
                 .open_c2s(&hpke::nonce_from_u64(nonce), aad, &ct)

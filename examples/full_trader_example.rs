@@ -46,36 +46,7 @@ async fn main() {
     println!("{sep}");
     println!("Order-type support in this distribution: MARKET, LIMIT");
 
-    let api_key_id = match dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]) {
-        Some(v) => v,
-        None => {
-            eprintln!(
-                "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
-                 (or provide them in .env)."
-            );
-            std::process::exit(1);
-        }
-    };
-    let api_secret = match dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]) {
-        Some(v) => v,
-        None => {
-            eprintln!(
-                "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
-                 (or provide them in .env)."
-            );
-            std::process::exit(1);
-        }
-    };
-    let passphrase = match dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]) {
-        Some(v) => v,
-        None => {
-            eprintln!(
-                "Missing credentials. Set GODARK_PASSPHRASE \
-                 (or provide it in .env)."
-            );
-            std::process::exit(1);
-        }
-    };
+    let legacy_key = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]);
     let edge_override = dotenv::env_first(&["GODARK_EDGE_URL", "GDX_EDGE_URL"]);
     println!(
         "Endpoint: {}",
@@ -97,10 +68,39 @@ async fn main() {
 
     let mut builder = GodarkClient::builder()
         .environment(Environment::Testnet)
-        .api_key_id(api_key_id)
-        .api_secret(api_secret)
-        .passphrase(passphrase)
         .transport(transport);
+    if let Some(legacy) = legacy_key {
+        builder = builder.api_key(legacy);
+        if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
+            builder = builder.user_uuid(uid);
+        }
+    } else {
+        let Some(api_key_id) = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]) else {
+            eprintln!(
+                "Missing credentials. Set GODARK_API_KEY_ID/GODARK_API_SECRET/GODARK_PASSPHRASE \
+                 or legacy GODARK_API_KEY for localnet."
+            );
+            std::process::exit(1);
+        };
+        let Some(api_secret) = dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]) else {
+            eprintln!(
+                "Missing credentials. Set GODARK_API_KEY_ID/GODARK_API_SECRET/GODARK_PASSPHRASE \
+                 or legacy GODARK_API_KEY for localnet."
+            );
+            std::process::exit(1);
+        };
+        let Some(passphrase) = dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]) else {
+            eprintln!(
+                "Missing credentials. Set GODARK_PASSPHRASE \
+                 or legacy GODARK_API_KEY for localnet."
+            );
+            std::process::exit(1);
+        };
+        builder = builder
+            .api_key_id(api_key_id)
+            .api_secret(api_secret)
+            .passphrase(passphrase);
+    }
     if let Some(base_url) = edge_override.as_deref() {
         builder = builder.base_url(base_url);
     }
@@ -179,10 +179,18 @@ async fn main() {
 
     println!("Setting leverage to 1 via GodarkRestClient.update_leverage...");
     {
-        let mut rest_builder = GodarkRestClient::builder()
-            .api_key_id(dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).unwrap())
-            .api_secret(dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).unwrap())
-            .passphrase(dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).unwrap());
+        let mut rest_builder = GodarkRestClient::builder();
+        if let Some(legacy) = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]) {
+            rest_builder = rest_builder.api_key(legacy);
+            if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
+                rest_builder = rest_builder.user_uuid(uid);
+            }
+        } else {
+            rest_builder = rest_builder
+                .api_key_id(dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).unwrap())
+                .api_secret(dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).unwrap())
+                .passphrase(dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).unwrap());
+        }
         if let Some(base) = edge_override.as_deref() {
             let rest = base
                 .replace("wss://", "https://")

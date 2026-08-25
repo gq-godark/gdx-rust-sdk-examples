@@ -10,7 +10,6 @@ mod error;
 mod generated;
 mod hpke;
 mod instruments;
-mod market_data;
 mod order_error_code;
 mod proto_bridge;
 mod rest_client;

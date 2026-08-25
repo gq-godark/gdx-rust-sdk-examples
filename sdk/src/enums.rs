@@ -211,6 +211,9 @@ pub(crate) fn request_type_to_proto(s: &str) -> i32 {
         "update_margin_mode" => 13,
         "get_positions" => 14,
         "get_account" => 15,
+        "cancel_all" => 16,
+        "close_all" => 17,
+        "reverse" => 18,
         _ => 0,
     }
 }
@@ -232,6 +235,9 @@ pub(crate) fn response_message_type_to_proto(s: &str) -> i32 {
         "batch_modify_ack" => 10,
         "tpsl_update" => 11,
         "leverage_settings" => 12,
+        "cancel_all_ack" => 13,
+        "close_all_ack" => 14,
+        "reverse_ack" => 15,
         _ => 0,
     }
 }

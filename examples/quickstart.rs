@@ -30,22 +30,26 @@ fn live_mark_price() -> f64 {
 async fn main() -> Result<(), GodarkError> {
     dotenv::load_dotenv();
 
-    let api_key_id = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).ok_or_else(|| {
-        GodarkError::Config("Set GODARK_API_KEY_ID in your environment or .env file".into())
-    })?;
-    let api_secret = dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).ok_or_else(|| {
-        GodarkError::Config("Set GODARK_API_SECRET in your environment or .env file".into())
-    })?;
-    let passphrase = dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).ok_or_else(|| {
-        GodarkError::Config("Set GODARK_PASSPHRASE in your environment or .env file".into())
-    })?;
-    let mut builder = GodarkClient::builder()
-        .environment(Environment::Testnet)
-        .api_key_id(api_key_id)
-        .api_secret(api_secret)
-        .passphrase(passphrase);
+    let mut builder = GodarkClient::builder().environment(Environment::Testnet);
     if let Some(base_url) = dotenv::env_first(&["GODARK_EDGE_URL", "GDX_EDGE_URL"]) {
         builder = builder.base_url(base_url);
+    }
+    if let Some(legacy) = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]) {
+        builder = builder.api_key(legacy);
+        if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
+            builder = builder.user_uuid(uid);
+        }
+    } else {
+        let api_key_id = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).ok_or_else(|| {
+            GodarkError::Config("Set GODARK_API_KEY_ID or legacy GODARK_API_KEY".into())
+        })?;
+        let api_secret = dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).ok_or_else(|| {
+            GodarkError::Config("Set GODARK_API_SECRET or legacy GODARK_API_KEY".into())
+        })?;
+        let passphrase = dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).ok_or_else(|| {
+            GodarkError::Config("Set GODARK_PASSPHRASE or legacy GODARK_API_KEY".into())
+        })?;
+        builder = builder.api_key_id(api_key_id).api_secret(api_secret).passphrase(passphrase);
     }
     let config = builder.build()?;
 

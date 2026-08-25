@@ -240,9 +240,9 @@ pub fn build_mass_quote_proto(
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
         user_uuid: user_uuid.to_vec(),
         stp_mode: 0,
-        // None keeps the node default (post-only); Some(false) enables the
-        // relaxed path where a crossing leg takes liquidity and rests the rest.
-        post_only,
+        // Sequencer requires post_only on the wire; default to post-only when unset.
+        // Some(false) enables the relaxed path where a crossing leg takes liquidity.
+        post_only: Some(post_only.unwrap_or(true)),
     };
     let req = sequencer::EdgeSequencerRequest {
         inner: Some(sequencer::edge_sequencer_request::Inner::MassQuote(mq)),
@@ -512,7 +512,7 @@ pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError>
                     o.business_error_code.or(o.system_error_code),
                     o.order_status.map(OrderStatus::from_proto),
                 ),
-                None => (true, None, None),
+                None => (false, None, None),
             };
             Ok(NodeResponseKind::Ack {
                 sequence: ack.sequence,
@@ -944,8 +944,8 @@ mod tests {
         // Each leg carries a unique 16-byte correlation id.
         assert_eq!(mq.legs[0].correlation_id.len(), 16);
         assert_ne!(mq.legs[0].correlation_id, mq.legs[1].correlation_id);
-        // Default omits post_only (node defaults to post-only).
-        assert_eq!(mq.post_only, None);
+        // Default encodes post_only=true (sequencer requires the field).
+        assert_eq!(mq.post_only, Some(true));
     }
 
     #[test]
