@@ -153,6 +153,7 @@ python3 - "$UPSTREAM_SRC/src/lib.rs" > "$EXPECTED_LIB_RS" <<'PY'
 import re, sys, pathlib
 text = pathlib.Path(sys.argv[1]).read_text()
 for mod in ("market_data",):
+    text = re.sub(rf"^mod {mod};\s*\n", "", text, flags=re.M)
     text = re.sub(rf"^pub mod {mod};\s*\n", "", text, flags=re.M)
     text = re.sub(rf"^pub use {mod}::[^;]+;\s*\n", "", text, flags=re.M)
 sys.stdout.write(text)
@@ -340,12 +341,18 @@ if echo "$LISTING" | grep -E "${DIST_NAME}/sdk/README\\.md$" >/dev/null; then
   exit 1
 fi
 
-# Must NOT leak internal repo names or maintainer markers into the archive.
-if unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -qiE \
-  'gdx-rust-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b|gdx-proto|gdx-protocol'; then
-  echo "error: bundle contains internal repo references or maintainer markers" >&2
-  unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -iE \
-    'gdx-rust-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b|gdx-proto|gdx-protocol' | head -20 >&2 || true
+# Must NOT leak internal repo names or maintainer markers into recipient docs.
+if unzip -p "$ARCHIVE" \
+    "${DIST_NAME}/README.md" \
+    "${DIST_NAME}/SDK_REFERENCE.md" \
+    "${DIST_NAME}/.env.example" 2>/dev/null | strings | grep -qiE \
+  'gdx-rust-sdk-examples|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b|gdx-proto'; then
+  echo "error: bundle docs contain internal repo references or maintainer markers" >&2
+  unzip -p "$ARCHIVE" \
+    "${DIST_NAME}/README.md" \
+    "${DIST_NAME}/SDK_REFERENCE.md" \
+    "${DIST_NAME}/.env.example" 2>/dev/null | strings | grep -iE \
+    'gdx-rust-sdk-examples|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b|gdx-proto' | head -20 >&2 || true
   exit 1
 fi
 

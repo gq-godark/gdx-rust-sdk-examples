@@ -7,13 +7,14 @@ use crate::error::{GodarkError, Result};
 
 /// Non-zero `code` in a docs REST envelope.
 #[derive(Debug)]
-pub struct RestEnvelopeError {
+struct RestEnvelopeError {
     pub code: u16,
     pub message: Option<String>,
 }
 
 fn unwrap_envelope(val: &Value) -> std::result::Result<&Value, RestEnvelopeError> {
     let code = val.get("code").and_then(|c| c.as_u64()).unwrap_or(1) as u16;
+
     if code != 0 {
         return Err(RestEnvelopeError {
             code,
@@ -90,19 +91,6 @@ impl RestTransport {
         post_json_envelope(&self.client, self.url("/api/v1/auth/token"), None, body).await
     }
 
-    /// Deprecated: ECDH REST session setup is retired (Noise XK is WS-only).
-    /// `GodarkRestClient` never calls this; kept for transport unit tests.
-    pub async fn session_setup(&self, bearer: &str, client_ecdh_pubkey: &str) -> Result<Value> {
-        let body = json!({ "client_ecdh_pubkey": client_ecdh_pubkey });
-        post_json_envelope(
-            &self.client,
-            self.url("/api/v1/session/setup"),
-            Some(bearer),
-            body,
-        )
-        .await
-    }
-
     pub async fn post_orders_encrypted(&self, bearer: &str, body: Value) -> Result<Value> {
         post_json_envelope(&self.client, self.url("/api/v1/orders"), Some(bearer), body).await
     }
@@ -128,13 +116,11 @@ impl RestTransport {
 
     /// Encrypted `POST /api/v1/leverage` — update leverage setting.
     pub async fn post_leverage_encrypted(&self, bearer: &str, body: Value) -> Result<Value> {
-        post_json_envelope(
-            &self.client,
-            self.url("/api/v1/leverage"),
-            Some(bearer),
-            body,
-        )
-        .await
+        self.post_encrypted("/api/v1/leverage", bearer, body).await
+    }
+
+    pub async fn post_encrypted(&self, path: &str, bearer: &str, body: Value) -> Result<Value> {
+        post_json_envelope(&self.client, self.url(path), Some(bearer), body).await
     }
 
     pub async fn delete_orders_encrypted(
@@ -266,84 +252,15 @@ impl RestTransport {
             .map_err(|e| GodarkError::Connection(format!("GET /auth/me: {e}")))?;
         parse_ok_json(r).await
     }
-
-    /// `GET /api/v1/shielded-pool/balances/{owner}` — returns on-chain balance
-    /// snapshot. The response is NOT envelope-wrapped; fields are at the JSON root.
-    pub async fn get_shielded_pool_balances(&self, bearer: &str, owner: &str) -> Result<Value> {
-        let mut h = HeaderMap::new();
-        h.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {bearer}"))
-                .map_err(|e| GodarkError::Connection(e.to_string()))?,
-        );
-        let r = self
-            .client
-            .get(format!(
-                "{}/api/v1/shielded-pool/balances/{}",
-                self.base, owner
-            ))
-            .headers(h)
-            .send()
-            .await
-            .map_err(|e| GodarkError::Connection(format!("GET /shielded-pool/balances: {e}")))?;
-        parse_ok_json(r).await
-    }
-
-    /// `GET /api/v1/market-data/funding-rates` — public raw JSON array (no envelope).
-    pub async fn get_funding_rates(&self) -> Result<Value> {
-        let r = self
-            .client
-            .get(self.url("/api/v1/market-data/funding-rates"))
-            .send()
-            .await
-            .map_err(|e| GodarkError::Connection(format!("GET /market-data/funding-rates: {e}")))?;
-        let v = parse_ok_json(r).await?;
-        if !v.is_array() {
-            return Err(GodarkError::Connection(
-                "expected funding-rates JSON array".into(),
-            ));
-        }
-        Ok(v)
-    }
-
-    /// `GET /api/v1/market-data/open-interest` — public raw JSON array (no envelope).
-    pub async fn get_open_interest(&self) -> Result<Value> {
-        let r = self
-            .client
-            .get(self.url("/api/v1/market-data/open-interest"))
-            .send()
-            .await
-            .map_err(|e| GodarkError::Connection(format!("GET /market-data/open-interest: {e}")))?;
-        let v = parse_ok_json(r).await?;
-        if !v.is_array() {
-            return Err(GodarkError::Connection(
-                "expected open-interest JSON array".into(),
-            ));
-        }
-        Ok(v)
-    }
-
-    /// `GET /api/v1/market-data/volume` — public raw JSON object (no envelope).
-    pub async fn get_volume(&self) -> Result<Value> {
-        let r = self
-            .client
-            .get(self.url("/api/v1/market-data/volume"))
-            .send()
-            .await
-            .map_err(|e| GodarkError::Connection(format!("GET /market-data/volume: {e}")))?;
-        let v = parse_ok_json(r).await?;
-        if !v.is_object() {
-            return Err(GodarkError::Connection(
-                "expected volume JSON object".into(),
-            ));
-        }
-        Ok(v)
-    }
 }
 
 fn data_clone_from_env(v: &Value) -> Result<Value> {
     let data = unwrap_envelope(v).map_err(|e| {
-        GodarkError::Authentication(format!("REST {:?}", e.message.unwrap_or_default()))
+        GodarkError::Authentication(format!(
+            "REST code={} {}",
+            e.code,
+            e.message.unwrap_or_default()
+        ))
     })?;
     Ok(data.clone())
 }

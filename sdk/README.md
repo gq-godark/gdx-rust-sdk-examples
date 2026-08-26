@@ -1,115 +1,98 @@
 # GoDark Rust SDK
 
-Encrypted Rust client for the GoDark DEX.
+Encrypted Rust client for the GoDark DEX. Protocol matches **gdx-edge** and
+**gdx-sequencer**: HPKE Base (RFC 9180) over WebSocket binary frames, and
+one-shot HPKE on REST.
 
 ## Quickstart
 
-**Standalone clone (recommended):** `gdx-proto` is tracked as a git submodule
-pinned to a specific commit on `v1/devnet` (see `.gitmodules`), matching the
-python / java / cpp SDKs. Clone recursively so the submodule populates:
-
 ```bash
-git clone --recurse-submodules <repo-url> gdx-rust-sdk
+git clone <repo-url> gdx-rust-sdk
 cd gdx-rust-sdk
 cargo build --all-targets
 cargo test
 ```
 
-If you already cloned without `--recurse-submodules`, run
-`git submodule update --init --recursive` once to populate `gdx-proto/`.
+Published crate: `cargo add godark`. `build.rs` uses committed `src/generated`
+unless you regenerate (`bash scripts/proto_gen.sh`).
 
-**From the `gdx` meta-repo:** the umbrella also pins `gdx-proto` as a
-submodule; cloning `gdx` with `--recurse-submodules` will fetch the same
-proto tree into both `gdx-proto/` and any sibling SDK.
+## Layout
 
-## WebSocket endpoints
+```
+src/
+  lib.rs           public re-exports (`GodarkClient`, `GodarkRestClient`, …)
+  client.rs        WebSocket trading client
+  rest_client.rs   REST trading client
+  config.rs        Environment + builder
+  types.rs         domain types
+  enums.rs         order/side/status enums
+  error.rs
+  market_data.rs
+  hpke.rs          crate-private crypto
+  session.rs       crate-private WS HPKE session
+  wire.rs          crate-private TradingWsBinaryFrame
+  transport.rs     crate-private WS transport
+  generated/       committed prost bindings
+tests/             mocks + live `#[ignore]` suites
+examples/
+```
 
-The SDK builds its trading WebSocket URL by appending `/ws/v1` to the
-configured base URL. Set the host via the `base_url` builder,
-`GODARK_EDGE_URL`, or `GDX_EDGE_URL`; either `<host>` or `<host>/ws/v1`
-resolve to the same endpoint.
+## WebSocket
 
-| Environment | Canonical URL | Noise pin |
-|---|---|---|
-| Testnet (default) | `wss://api.godark-dex.com/ws/v1` | baked in (testnet pin) |
-| Devnet | `ws://18.143.165.149:13300/ws/v1` | baked in (devnet pin; distinct from testnet) |
-| Localnet | `ws://127.0.0.1:4000/ws/v1` | set via builder / env |
+JSON text frames are control only: `login`, `subscribe`/`unsubscribe`, `ping`,
+`logout`, `get_order_history`. Encrypted orders and HPKE setup are **binary**
+`TradingWsBinaryFrame` (`HpkeSetup` → `HpkeSetupReply` → `EncryptedOrder` /
+`EncryptedPush`).
+
+Login returns `conn_id`. HPKE info is `gdx-hpke/v1\0 ‖ user_uuid ‖ conn_id_be`.
+Send nonces start at **0** (sequencer `last_recv_nonce` is unset until the first
+request). Wire `version = 2`.
+
+Pin the sequencer static public key (64 hex):
 
 ```rust
 use godark::{Environment, GodarkClient};
 
 let config = GodarkClient::builder()
-    .environment(Environment::Testnet) // default; sets URL + Noise pin
+    .environment(Environment::Localnet)
     .api_key_id("gdk_...")
     .api_secret("...")
     .passphrase("...")
+    .hpke_static_public_key_hex(std::env::var("GDX_HPKE_STATIC_PUBLIC_KEY")?)
     .build()?;
 ```
 
-Public mainnet is not currently exposed; testnet is the live network for SDK
-users today. The public market-data client (`MarketDataClient`) defaults to
-`<host>/ws/v1` (docs wire). Set `GODARK_MARKET_DATA_USE_GOMARKET=1` for the
-legacy `<host>/ws/gomarket` multiplex, or `GODARK_MARKET_DATA_WS_URL` for a
-full override.
+| Environment | Default URL |
+|---|---|
+| Testnet | `wss://api.godark-dex.com/ws/v1` |
+| Devnet | `ws://18.143.165.149:13300/ws/v1` |
+| Localnet | `ws://127.0.0.1:13300/ws/v1` |
 
-Encrypted WebSocket trading uses **Noise XK** after login. Preference order for
-the sequencer pin: `.noise_static_public_key_hex(...)` →
-`GDX_NOISE_STATIC_PUBLIC_KEY` (aliases) → baked-in pin from `.environment(...)`.
-Encrypted REST order flow is unsupported.
+HPKE pins are **not** baked into the crate. Set `.hpke_static_public_key_hex(...)`
+or `GDX_HPKE_STATIC_PUBLIC_KEY`.
 
-## Layout
+Balances come from sequencer `BalanceUpdateMessage` / encrypted
+`balance_and_position` (trading collateral `balance_raw`).
 
-- `src/`          — crate source
-- `tests/`        — integration tests + mocks (live tests gated by `#[ignore]` + `GDX_LIVE_EDGE`)
-- `examples/`    — runnable examples (`local_e2e.rs`, `full_trader_example.rs`)
-- `build.rs`      — prost-build hook; reads .proto from `gdx-proto/proto/`
-- `shared/`       — vendored symbol map (compiled into the crate via `include_str!`)
-- `gdx-proto/`    — git submodule pinned to a specific commit on `v1/devnet` (see `.gitmodules`)
+## REST
+
+`POST /api/v1/auth/token`, then encrypted `POST/PATCH/DELETE /api/v1/orders`
+with JSON `{ header, encrypted_body, encapped_key, request_id }`. Each call is
+a fresh HPKE setup (`info = gdx-hpke/v1/rest\0 ‖ user_uuid ‖ request_id_be`,
+`conn_id = 0`).
+
+Live snapshot reads (same envelope, `request_type` snake_case in the header):
+
+| Method | Path | `request_type` | Reply |
+|---|---|---|---|
+| `get_open_orders()` | `POST /api/v1/openOrders` | `get_open_orders` | `open_orders_snapshot` |
+| `get_positions()` | `POST /api/v1/positions` | `get_positions` | `positions_snapshot` |
+| `get_account()` | `POST /api/v1/account` | `get_account` | `account_margin_update` |
 
 ## Testing
-
-Offline (default — live tests are `#[ignore]` and additionally short-circuit
-when `GDX_LIVE_EDGE` is unset):
 
 ```bash
 cargo test
 ```
 
-Live tests target a real edge and are gated on `GDX_LIVE_EDGE=1`. Two
-suites: WebSocket (`tests/ws_live_integration.rs`) and REST
-(`tests/rest_live_integration.rs`). Both `#[ignore]`, so pass `--ignored`:
-
-```bash
-# Both suites against the SDK testnet default (api.godark-dex.com):
-GDX_LIVE_EDGE=1 \
-  GDX_API_KEY_ID=gdk_... GDX_API_SECRET=... GDX_PASSPHRASE=... \
-  cargo test -p godark --test ws_live_integration --test rest_live_integration -- --ignored --nocapture
-
-# REST only:
-GDX_LIVE_EDGE=1 GDX_API_KEY_ID=... GDX_API_SECRET=... GDX_PASSPHRASE=... \
-  cargo test -p godark --test rest_live_integration -- --ignored --nocapture
-
-# WS only:
-GDX_LIVE_EDGE=1 GDX_API_KEY_ID=... GDX_API_SECRET=... GDX_PASSPHRASE=... \
-  cargo test -p godark --test ws_live_integration -- --ignored --nocapture
-```
-
-Environment variables (uniform across the Python / JS / C++ / Rust SDKs):
-
-| Var | Default | Notes |
-|---|---|---|
-| `GDX_LIVE_EDGE` | `0` (skip) | Set to `1` to run live tests |
-| `GDX_API_KEY_ID` + `GDX_API_SECRET` + `GDX_PASSPHRASE` | falls back to legacy `test-key-1` (override via `GDX_TEST_API_KEY`) | Production credentials |
-| `GDX_REST_URL` / `GODARK_REST_URL` | `https://api.godark-dex.com` | REST live tests only |
-| `GDX_EDGE_URL` / `GODARK_EDGE_URL` | `wss://api.godark-dex.com` | WS live tests only |
-| `GDX_NOISE_STATIC_PUBLIC_KEY` | — | Sequencer Noise XK static public key (64 hex chars) |
-| `GDX_USE_DOCS_WIRE` | `1` (modern envelope) | Set `0|false|no|off` for legacy localnet edges (WS only) |
-| `GDX_USER_UUID` / `GODARK_USER_UUID` | test fixture `00000000-0000-4000-8000-000000000001` | Optional client UUID override |
-| `GDX_LIVE_SYMBOL` | `BTC-USDC-PERP` | REST live trading test symbol override |
-
-Note: at the time of writing, the public testnet's sequencer is degraded;
-live trading-flow tests may fail with `POST /api/v1/session/setup HTTP 502`
-(REST; encrypted REST trading is unsupported under Noise XK) or a Noise
-handshake / sequencer timeout (WS). The
-`*_bad_api_key_rejected` cases pass regardless and are the SDK-side
-control confirming the failures are server-side.
+Live tests: `GDX_LIVE_EDGE=1` plus API credentials, `--ignored`.

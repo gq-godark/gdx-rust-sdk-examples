@@ -6,7 +6,7 @@ pub enum GodarkError {
     #[error("authentication failed: {0}")]
     Authentication(String),
 
-    #[error("ECDH session error: {0}")]
+    #[error("session error: {0}")]
     Session(String),
 
     #[error("order rejected: {message}")]
@@ -57,7 +57,7 @@ mod tests {
     fn test_session_error_display() {
         let err = GodarkError::Session("handshake failed".into());
         let s = err.to_string();
-        assert!(s.contains("ECDH session error"), "unexpected display: {s}");
+        assert!(s.contains("session error"), "unexpected display: {s}");
     }
 
     #[test]

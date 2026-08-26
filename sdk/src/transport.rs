@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::config::TransportConfig;
 use crate::error::GodarkError;
+use crate::wire::{self, DecodedBinary};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -55,7 +56,8 @@ fn normalize_inbound_value(val: &Value) -> Value {
                     "cancel_on_disconnect": d
                         .get("cancel_on_disconnect")
                         .cloned()
-                        .unwrap_or(Value::Bool(false))
+                        .unwrap_or(Value::Bool(false)),
+                    "conn_id": d.get("conn_id").cloned().unwrap_or(Value::Null),
                 })
             } else {
                 serde_json::json!({
@@ -63,44 +65,6 @@ fn normalize_inbound_value(val: &Value) -> Value {
                     "success": false,
                     "error": "invalid auth response"
                 })
-            }
-        }
-        "noise.handshake" | "noise_handshake" => {
-            if code != 0 {
-                serde_json::json!({
-                    "type": "error",
-                    "message": msg_str.unwrap_or("noise handshake failed")
-                })
-            } else if let Some(d) = data.and_then(|v| v.as_object()) {
-                serde_json::json!({
-                    "type": "noise_handshake_reply",
-                    "conn_id": d.get("conn_id"),
-                    "message": d.get("message").cloned().unwrap_or(Value::String(String::new())),
-                    "established": d.get("established").cloned().unwrap_or(Value::Bool(false))
-                })
-            } else {
-                serde_json::json!({ "type": "error", "message": "invalid noise handshake response" })
-            }
-        }
-        "session.setup" | "session_setup" => {
-            if code != 0 {
-                serde_json::json!({
-                    "type": "error",
-                    "message": msg_str.unwrap_or("session setup failed")
-                })
-            } else if let Some(d) = data.and_then(|v| v.as_object()) {
-                let seq_pk = d
-                    .get("sequencer_ecdh_pubkey")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| d.get("server_ecdh_pubkey").and_then(|v| v.as_str()))
-                    .unwrap_or("");
-                serde_json::json!({
-                    "type": "session_established",
-                    "sequencer_ecdh_pubkey": seq_pk,
-                    "session_id": d.get("session_id")
-                })
-            } else {
-                serde_json::json!({ "type": "error", "message": "invalid session response" })
             }
         }
         "subscribe" | "unsubscribe" => {
@@ -204,11 +168,10 @@ fn normalize_inbound_value(val: &Value) -> Value {
 #[derive(Debug)]
 pub enum TransportEvent {
     AuthResult(Value),
-    SessionEstablished(Value),
     RekeyRequired(Value),
     OrderUpdate(Value),
-    PositionUpdate(Value),
     EncryptedPush(Value),
+    HpkeSetupReply { conn_id: u64, established: bool },
     Disconnected,
 }
 
@@ -269,10 +232,6 @@ impl EdgeTransport {
         self.connected
     }
 
-    pub fn use_docs_wire(&self) -> bool {
-        self.transport.use_docs_wire
-    }
-
     pub fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<TransportEvent>> {
         self.event_rx.take()
     }
@@ -304,14 +263,12 @@ impl EdgeTransport {
         let hb_event_tx = event_tx;
         let heartbeat_interval = self.transport.heartbeat_interval;
         let stale_timeout = self.transport.stale_timeout;
-        let use_docs = self.transport.use_docs_wire;
         let heartbeat_handle = tokio::spawn(Self::heartbeat_loop(
             hb_write_tx,
             hb_event_tx,
             last_inbound,
             heartbeat_interval,
             stale_timeout,
-            use_docs,
         ));
 
         self.write_tx = Some(write_tx);
@@ -366,6 +323,16 @@ impl EdgeTransport {
             .map_err(|_| GodarkError::Connection("Write channel closed".into()))
     }
 
+    pub async fn send_binary(&self, bytes: Vec<u8>) -> Result<(), GodarkError> {
+        let tx = self
+            .write_tx
+            .as_ref()
+            .ok_or_else(|| GodarkError::Connection("Not connected".into()))?;
+        tx.send(Message::Binary(bytes.into()))
+            .await
+            .map_err(|_| GodarkError::Connection("Write channel closed".into()))
+    }
+
     pub async fn send_command(&self, payload: &Value) -> Result<Value, GodarkError> {
         let (tx, rx) = oneshot::channel();
         let cmd = PendingCommand { tx };
@@ -390,9 +357,7 @@ impl EdgeTransport {
             .map(|c| serde_json::json!({ "channel": c }))
             .collect();
         let mut payload = serde_json::json!({ "op": op, "args": args });
-        if self.transport.use_docs_wire {
-            payload["id"] = serde_json::json!(Uuid::new_v4().to_string());
-        }
+        payload["id"] = serde_json::json!(Uuid::new_v4().to_string());
 
         // Synchronously register the PendingSubscription BEFORE sending the
         // wire frame. The recv loop reads from this same shared slot when
@@ -448,18 +413,11 @@ impl EdgeTransport {
     }
 
     pub async fn authenticate(&self, token: &str) -> Result<Value, GodarkError> {
-        let payload = if self.transport.use_docs_wire {
-            serde_json::json!({
-                "id": Uuid::new_v4().to_string(),
-                "op": "login",
-                "args": { "token": token }
-            })
-        } else {
-            serde_json::json!({
-                "type": "auth",
-                "data": { "token": token }
-            })
-        };
+        let payload = serde_json::json!({
+            "id": Uuid::new_v4().to_string(),
+            "op": "login",
+            "args": { "token": token }
+        });
         let (tx, rx) = oneshot::channel();
         let cmd = PendingCommand { tx };
         self.cmd_tx
@@ -477,7 +435,7 @@ impl EdgeTransport {
             .map_err(|_| GodarkError::Connection("Auth cancelled".into()))
     }
 
-    pub async fn send_session_setup(&self, payload: &Value) -> Result<Value, GodarkError> {
+    pub async fn send_hpke_setup(&self, frame: Vec<u8>) -> Result<Value, GodarkError> {
         let (tx, rx) = oneshot::channel();
         let session = PendingSession { tx };
         self.session_tx
@@ -485,14 +443,14 @@ impl EdgeTransport {
             .ok_or_else(|| GodarkError::Connection("Not connected".into()))?
             .send(session)
             .await
-            .map_err(|_| GodarkError::Connection("Session channel closed".into()))?;
-        self.send_json(payload).await?;
+            .map_err(|_| GodarkError::Connection("HPKE setup channel closed".into()))?;
+        self.send_binary(frame).await?;
 
         let cmd_to = self.transport.command_timeout;
         tokio::time::timeout(cmd_to, rx)
             .await
-            .map_err(|_| GodarkError::Timeout("Session setup timed out".into()))?
-            .map_err(|_| GodarkError::Connection("Session setup cancelled".into()))
+            .map_err(|_| GodarkError::Timeout("HPKE setup timed out".into()))?
+            .map_err(|_| GodarkError::Connection("HPKE setup cancelled".into()))
     }
 
     // --- Background tasks ---
@@ -534,22 +492,55 @@ impl EdgeTransport {
                         Ok(m) => m,
                         Err(_) => break,
                     };
-                    let Message::Text(ref text) = msg else { continue };
-                    let text_str: &str = text.as_ref();
-                    let Ok(val) = serde_json::from_str::<Value>(text_str) else { continue };
-
                     if let Ok(mut g) = last_inbound.lock() {
                         *g = Some(Instant::now());
                     }
-
-                    let val = normalize_inbound_value(&val);
-                    Self::dispatch(
-                        &val,
-                        &event_tx,
-                        &mut pending_cmd,
-                        &mut pending_session,
-                        &pending_sub,
-                    ).await;
+                    match msg {
+                        Message::Binary(bytes) => {
+                            match wire::decode_binary_frame(&bytes) {
+                                Ok(DecodedBinary::HpkeSetupReply { conn_id, established }) => {
+                                    let val = serde_json::json!({
+                                        "type": "hpke_setup_reply",
+                                        "conn_id": conn_id,
+                                        "established": established,
+                                    });
+                                    if let Some(session) = pending_session.take() {
+                                        let _ = session.tx.send(val);
+                                    } else {
+                                        let _ = event_tx
+                                            .send(TransportEvent::HpkeSetupReply { conn_id, established })
+                                            .await;
+                                    }
+                                }
+                                Ok(DecodedBinary::EncryptedPush(push)) => {
+                                    if let Some(val) = wire::encrypted_push_to_json(&push) {
+                                        let _ = event_tx
+                                            .send(TransportEvent::EncryptedPush(val))
+                                            .await;
+                                    }
+                                }
+                                Ok(DecodedBinary::Ignored)
+                                | Ok(DecodedBinary::EncryptedOrder(_))
+                                | Ok(DecodedBinary::HpkeSetup(_)) => {}
+                                Err(e) => {
+                                    tracing::warn!("binary frame decode failed: {e}");
+                                }
+                            }
+                        }
+                        Message::Text(text) => {
+                            let text_str: &str = text.as_ref();
+                            let Ok(val) = serde_json::from_str::<Value>(text_str) else { continue };
+                            let val = normalize_inbound_value(&val);
+                            Self::dispatch(
+                                &val,
+                                &event_tx,
+                                &mut pending_cmd,
+                                &mut pending_session,
+                                &pending_sub,
+                            ).await;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -578,7 +569,7 @@ impl EdgeTransport {
         val: &Value,
         event_tx: &mpsc::Sender<TransportEvent>,
         pending_cmd: &mut Option<PendingCommand>,
-        pending_session: &mut Option<PendingSession>,
+        _pending_session: &mut Option<PendingSession>,
         pending_sub: &Arc<Mutex<Option<PendingSubscription>>>,
     ) {
         let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -590,20 +581,6 @@ impl EdgeTransport {
                     let _ = cmd.tx.send(val.clone());
                 } else {
                     let _ = event_tx.send(TransportEvent::AuthResult(val.clone())).await;
-                }
-            }
-            "session_established" => {
-                if let Some(session) = pending_session.take() {
-                    let _ = session.tx.send(val.clone());
-                } else {
-                    let _ = event_tx
-                        .send(TransportEvent::SessionEstablished(val.clone()))
-                        .await;
-                }
-            }
-            "noise_handshake_reply" => {
-                if let Some(cmd) = pending_cmd.take() {
-                    let _ = cmd.tx.send(val.clone());
                 }
             }
             "rekey_required" => {
@@ -632,11 +609,6 @@ impl EdgeTransport {
                         let _ = event_tx.send(TransportEvent::OrderUpdate(update)).await;
                     }
                 }
-            }
-            "position_update" => {
-                let _ = event_tx
-                    .send(TransportEvent::PositionUpdate(val.clone()))
-                    .await;
             }
             "encrypted_push" => {
                 // Always decrypt on the client event loop in WebSocket arrival
@@ -690,7 +662,6 @@ impl EdgeTransport {
         last_inbound: Arc<Mutex<Option<Instant>>>,
         heartbeat_interval: Duration,
         stale_timeout: Duration,
-        use_docs_wire: bool,
     ) {
         loop {
             tokio::time::sleep(heartbeat_interval).await;
@@ -706,15 +677,11 @@ impl EdgeTransport {
                 let _ = event_tx.send(TransportEvent::Disconnected).await;
                 break;
             }
-            let ping = if use_docs_wire {
-                serde_json::json!({
-                    "id": Uuid::new_v4().to_string(),
-                    "op": "ping",
-                    "args": serde_json::json!({})
-                })
-            } else {
-                serde_json::json!({"type": "ping"})
-            };
+            let ping = serde_json::json!({
+                "id": Uuid::new_v4().to_string(),
+                "op": "ping",
+                "args": serde_json::json!({})
+            });
             let text = serde_json::to_string(&ping).unwrap();
             if write_tx.send(Message::Text(text.into())).await.is_err() {
                 break;
@@ -831,57 +798,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_session_established_sends_event() {
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
-        let mut pending_cmd = None;
-        let mut pending_session = None;
-        let pending_sub = make_sub_slot(None);
-
-        let val =
-            json!({"type":"session_established","sequencer_ecdh_pubkey":"abc","session_id":1});
-        EdgeTransport::dispatch(
-            &val,
-            &event_tx,
-            &mut pending_cmd,
-            &mut pending_session,
-            &pending_sub,
-        )
-        .await;
-
-        match event_rx.recv().await {
-            Some(TransportEvent::SessionEstablished(v)) => assert_eq!(v, val),
-            other => panic!("expected SessionEstablished, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_dispatch_session_established_resolves_pending_session() {
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
-        let mut pending_cmd = None;
-        let (session_tx, session_rx) = tokio::sync::oneshot::channel();
-        let mut pending_session = Some(PendingSession { tx: session_tx });
-        let pending_sub = make_sub_slot(None);
-
-        let val =
-            json!({"type":"session_established","sequencer_ecdh_pubkey":"abc","session_id":1});
-        EdgeTransport::dispatch(
-            &val,
-            &event_tx,
-            &mut pending_cmd,
-            &mut pending_session,
-            &pending_sub,
-        )
-        .await;
-
-        assert!(event_rx.try_recv().is_err());
-        let received = session_rx
-            .await
-            .expect("session_established should resolve pending session");
-        assert_eq!(received, val);
-        assert!(pending_session.is_none());
-    }
-
-    #[tokio::test]
     async fn test_dispatch_rekey_required_sends_event() {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
         let mut pending_cmd = None;
@@ -924,29 +840,6 @@ mod tests {
         match event_rx.recv().await {
             Some(TransportEvent::OrderUpdate(v)) => assert_eq!(v, val),
             other => panic!("expected OrderUpdate, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_dispatch_position_update_sends_event() {
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
-        let mut pending_cmd = None;
-        let mut pending_session = None;
-        let pending_sub = make_sub_slot(None);
-
-        let val = json!({"type":"position_update","symbol":"BTC","size":"1"});
-        EdgeTransport::dispatch(
-            &val,
-            &event_tx,
-            &mut pending_cmd,
-            &mut pending_session,
-            &pending_sub,
-        )
-        .await;
-
-        match event_rx.recv().await {
-            Some(TransportEvent::PositionUpdate(v)) => assert_eq!(v, val),
-            other => panic!("expected PositionUpdate, got {other:?}"),
         }
     }
 
@@ -1113,7 +1006,7 @@ mod tests {
         )
         .await;
 
-        // Encrypted acks go to the event loop for ordered Noise decrypt; the
+        // Encrypted acks go to the event loop for ordered HPKE decrypt; the
         // transport pending_cmd slot is intentionally left for cleartext paths.
         match event_rx.recv().await {
             Some(TransportEvent::EncryptedPush(msg)) => assert_eq!(msg, val),

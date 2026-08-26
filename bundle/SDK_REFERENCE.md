@@ -3,7 +3,7 @@
 This reference describes the API surface used by the two examples shipped in
 this distribution. The examples use WebSocket encrypted trading
 via `godark::GodarkClient`. Encrypted REST trading is not supported — all order
-flow (place / modify / cancel / mass-quote) runs over the Noise XK WebSocket
+flow (place / modify / cancel / mass-quote) runs over the HPKE WebSocket
 client. Standalone market-data surfaces are
 intentionally excluded.
 
@@ -69,7 +69,7 @@ distribution; also available under `sdk/` for path-dependency builds).
 |--------|-----------|---------|
 | `builder` | `GodarkClient::builder() -> ConfigBuilder` | Start a new client config |
 | `new` | `GodarkClient::new(config) -> GodarkClient` | Construct the client |
-| `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish Noise XK encrypted WebSocket session |
+| `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish HPKE WebSocket session |
 | `disconnect` | `async fn disconnect(&mut self)` | Graceful disconnect |
 | `is_connected` | `fn is_connected(&self) -> bool` | Connection state |
 | `user_uuid` | `fn user_uuid(&self) -> Option<&Uuid>` | Authenticated user id |
@@ -151,7 +151,7 @@ MM distribution supports placing only `Market` and `Limit` orders.
 `GodarkError` is the single error type returned from every fallible SDK call:
 
 - `Authentication(String)`
-- `Session(String)` — Noise XK handshake or rekey failure
+- `Session(String)` — HPKE setup handshake or rekey failure
 - `Order { message: String, error_code: Option<String> }`
   — also carries the symbolic reason (e.g. `"PRICE_DEVIATION_TOO_LARGE"`,
   `"MARGIN_INSUFFICIENT"`). See the `quickstart` source for the match-and-print

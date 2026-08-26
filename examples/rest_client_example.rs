@@ -1,7 +1,7 @@
-//! Minimal GodarkRestClient demo — auth + account reads + public market data.
+//! Minimal GodarkRestClient demo — auth + account reads.
 //!
 //! Encrypted place/cancel/modify/update_leverage require GodarkClient (WebSocket /
-//! Noise XK); see `quickstart` / `full_trader_example`.
+//! HPKE); see `quickstart` / `full_trader_example`.
 //!
 //! ```text
 //! cargo run --release --example rest_client_example
@@ -41,51 +41,29 @@ async fn main() -> Result<(), GodarkError> {
     }
     let mut client = builder.build()?;
 
-    // Public market-data GETs — no connect() required.
-    let rates = client.get_funding_rates().await?;
-    let oi = client.get_open_interest().await?;
-    let vol = client.get_volume().await?;
-    let rates_n = rates.as_array().map(|a| a.len()).unwrap_or(0);
-    let oi_n = oi.as_array().map(|a| a.len()).unwrap_or(0);
-    let vol_n = vol["symbols"].as_array().map(|a| a.len()).unwrap_or(0);
-    println!(
-        "funding_rates: {rates_n} symbols (first={:?})",
-        rates.get(0)
-    );
-    println!("open_interest: {oi_n} symbols (first={:?})", oi.get(0));
-    println!(
-        "volume: total_24h={} symbols={vol_n}",
-        vol["total_volume_24h"]
-    );
-
     println!("connecting (REST auth/token)...");
     client.connect().await?;
 
-    let me = client.get_me().await?;
-    println!(
-        "me: id={} wallet={} tier={}",
-        me.id, me.wallet_address, me.tier
-    );
-
-    let lev = client.get_leverage().await?;
-    println!("leverage settings: {} entries", lev.settings.len());
-    for row in lev.settings.iter().take(5) {
-        println!(
-            "  symbol_id={} leverage={}",
-            row.symbol_id, row.leverage
-        );
+    match client.get_me().await {
+        Ok(me) => println!(
+            "me: id={} wallet={} tier={}",
+            me.id, me.wallet_address, me.tier
+        ),
+        Err(err) => println!("get_me skipped: {err}"),
     }
 
-    match client.get_my_balance().await {
-        Ok(bal) => println!(
-            "balance: shielded_raw={} wallet_ui={}",
-            bal.shielded_balance_raw, bal.wallet_usdt_ui
-        ),
-        Err(err) => println!("get_my_balance skipped: {err}"),
+    match client.get_leverage().await {
+        Ok(lev) => {
+            println!("leverage settings: {} entries", lev.settings.len());
+            for row in lev.settings.iter().take(5) {
+                println!("  symbol_id={} leverage={}", row.symbol_id, row.leverage);
+            }
+        }
+        Err(err) => println!("get_leverage skipped: {err}"),
     }
 
     println!("REST reads succeeded.");
-    println!("Encrypted trading requires GodarkClient over WebSocket (Noise XK).");
+    println!("Encrypted trading requires GodarkClient over WebSocket (HPKE).");
     client.disconnect().await?;
     Ok(())
 }

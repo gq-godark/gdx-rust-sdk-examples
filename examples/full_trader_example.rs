@@ -2,7 +2,7 @@
 //!
 //! Demonstrates:
 //!   1. Load credentials from `.env` / environment
-//!   2. Connect and authenticate (Noise XK encrypted WebSocket session)
+//!   2. Connect and authenticate (HPKE WebSocket session)
 //!   3. Take receivers for order, position, and all 6 sequencer push streams
 //!   4. Subscribe to the private order + position channels
 //!   5. Place, modify, and cancel `MARKET` / `LIMIT` orders
@@ -19,13 +19,22 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use godark::{
-    Environment, GodarkClient, MassQuoteLegInput, OrderType, Side, TimeInForce, TransportConfig,
+    Environment, GodarkClient, GodarkRestClient, MassQuoteLegInput, OrderType, Side, TimeInForce,
+    TransportConfig,
 };
 
 #[path = "dotenv.rs"]
 mod dotenv;
 
 const SYMBOL: &str = "BTC-USDC-PERP";
+
+fn live_mark_price() -> f64 {
+    std::env::var("GDX_LIVE_PRICE")
+        .or_else(|_| std::env::var("GODARK_E2E_PRICE"))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(79_000.0)
+}
 
 #[tokio::main]
 async fn main() {
@@ -37,36 +46,7 @@ async fn main() {
     println!("{sep}");
     println!("Order-type support in this distribution: MARKET, LIMIT");
 
-    let api_key_id = match dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]) {
-        Some(v) => v,
-        None => {
-            eprintln!(
-                "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
-                 (or provide them in .env)."
-            );
-            std::process::exit(1);
-        }
-    };
-    let api_secret = match dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]) {
-        Some(v) => v,
-        None => {
-            eprintln!(
-                "Missing credentials. Set GODARK_API_KEY_ID and GODARK_API_SECRET \
-                 (or provide them in .env)."
-            );
-            std::process::exit(1);
-        }
-    };
-    let passphrase = match dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]) {
-        Some(v) => v,
-        None => {
-            eprintln!(
-                "Missing credentials. Set GODARK_PASSPHRASE \
-                 (or provide it in .env)."
-            );
-            std::process::exit(1);
-        }
-    };
+    let legacy_key = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]);
     let edge_override = dotenv::env_first(&["GODARK_EDGE_URL", "GDX_EDGE_URL"]);
     println!(
         "Endpoint: {}",
@@ -88,10 +68,39 @@ async fn main() {
 
     let mut builder = GodarkClient::builder()
         .environment(Environment::Testnet)
-        .api_key_id(api_key_id)
-        .api_secret(api_secret)
-        .passphrase(passphrase)
         .transport(transport);
+    if let Some(legacy) = legacy_key {
+        builder = builder.api_key(legacy);
+        if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
+            builder = builder.user_uuid(uid);
+        }
+    } else {
+        let Some(api_key_id) = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]) else {
+            eprintln!(
+                "Missing credentials. Set GODARK_API_KEY_ID/GODARK_API_SECRET/GODARK_PASSPHRASE \
+                 or legacy GODARK_API_KEY for localnet."
+            );
+            std::process::exit(1);
+        };
+        let Some(api_secret) = dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]) else {
+            eprintln!(
+                "Missing credentials. Set GODARK_API_KEY_ID/GODARK_API_SECRET/GODARK_PASSPHRASE \
+                 or legacy GODARK_API_KEY for localnet."
+            );
+            std::process::exit(1);
+        };
+        let Some(passphrase) = dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]) else {
+            eprintln!(
+                "Missing credentials. Set GODARK_PASSPHRASE \
+                 or legacy GODARK_API_KEY for localnet."
+            );
+            std::process::exit(1);
+        };
+        builder = builder
+            .api_key_id(api_key_id)
+            .api_secret(api_secret)
+            .passphrase(passphrase);
+    }
     if let Some(base_url) = edge_override.as_deref() {
         builder = builder.base_url(base_url);
     }
@@ -106,7 +115,6 @@ async fn main() {
     let mut client = GodarkClient::new(config);
 
     let mut order_rx = client.take_order_receiver().expect("order receiver");
-    let mut position_rx = client.take_position_receiver().expect("position receiver");
     let mut positions_snapshot_rx = client
         .take_positions_snapshot_receiver()
         .expect("positions snapshot receiver");
@@ -114,13 +122,12 @@ async fn main() {
         .take_system_health_receiver()
         .expect("system health receiver");
     let mut balance_rx = client.take_balance_receiver().expect("balance receiver");
-    let mut margin_alert_rx = client
-        .take_margin_alert_receiver()
-        .expect("margin alert receiver");
+    let mut account_margin_rx = client
+        .take_account_margin_receiver()
+        .expect("account margin receiver");
     let mut funding_rate_rx = client
         .take_funding_rate_receiver()
         .expect("funding rate receiver");
-    let mut settlement_rx = client.take_settlement_receiver().expect("settlement receiver");
     let mut error_rx = client.take_error_receiver().expect("error receiver");
 
     println!("Connecting...");
@@ -133,7 +140,7 @@ async fn main() {
         .user_uuid()
         .map(|u| u.to_string())
         .unwrap_or_default();
-    println!("Authenticated as user_uuid={user}  (Noise XK session)");
+    println!("Authenticated as user_uuid={user}  (HPKE session)");
 
     if let Err(e) = client.subscribe(&["orders", "positions"]).await {
         eprintln!("Subscribe failed: {e}");
@@ -142,15 +149,8 @@ async fn main() {
     }
     println!("Subscribed to order + position updates");
 
-    // Drain the initial PositionsSnapshot the sequencer pushes right after the
-    // trading session is established.
+    // Drain the initial PositionsSnapshot the sequencer pushes right after subscribe.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    while let Ok(pos) = position_rx.try_recv() {
-        println!(
-            "POS    side={:?}  size={}  entry={}",
-            pos.side, pos.size, pos.entry_price
-        );
-    }
     // BTC-USDC-PERP is symbol_id 1; capture its live mark for mass-quote ladder.
     let mut last_mark_btc: Option<f64> = None;
     while let Ok(snap) = positions_snapshot_rx.try_recv() {
@@ -177,27 +177,54 @@ async fn main() {
         }
     }
 
-    println!("Setting leverage to 1 via update_leverage...");
-    match client.update_leverage(SYMBOL, 1).await {
-        Ok(ack) => println!(
-            "update_leverage: success={}  order_id={}",
-            ack.success, ack.order_id
-        ),
-        Err(e) => {
+    println!("Setting leverage to 1 via GodarkRestClient.update_leverage...");
+    {
+        let mut rest_builder = GodarkRestClient::builder();
+        if let Some(legacy) = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]) {
+            rest_builder = rest_builder.api_key(legacy);
+            if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
+                rest_builder = rest_builder.user_uuid(uid);
+            }
+        } else {
+            rest_builder = rest_builder
+                .api_key_id(dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).unwrap())
+                .api_secret(dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).unwrap())
+                .passphrase(dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).unwrap());
+        }
+        if let Some(base) = edge_override.as_deref() {
+            let rest = base
+                .replace("wss://", "https://")
+                .replace("ws://", "http://")
+                .trim_end_matches("/ws/v1")
+                .to_string();
+            rest_builder = rest_builder.rest_base_url(rest);
+        }
+        let mut rest = rest_builder.build().expect("rest config");
+        if let Err(e) = async {
+            rest.connect().await?;
+            let ack = rest.update_leverage(SYMBOL, 1).await?;
+            println!(
+                "update_leverage: success={}  order_id={}",
+                ack.success, ack.order_id
+            );
+            rest.disconnect().await
+        }
+        .await
+        {
             dotenv::print_order_error("update_leverage rejected", &e);
-            client.disconnect().await;
-            std::process::exit(1);
         }
     }
 
-    println!("Placing limit BUY @ 67500...");
+    let mark = live_mark_price();
+    let buy_px = (mark * 0.997 * 10.0).round() / 10.0;
+    println!("Placing limit BUY @ {buy_px} (mark={mark})...");
     let buy_ack = match client
         .place_order(
             SYMBOL,
             Side::Buy,
             OrderType::Limit,
             0.1,
-            Some(67_500.0),
+            Some(buy_px),
             TimeInForce::Gtc,
             false,
             None,
@@ -222,9 +249,10 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     drain_orders(&mut order_rx, "after BUY");
 
-    println!("Modifying order price to 68000...");
+    let modify_px = (mark * 0.996 * 10.0).round() / 10.0;
+    println!("Modifying order price to {modify_px}...");
     match client
-        .modify_order(&buy_ack.order_id, SYMBOL, Some(68_000.0), None)
+        .modify_order(&buy_ack.order_id, SYMBOL, Some(modify_px), None)
         .await
     {
         Ok(ack) => println!("Modified: order_id={}", ack.order_id),
@@ -234,14 +262,15 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     drain_orders(&mut order_rx, "after MODIFY");
 
-    println!("Placing limit SELL @ 95000...");
+    let sell_px = (mark * 1.03 * 10.0).round() / 10.0;
+    println!("Placing limit SELL @ {sell_px}...");
     match client
         .place_order(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
             0.05,
-            Some(95_000.0),
+            Some(sell_px),
             TimeInForce::Gtc,
             false,
             None,
@@ -442,14 +471,16 @@ async fn main() {
     let mut balance_count = 0usize;
     while let Ok(b) = balance_rx.try_recv() {
         balance_count += 1;
-        println!("BAL    shielded_raw={}", b.shielded_balance_raw);
+        println!("BAL    balance_raw={}", b.balance_raw);
     }
     let mut margin_count = 0usize;
-    while let Ok(a) = margin_alert_rx.try_recv() {
+    while let Ok(a) = account_margin_rx.try_recv() {
         margin_count += 1;
         println!(
-            "MARGIN symbol={}  tier={}  ratio_bps={}",
-            a.symbol_id, a.tier, a.margin_ratio_bps
+            "MARGIN user={}  ts={}  has_summary={}",
+            a.user_uuid,
+            a.server_timestamp,
+            a.account.is_some()
         );
     }
     let mut funding_count = 0usize;
@@ -460,12 +491,6 @@ async fn main() {
             f.symbol_id, f.current_rate, f.predicted_rate
         );
     }
-    let mut settle_count = 0usize;
-    while let Ok(s) = settlement_rx.try_recv() {
-        settle_count += 1;
-        println!("SETTLE batch={}  status={:?}", s.batch_id, s.status);
-    }
-
     let mut error_count = 0usize;
     while let Ok(e) = error_rx.try_recv() {
         error_count += 1;
@@ -477,7 +502,7 @@ async fn main() {
     println!(
         "  Pushes: snapshots={snap_count}  health={health_count}  \
          balance={balance_count}  margin={margin_count}  \
-         funding={funding_count}  settle={settle_count}"
+         funding={funding_count}"
     );
     println!("  Non-fatal errors received: {error_count}");
     println!("{sep}");

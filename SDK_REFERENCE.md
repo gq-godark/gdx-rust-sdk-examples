@@ -13,7 +13,7 @@ crate sourcing options).
 
 > Scope: the MM examples use **WebSocket encrypted trading** via
 > `godark::GodarkClient`. Encrypted REST trading is not supported — all order
-> flow (place / modify / cancel / mass-quote) runs over the Noise XK WebSocket
+> flow (place / modify / cancel / mass-quote) runs over the HPKE WebSocket
 > client. Standalone market-data surfaces are
 > intentionally excluded from this distribution. Order placement support
 > is limited to `MARKET` and `LIMIT`.
@@ -109,7 +109,7 @@ To consume `godark` from your own project outside this repo, either:
 |--------|-----------|---------|
 | `builder` | `GodarkClient::builder() -> GodarkConfigBuilder` | Start a new client config |
 | `new` | `GodarkClient::new(config) -> GodarkClient` | Construct the client |
-| `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish Noise XK encrypted WebSocket session |
+| `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish HPKE WebSocket session |
 | `disconnect` | `async fn disconnect(&mut self)` | Graceful disconnect |
 | `is_connected` | `fn is_connected(&self) -> bool` | Connection state |
 | `user_uuid` | `fn user_uuid(&self) -> Option<&Uuid>` | Authenticated user id |
@@ -259,7 +259,7 @@ call:
 | Variant | When |
 |---------|------|
 | `Authentication(String)` | API key rejection at session bring-up |
-| `Session(String)` | Noise XK handshake or rekey failure |
+| `Session(String)` | HPKE setup handshake or rekey failure |
 | `Order { message, error_code }` | Order rejected by the sequencer; `error_code` carries the symbolic reason (see below) |
 | `Connection(String)` | Transport-level failure |
 | `Encryption(String)` | Cipher / nonce failure on encrypted payloads |
