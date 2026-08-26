@@ -118,6 +118,7 @@ import re, sys, pathlib
 p = pathlib.Path(sys.argv[1])
 text = p.read_text()
 for mod in ("market_data",):
+    text = re.sub(rf"^mod {mod};\s*\n", "", text, flags=re.M)
     text = re.sub(rf"^pub mod {mod};\s*\n", "", text, flags=re.M)
     text = re.sub(rf"^pub use {mod}::[^;]+;\s*\n", "", text, flags=re.M)
 p.write_text(text)

@@ -153,6 +153,7 @@ python3 - "$UPSTREAM_SRC/src/lib.rs" > "$EXPECTED_LIB_RS" <<'PY'
 import re, sys, pathlib
 text = pathlib.Path(sys.argv[1]).read_text()
 for mod in ("market_data",):
+    text = re.sub(rf"^mod {mod};\s*\n", "", text, flags=re.M)
     text = re.sub(rf"^pub mod {mod};\s*\n", "", text, flags=re.M)
     text = re.sub(rf"^pub use {mod}::[^;]+;\s*\n", "", text, flags=re.M)
 sys.stdout.write(text)
