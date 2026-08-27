@@ -67,10 +67,9 @@ impl CryptoSession {
 
     /// Commit a pending HPKE setup after the sequencer confirms.
     pub fn establish(&mut self) -> Result<(), GodarkError> {
-        let sealed = self
-            .pending_sealed
-            .take()
-            .ok_or_else(|| GodarkError::Session("HPKE setup not pending peer confirmation".into()))?;
+        let sealed = self.pending_sealed.take().ok_or_else(|| {
+            GodarkError::Session("HPKE setup not pending peer confirmation".into())
+        })?;
         self.sealed = Some(sealed);
         self.conn_id = self.pending_conn_id;
         self.pending_conn_id = 0;

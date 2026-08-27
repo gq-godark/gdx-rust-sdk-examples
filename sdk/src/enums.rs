@@ -53,6 +53,10 @@ pub enum CancelReason {
     FokNotFilled,
     Expired,
     System,
+    Adl,
+    LiquidatedCanceled,
+    MarginCanceled,
+    ReduceOnly,
 }
 
 // Proto i32 -> enum conversions
@@ -178,6 +182,10 @@ impl CancelReason {
             3 => Some(Self::FokNotFilled),
             4 => Some(Self::Expired),
             5 => Some(Self::System),
+            6 => Some(Self::Adl),
+            7 => Some(Self::LiquidatedCanceled),
+            8 => Some(Self::MarginCanceled),
+            9 => Some(Self::ReduceOnly),
             _ => None,
         }
     }
@@ -189,6 +197,10 @@ impl CancelReason {
             Self::FokNotFilled => 3,
             Self::Expired => 4,
             Self::System => 5,
+            Self::Adl => 6,
+            Self::LiquidatedCanceled => 7,
+            Self::MarginCanceled => 8,
+            Self::ReduceOnly => 9,
         }
     }
 }
@@ -320,6 +332,10 @@ mod tests {
             CancelReason::FokNotFilled,
             CancelReason::Expired,
             CancelReason::System,
+            CancelReason::Adl,
+            CancelReason::LiquidatedCanceled,
+            CancelReason::MarginCanceled,
+            CancelReason::ReduceOnly,
         ];
         for v in variants {
             assert_eq!(CancelReason::from_proto(v.to_proto()), Some(v));

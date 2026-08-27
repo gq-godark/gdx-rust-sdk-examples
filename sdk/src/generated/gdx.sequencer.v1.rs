@@ -483,7 +483,7 @@ pub struct CancelAllInput {
     #[prost(bytes = "vec", tag = "3")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// Venue Close All: sequencer walks open positions. Does not cancel working orders.
+/// Close All: market IOC reduce-only (`close_reason = manual`).
 /// Absent symbol_id = every market for user_uuid.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CloseAllInput {
@@ -620,8 +620,8 @@ pub struct UpdateMarginModeRequest {
     #[prost(bytes = "vec", tag = "4")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// Cancel order-attached TP/SL without cancelling the parent entry
-/// (when still working) or the open position (when Active).
+/// Cancel TP/SL without cancelling the parent entry or flattening the position.
+/// order_id is the parent; 0 plus symbol_id and position_side selects the open-position leg.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CancelTpslRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -630,6 +630,10 @@ pub struct CancelTpslRequest {
     pub order_id: u64,
     #[prost(bytes = "vec", tag = "3")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, optional, tag = "4")]
+    pub symbol_id: ::core::option::Option<u64>,
+    #[prost(enumeration = "super::super::common::v1::Side", optional, tag = "5")]
+    pub position_side: ::core::option::Option<i32>,
 }
 /// Amend / attach TP/SL on an order or one-way open position.
 /// - Existing attachment: `order_id` is the parent entry id.
@@ -674,12 +678,14 @@ pub struct TpslUpdate {
     pub fired_leg: ::core::option::Option<i32>,
     #[prost(uint64, tag = "10")]
     pub timestamp: u64,
+    #[prost(enumeration = "super::super::common::v1::TpslKind", tag = "11")]
+    pub kind: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EdgeSequencerRequest {
     #[prost(
         oneof = "edge_sequencer_request::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 28"
     )]
     pub inner: ::core::option::Option<edge_sequencer_request::Inner>,
 }
@@ -731,8 +737,6 @@ pub mod edge_sequencer_request {
         GetPositions(super::GetPositionsRequest),
         #[prost(message, tag = "22")]
         GetAccount(super::GetAccountRequest),
-        #[prost(message, tag = "23")]
-        HistoryReplay(super::HistoryReplayRequest),
         #[prost(message, tag = "24")]
         ListMarket(super::ListMarketRequest),
         #[prost(message, tag = "25")]
@@ -822,11 +826,6 @@ pub struct InstrumentRow {
 pub struct InstrumentUpdate {
     #[prost(message, repeated, tag = "1")]
     pub instruments: ::prost::alloc::vec::Vec<InstrumentRow>,
-}
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct HistoryReplayRequest {
-    #[prost(uint64, optional, tag = "1")]
-    pub after_offset: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TradeMessage {
@@ -1164,6 +1163,13 @@ pub struct OrderUpdateMessage {
     pub peg_offset_bps: ::core::option::Option<i32>,
     #[prost(string, optional, tag = "27")]
     pub trigger_price: ::core::option::Option<::prost::alloc::string::String>,
+    /// Order-entry attributes, mirrored from OpenOrderRow 15/16 so the UI can
+    /// badge a resting order from the live push (not just a post-refresh
+    /// snapshot). Only meaningful on Place; false elsewhere.
+    #[prost(bool, tag = "28")]
+    pub reduce_only: bool,
+    #[prost(bool, tag = "29")]
+    pub post_only: bool,
 }
 /// One position inside a `PositionsSnapshot` batch. All decimal fields
 /// are rendered at the sequencer's configured `decimal_places`; PnL /

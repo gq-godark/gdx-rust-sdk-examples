@@ -1366,24 +1366,28 @@ async fn setup_hpke_session_with_transport(
         sess.setup(&remote_static, *user_uuid, conn_id)?
     };
     let frame = wire::encode_hpke_setup(user_uuid.as_bytes(), conn_id, &encapped);
-    let reply = match tokio::time::timeout(HPKE_SETUP_TIMEOUT, transport.send_hpke_setup(frame)).await {
-        Ok(Ok(reply)) => reply,
-        Ok(Err(err)) => {
-            if let Ok(mut sess) = session.lock() {
-                sess.abort_setup();
+    let reply =
+        match tokio::time::timeout(HPKE_SETUP_TIMEOUT, transport.send_hpke_setup(frame)).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(err)) => {
+                if let Ok(mut sess) = session.lock() {
+                    sess.abort_setup();
+                }
+                return Err(err);
             }
-            return Err(err);
-        }
-        Err(_) => {
-            if let Ok(mut sess) = session.lock() {
-                sess.abort_setup();
+            Err(_) => {
+                if let Ok(mut sess) = session.lock() {
+                    sess.abort_setup();
+                }
+                return Err(GodarkError::Session("HPKE setup timed out".into()));
             }
-            return Err(GodarkError::Session("HPKE setup timed out".into()));
-        }
-    };
+        };
     let reply_conn_id = reply
         .get("conn_id")
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(0);
     if reply_conn_id != conn_id {
         if let Ok(mut sess) = session.lock() {
@@ -1703,6 +1707,14 @@ fn parse_cleartext_order_update(msg: &Value) -> Option<OrderUpdate> {
             .or_else(|| msg.get("reject_text"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        reduce_only: msg
+            .get("reduce_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        post_only: msg
+            .get("post_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         correlation_id: json_u128(msg, "correlation_id").unwrap_or_default(),
         timestamp: json_u64(msg, "timestamp").unwrap_or_default(),
     })
@@ -1817,6 +1829,10 @@ fn parse_cancel_reason(raw: Option<&str>) -> Option<CancelReason> {
         Some("FOK_NOT_FILLED") => Some(CancelReason::FokNotFilled),
         Some("EXPIRED") => Some(CancelReason::Expired),
         Some("SYSTEM") => Some(CancelReason::System),
+        Some("ADL") => Some(CancelReason::Adl),
+        Some("LIQUIDATED_CANCELED") => Some(CancelReason::LiquidatedCanceled),
+        Some("MARGIN_CANCELED") => Some(CancelReason::MarginCanceled),
+        Some("REDUCE_ONLY") => Some(CancelReason::ReduceOnly),
         _ => None,
     }
 }
@@ -1868,6 +1884,8 @@ mod tests {
             cancel_reason: None,
             reject_reason: None,
             msg: None,
+            reduce_only: false,
+            post_only: false,
             correlation_id: 0,
             timestamp: 0,
         };
@@ -1906,6 +1924,8 @@ mod tests {
                 cancel_reason: None,
                 reject_reason: None,
                 msg: None,
+                reduce_only: false,
+                post_only: false,
                 correlation_id: 0,
                 timestamp: 0,
             });
@@ -1959,6 +1979,8 @@ mod tests {
             cancel_reason: None,
             reject_reason: None,
             msg: None,
+            reduce_only: false,
+            post_only: false,
             correlation_id: 0,
             timestamp: 0,
         };

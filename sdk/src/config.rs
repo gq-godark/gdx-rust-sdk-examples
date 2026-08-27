@@ -420,6 +420,54 @@ pub(crate) fn gomarket_url(base_url: &str) -> String {
     format!("{url}/ws/gomarket")
 }
 
+/// True when the resolved URL is the public-docs `/ws/v1` path (ignores trailing slash / query).
+pub fn is_docs_wire_url(url: &str) -> bool {
+    let cut = url.split(['?', '#']).next().unwrap_or(url);
+    cut.trim_end_matches('/').ends_with("/ws/v1")
+}
+
+fn env_first(keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Ok(v) = env::var(key) {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+fn env_truthy(keys: &[&str]) -> bool {
+    for key in keys {
+        if let Ok(v) = env::var(key) {
+            let raw = v.trim().to_lowercase();
+            if matches!(raw.as_str(), "1" | "true" | "yes" | "on") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Resolve the market-data WebSocket URL.
+///
+/// Hosted edges default to `/ws/v1`. Override with `GODARK_MARKET_DATA_WS_URL`,
+/// or set `GODARK_MARKET_DATA_USE_GOMARKET=1` for `/ws/gomarket`.
+pub fn resolve_market_data_ws_url(base_url: &str) -> String {
+    if let Some(override_url) = env_first(&["GODARK_MARKET_DATA_WS_URL", "GDX_MARKET_DATA_WS_URL"])
+    {
+        return override_url;
+    }
+    if env_truthy(&[
+        "GODARK_MARKET_DATA_USE_GOMARKET",
+        "GDX_MARKET_DATA_USE_GOMARKET",
+    ]) {
+        return gomarket_url(base_url.trim());
+    }
+    ws_url(base_url.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

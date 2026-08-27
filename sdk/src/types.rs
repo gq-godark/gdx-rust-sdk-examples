@@ -161,6 +161,8 @@ pub struct OrderUpdate {
     pub cancel_reason: Option<CancelReason>,
     pub reject_reason: Option<String>,
     pub msg: Option<String>,
+    pub reduce_only: bool,
+    pub post_only: bool,
     pub correlation_id: u128,
     pub timestamp: u64,
 }
@@ -364,6 +366,8 @@ mod tests {
             cancel_reason: Some(CancelReason::UserRequested),
             reject_reason: Some("bad".to_string()),
             msg: Some("detail".to_string()),
+            reduce_only: true,
+            post_only: false,
             correlation_id: 999,
             timestamp: 1_700_000_000,
         };
@@ -411,6 +415,8 @@ mod tests {
             cancel_reason: None,
             reject_reason: None,
             msg: None,
+            reduce_only: false,
+            post_only: false,
             correlation_id: 0,
             timestamp: 0,
         };

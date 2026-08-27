@@ -569,6 +569,8 @@ pub fn parse_order_update(data: &[u8]) -> Result<OrderUpdate, GodarkError> {
         cancel_reason: msg.cancel_reason.and_then(CancelReason::from_proto),
         reject_reason: msg.reject_reason_code.map(|c: u32| c.to_string()),
         msg: msg.msg,
+        reduce_only: msg.reduce_only,
+        post_only: msg.post_only,
         correlation_id: correlation_id_to_u128(&msg.correlation_id),
         timestamp: msg.timestamp,
     })
@@ -1278,6 +1280,8 @@ mod tests {
             tpsl_status: None,
             peg_offset_bps: None,
             trigger_price: None,
+            reduce_only: true,
+            post_only: false,
         };
         let bytes = msg.encode_to_vec();
         let u = parse_order_update(&bytes).expect("parse");
@@ -1294,6 +1298,8 @@ mod tests {
         assert_eq!(u.cum_fill, "3");
         assert_eq!(u.cancel_reason, Some(CancelReason::Expired));
         assert_eq!(u.reject_reason.as_deref(), Some("42"));
+        assert!(u.reduce_only);
+        assert!(!u.post_only);
         assert_eq!(u.correlation_id, 0x0403_0201);
         assert_eq!(u.timestamp, 1_700_000_000);
     }
@@ -1327,6 +1333,8 @@ mod tests {
             tpsl_status: None,
             peg_offset_bps: None,
             trigger_price: None,
+            reduce_only: false,
+            post_only: true,
         };
         let msg = sequencer::SequencerToEdgeMessage {
             inner: Some(sequencer::sequencer_to_edge_message::Inner::OrderUpdate(

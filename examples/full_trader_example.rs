@@ -515,8 +515,20 @@ fn drain_orders(rx: &mut tokio::sync::mpsc::Receiver<godark::OrderUpdate>, label
     let mut count = 0usize;
     while let Ok(u) = rx.try_recv() {
         count += 1;
+        let badges = format!(
+            "{}{}{}",
+            u.cancel_reason
+                .map(|r| format!("  cancel_reason={r:?}"))
+                .unwrap_or_default(),
+            if u.reduce_only {
+                "  reduce_only=true"
+            } else {
+                ""
+            },
+            if u.post_only { "  post_only=true" } else { "" },
+        );
         println!(
-            "ORDER  {:?}  id={}  status={:?}  filled={}  remaining={}",
+            "ORDER  {:?}  id={}  status={:?}  filled={}  remaining={}{badges}",
             u.update_type, u.order_id, u.status, u.filled_qty, u.remaining_qty
         );
     }

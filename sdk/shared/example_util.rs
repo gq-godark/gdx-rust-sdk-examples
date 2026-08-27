@@ -105,6 +105,7 @@ pub async fn issue_ws_token(
         })
 }
 
+#[allow(dead_code)]
 pub fn sample_mark_price() -> f64 {
     if let Some(raw) = env_first_many(&["GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE"]) {
         if let Ok(v) = raw.parse::<f64>() {
@@ -122,6 +123,7 @@ pub fn sample_mark_price() -> f64 {
     }
 }
 
+#[allow(dead_code)]
 pub fn sample_qty() -> f64 {
     if let Some(raw) = env_first_many(&["GODARK_E2E_QTY", "GDX_E2E_QTY"]) {
         if let Ok(v) = raw.parse::<f64>() {
@@ -147,6 +149,15 @@ pub async fn local_trading_config(transport: TransportConfig) -> Result<GodarkCo
         .transport(transport);
     builder = apply_hpke_pin(builder);
 
+    // Legacy static key (localnet test-key-1) wins when set — matches examples repos
+    // and avoids devnet id+secret in the shell overriding a local .env api_key.
+    if let Some(legacy) = env_first_many(&["GODARK_API_KEY", "GDX_API_KEY"]) {
+        if let Some(uid) = env_first_many(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
+            builder = builder.user_uuid(uid);
+        }
+        return builder.api_key(legacy).build();
+    }
+
     let api_key_id = env_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID");
     let api_secret = env_first("GODARK_API_SECRET", "GDX_API_SECRET");
     let passphrase = env_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE");
@@ -158,13 +169,6 @@ pub async fn local_trading_config(transport: TransportConfig) -> Result<GodarkCo
             .api_secret(sec)
             .passphrase(pass)
             .build();
-    }
-
-    if let Some(legacy) = env_first_many(&["GODARK_API_KEY", "GDX_API_KEY"]) {
-        if let Some(uid) = env_first_many(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
-            builder = builder.user_uuid(uid);
-        }
-        return builder.api_key(legacy).build();
     }
 
     Err(GodarkError::Config(

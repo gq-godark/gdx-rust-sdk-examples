@@ -303,6 +303,36 @@ impl TpslLeg {
         }
     }
 }
+/// Order-attached (parent fill qty) vs entire-position (live size).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum TpslKind {
+    Unspecified = 0,
+    Order = 1,
+    Position = 2,
+}
+impl TpslKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "TPSL_KIND_UNSPECIFIED",
+            Self::Order => "TPSL_KIND_ORDER",
+            Self::Position => "TPSL_KIND_POSITION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "TPSL_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "TPSL_KIND_ORDER" => Some(Self::Order),
+            "TPSL_KIND_POSITION" => Some(Self::Position),
+            _ => None,
+        }
+    }
+}
 /// Reason the sequencer emitted a `PositionsSnapshot`. Carried in the
 /// batch so the frontend can label timing-sensitive UI states (fresh
 /// hydration vs periodic refresh vs event-driven re-render).
@@ -427,7 +457,7 @@ pub enum RequestType {
     BatchModify = 10,
     /// Cancel order-attached TP/SL without cancelling the parent entry.
     CancelTpsl = 11,
-    /// Amend TP/SL triggers on an existing Pending/Active attachment (CEX-style).
+    /// Amend TP/SL triggers on an existing Pending/Active attachment.
     AmendTpsl = 12,
     /// Update per-(user, symbol) margin mode (isolated ↔ cross). Requires flat symbol.
     UpdateMarginMode = 13,
@@ -439,7 +469,7 @@ pub enum RequestType {
     CancelAll = 16,
     /// Close every open position for the session user (optional symbol filter).
     CloseAll = 17,
-    /// Flip one symbol: evict reduce-only, market IOC 2× live size, not reduce-only.
+    /// Close the live position at market, then open the opposite side.
     Reverse = 18,
 }
 impl RequestType {
@@ -575,10 +605,11 @@ impl ResponseMessageType {
         }
     }
 }
-/// Broad cancel-reason bucket. Prefer using one of the existing values
-/// together with `msg` on `OrderUpdateMessage` / `OrderHistoryRow` for
-/// human-readable detail rather than adding new enum values for every
-/// system-initiated cancel sub-type.
+/// Cancel of a working order. `SYSTEM` is the catch-all for engine cancels
+/// that are not one of the dedicated buckets (TIF remainder, expiry, ADL,
+/// liquidation, margin, reduce-only leftover). Prefer a dedicated value when
+/// the cause is a first-class venue rule — do not overload `SYSTEM` + `msg`
+/// for those.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum CancelReason {
@@ -591,6 +622,7 @@ pub enum CancelReason {
     Adl = 6,
     LiquidatedCanceled = 7,
     MarginCanceled = 8,
+    ReduceOnly = 9,
 }
 impl CancelReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -608,6 +640,7 @@ impl CancelReason {
             Self::Adl => "CANCEL_REASON_ADL",
             Self::LiquidatedCanceled => "CANCEL_REASON_LIQUIDATED_CANCELED",
             Self::MarginCanceled => "CANCEL_REASON_MARGIN_CANCELED",
+            Self::ReduceOnly => "CANCEL_REASON_REDUCE_ONLY",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -622,6 +655,7 @@ impl CancelReason {
             "CANCEL_REASON_ADL" => Some(Self::Adl),
             "CANCEL_REASON_LIQUIDATED_CANCELED" => Some(Self::LiquidatedCanceled),
             "CANCEL_REASON_MARGIN_CANCELED" => Some(Self::MarginCanceled),
+            "CANCEL_REASON_REDUCE_ONLY" => Some(Self::ReduceOnly),
             _ => None,
         }
     }
