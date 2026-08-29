@@ -477,18 +477,25 @@ async fn main() {
     while let Ok(a) = account_margin_rx.try_recv() {
         margin_count += 1;
         println!(
-            "MARGIN user={}  ts={}  has_summary={}",
+            "MARGIN user={}  ts={}  isolated_margin={}  cross_im={}",
             a.user_uuid,
             a.server_timestamp,
-            a.account.is_some()
+            a.account
+                .as_ref()
+                .map(|s| s.isolated_margin.as_str())
+                .unwrap_or(""),
+            a.account
+                .as_ref()
+                .map(|s| s.cross_im.as_str())
+                .unwrap_or("")
         );
     }
     let mut funding_count = 0usize;
     while let Ok(f) = funding_rate_rx.try_recv() {
         funding_count += 1;
         println!(
-            "FUND   symbol={}  current={}  predicted={}",
-            f.symbol_id, f.current_rate, f.predicted_rate
+            "FUND   symbol={}  rate={}  last={}",
+            f.symbol_id, f.funding_rate, f.last_funding_rate
         );
     }
     let mut error_count = 0usize;
