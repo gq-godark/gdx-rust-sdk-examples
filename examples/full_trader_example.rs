@@ -142,12 +142,12 @@ async fn main() {
         .unwrap_or_default();
     println!("Authenticated as user_uuid={user}  (HPKE session)");
 
-    if let Err(e) = client.subscribe(&["orders", "positions"]).await {
+    if let Err(e) = client.subscribe(&["orders", "positions", "funding_rate"]).await {
         eprintln!("Subscribe failed: {e}");
         client.disconnect().await;
         std::process::exit(1);
     }
-    println!("Subscribed to order + position updates");
+    println!("Subscribed to order + position + funding updates");
 
     // Drain the initial PositionsSnapshot the sequencer pushes right after subscribe.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -177,42 +177,18 @@ async fn main() {
         }
     }
 
-    println!("Setting leverage to 1 via GodarkRestClient.update_leverage...");
+    println!("Setting leverage to 1 via GodarkClient.update_leverage...");
+    if let Err(e) = async {
+        let ack = client.update_leverage(SYMBOL, 1).await?;
+        println!(
+            "update_leverage: success={}  order_id={}",
+            ack.success, ack.order_id
+        );
+        Ok::<(), godark::GodarkError>(())
+    }
+    .await
     {
-        let mut rest_builder = GodarkRestClient::builder();
-        if let Some(legacy) = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]) {
-            rest_builder = rest_builder.api_key(legacy);
-            if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
-                rest_builder = rest_builder.user_uuid(uid);
-            }
-        } else {
-            rest_builder = rest_builder
-                .api_key_id(dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).unwrap())
-                .api_secret(dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).unwrap())
-                .passphrase(dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).unwrap());
-        }
-        if let Some(base) = edge_override.as_deref() {
-            let rest = base
-                .replace("wss://", "https://")
-                .replace("ws://", "http://")
-                .trim_end_matches("/ws/v1")
-                .to_string();
-            rest_builder = rest_builder.rest_base_url(rest);
-        }
-        let mut rest = rest_builder.build().expect("rest config");
-        if let Err(e) = async {
-            rest.connect().await?;
-            let ack = rest.update_leverage(SYMBOL, 1).await?;
-            println!(
-                "update_leverage: success={}  order_id={}",
-                ack.success, ack.order_id
-            );
-            rest.disconnect().await
-        }
-        .await
-        {
-            dotenv::print_order_error("update_leverage rejected", &e);
-        }
+        dotenv::print_order_error("update_leverage rejected", &e);
     }
 
     let mark = live_mark_price();

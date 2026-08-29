@@ -550,6 +550,7 @@ pub enum ResponseMessageType {
     CancelAllAck = 13,
     CloseAllAck = 14,
     ReverseAck = 15,
+    TpslAck = 16,
 }
 impl ResponseMessageType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -574,6 +575,7 @@ impl ResponseMessageType {
             Self::CancelAllAck => "RESPONSE_MESSAGE_TYPE_CANCEL_ALL_ACK",
             Self::CloseAllAck => "RESPONSE_MESSAGE_TYPE_CLOSE_ALL_ACK",
             Self::ReverseAck => "RESPONSE_MESSAGE_TYPE_REVERSE_ACK",
+            Self::TpslAck => "RESPONSE_MESSAGE_TYPE_TPSL_ACK",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -601,6 +603,7 @@ impl ResponseMessageType {
             "RESPONSE_MESSAGE_TYPE_CANCEL_ALL_ACK" => Some(Self::CancelAllAck),
             "RESPONSE_MESSAGE_TYPE_CLOSE_ALL_ACK" => Some(Self::CloseAllAck),
             "RESPONSE_MESSAGE_TYPE_REVERSE_ACK" => Some(Self::ReverseAck),
+            "RESPONSE_MESSAGE_TYPE_TPSL_ACK" => Some(Self::TpslAck),
             _ => None,
         }
     }
@@ -623,6 +626,8 @@ pub enum CancelReason {
     LiquidatedCanceled = 7,
     MarginCanceled = 8,
     ReduceOnly = 9,
+    StpExpireTaker = 10,
+    StpCancelResting = 11,
 }
 impl CancelReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -641,6 +646,8 @@ impl CancelReason {
             Self::LiquidatedCanceled => "CANCEL_REASON_LIQUIDATED_CANCELED",
             Self::MarginCanceled => "CANCEL_REASON_MARGIN_CANCELED",
             Self::ReduceOnly => "CANCEL_REASON_REDUCE_ONLY",
+            Self::StpExpireTaker => "CANCEL_REASON_STP_EXPIRE_TAKER",
+            Self::StpCancelResting => "CANCEL_REASON_STP_CANCEL_RESTING",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -656,6 +663,8 @@ impl CancelReason {
             "CANCEL_REASON_LIQUIDATED_CANCELED" => Some(Self::LiquidatedCanceled),
             "CANCEL_REASON_MARGIN_CANCELED" => Some(Self::MarginCanceled),
             "CANCEL_REASON_REDUCE_ONLY" => Some(Self::ReduceOnly),
+            "CANCEL_REASON_STP_EXPIRE_TAKER" => Some(Self::StpExpireTaker),
+            "CANCEL_REASON_STP_CANCEL_RESTING" => Some(Self::StpCancelResting),
             _ => None,
         }
     }

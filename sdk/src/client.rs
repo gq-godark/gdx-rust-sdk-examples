@@ -414,6 +414,25 @@ impl GodarkClient {
             .await
     }
 
+    pub async fn update_leverage(
+        &self,
+        symbol: &str,
+        leverage: u32,
+    ) -> Result<OrderAck, GodarkError> {
+        self.ensure_ready()?;
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+        let plaintext = proto_bridge::build_update_leverage_proto(
+            uuid.as_bytes(),
+            symbol_id,
+            leverage,
+            &corr_id,
+        );
+        self.send_encrypted_order("update_leverage", symbol_id, &plaintext, &corr_id)
+            .await
+    }
+
     // ------------------------------------------------------------------
     // Mass quote / batch operations
     // ------------------------------------------------------------------
@@ -1037,6 +1056,14 @@ impl GodarkClient {
                             let _ = order_tx.send(update).await;
                         }
                     }
+                    TransportEvent::PublicMessage(val) => {
+                        for update in proto_bridge::parse_funding_rate_snapshot_json(&val) {
+                            if update.funding_rate.is_empty() {
+                                continue;
+                            }
+                            let _ = funding_rate_tx.send(update).await;
+                        }
+                    }
                     TransportEvent::EncryptedPush(val) => {
                         match decrypt_push_plaintext(&session, &user_uuid, &val) {
                             Ok(plaintext) => {
@@ -1057,6 +1084,10 @@ impl GodarkClient {
                                     let plaintext_corr =
                                         match proto_bridge::parse_node_response(&plaintext) {
                                             Ok(proto_bridge::NodeResponseKind::Ack {
+                                                correlation_id: raw,
+                                                ..
+                                            })
+                                            | Ok(proto_bridge::NodeResponseKind::TpslAck {
                                                 correlation_id: raw,
                                                 ..
                                             }) => {
@@ -1592,6 +1623,14 @@ fn decrypt_push_plaintext(
 fn decode_decrypted_push(message_type: &str, plaintext: &[u8]) -> Result<DecodedPush, GodarkError> {
     if message_type.ends_with("ack") {
         return Ok(DecodedPush::Ignored);
+    }
+
+    if message_type == "open_orders_snapshot" {
+        if let Ok(proto_bridge::NodeResponseKind::OpenOrdersSnapshot(_)) =
+            proto_bridge::parse_node_response(plaintext)
+        {
+            return Ok(DecodedPush::Ignored);
+        }
     }
 
     match proto_bridge::parse_sequencer_to_edge_message(plaintext)? {

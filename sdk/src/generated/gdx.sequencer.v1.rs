@@ -657,6 +657,26 @@ pub struct AmendTpslRequest {
     #[prost(enumeration = "super::super::common::v1::Side", optional, tag = "8")]
     pub position_side: ::core::option::Option<i32>,
 }
+/// RPC reply for amend / cancel TP-SL. Live feed remains TpslUpdate.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TpslAck {
+    #[prost(bytes = "vec", tag = "1")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub parent_order_id: u64,
+    #[prost(string, optional, tag = "3")]
+    pub take_profit: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "4")]
+    pub stop_loss: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(enumeration = "super::super::common::v1::TpslStatus", optional, tag = "5")]
+    pub status: ::core::option::Option<i32>,
+    #[prost(enumeration = "super::super::common::v1::TpslKind", optional, tag = "6")]
+    pub kind: ::core::option::Option<i32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub error_code: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "8")]
+    pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
+}
 /// Dedicated TP/SL lifecycle push (cancel / amend / trigger). Not an order-book event.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TpslUpdate {
@@ -1065,7 +1085,7 @@ pub struct NodeReady {
 pub struct NodeResponse {
     #[prost(
         oneof = "node_response::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13"
     )]
     pub inner: ::core::option::Option<node_response::Inner>,
 }
@@ -1097,6 +1117,8 @@ pub mod node_response {
         CloseAllAck(super::CloseAllAck),
         #[prost(message, tag = "12")]
         ReverseAck(super::ReverseAck),
+        #[prost(message, tag = "13")]
+        TpslAck(super::TpslAck),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1286,6 +1308,15 @@ pub struct AccountMarginSummary {
     /// New tag: do not reuse compacted 1–7.
     #[prost(string, tag = "8")]
     pub realized_pnl: ::prost::alloc::string::String,
+    /// Isolated cash locks (no UPL).
+    #[prost(string, tag = "9")]
+    pub isolated_margin: ::prost::alloc::string::String,
+    /// Isolated cash + isolated UPL, floored per position.
+    #[prost(string, tag = "10")]
+    pub isolated_equity: ::prost::alloc::string::String,
+    /// Cross position IM (no order holds).
+    #[prost(string, tag = "11")]
+    pub cross_im: ::prost::alloc::string::String,
 }
 /// Dedicated account-margin push (encrypted, per user). Emitted on the initial
 /// positions subscribe and whenever the user's collateral, positions, or
@@ -1360,20 +1391,14 @@ pub struct PositionsSnapshot {
 pub struct FundingRateUpdateMessage {
     #[prost(uint64, tag = "1")]
     pub symbol_id: u64,
+    /// In-progress hourly rate (TWAP / 8), decimal fraction.
     #[prost(string, tag = "2")]
-    pub current_rate: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub predicted_rate: ::prost::alloc::string::String,
-    #[prost(uint64, tag = "4")]
-    pub next_funding_time: u64,
-    #[prost(uint64, tag = "5")]
+    pub funding_rate: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
     pub timestamp: u64,
-    /// Maximum absolute funding rate per canonical period in decimal BPS (symmetric cap/floor).
-    #[prost(string, optional, tag = "6")]
-    pub max_rate_bps: ::core::option::Option<::prost::alloc::string::String>,
-    /// Canonical funding period in hours (e.g. 8).
-    #[prost(uint32, optional, tag = "7")]
-    pub funding_period_hours: ::core::option::Option<u32>,
+    /// Last applied hourly rate, decimal fraction.
+    #[prost(string, tag = "4")]
+    pub last_funding_rate: ::prost::alloc::string::String,
 }
 /// Sequencer → edge: a single per-user funding payment applied during the
 /// hourly funding cycle, persisted in the edge's `funding_payments` Postgres
