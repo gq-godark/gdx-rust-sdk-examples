@@ -146,30 +146,6 @@ pub fn build_modify_order_proto(
     req.encode_to_vec()
 }
 
-pub fn build_amend_tpsl_proto(
-    user_uuid: &[u8],
-    order_id: u64,
-    correlation_id_bytes: &[u8],
-    take_profit_price: Option<f64>,
-    stop_loss_price: Option<f64>,
-    symbol_id: Option<u64>,
-    position_side: Option<i32>,
-) -> Vec<u8> {
-    let amend = sequencer::AmendTpslRequest {
-        user_uuid: user_uuid.to_vec(),
-        order_id,
-        correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        take_profit_price,
-        stop_loss_price,
-        symbol_id,
-        position_side,
-    };
-    let req = sequencer::EdgeSequencerRequest {
-        inner: Some(sequencer::edge_sequencer_request::Inner::AmendTpsl(amend)),
-    };
-    req.encode_to_vec()
-}
-
 pub fn build_update_leverage_proto(
     user_uuid: &[u8],
     symbol_id: u64,
@@ -334,23 +310,75 @@ fn mass_quote_leg_status_str(status: i32) -> &'static str {
     }
 }
 
-/// Decode a `NodeResponse` carrying a `MassQuoteAck`. `success` is true when no
-/// leg failed.
+fn mass_quote_ack_from_proto(ack: sequencer::MassQuoteAck) -> crate::types::MassQuoteAck {
+    let results: Vec<crate::types::MassQuoteLegResult> = ack
+        .results
+        .into_iter()
+        .map(|r| crate::types::MassQuoteLegResult {
+            leg_index: r.leg_index,
+            status: mass_quote_leg_status_str(r.status).to_string(),
+            cancelled_order_id: (r.cancelled_order_id != 0)
+                .then(|| r.cancelled_order_id.to_string()),
+            new_order_id: (r.new_order_id != 0).then(|| r.new_order_id.to_string()),
+            error_code: r.error_code,
+            fill_count: r.fill_count,
+        })
+        .collect();
+    let success = !results.is_empty() && results.iter().all(|r| r.status != "failed");
+    crate::types::MassQuoteAck {
+        success,
+        sequence: ack.sequence.to_string(),
+        results,
+    }
+}
+
+fn batch_cancel_ack_from_proto(ack: sequencer::BatchCancelAck) -> crate::types::BatchCancelAck {
+    let results: Vec<crate::types::BatchCancelLegResult> = ack
+        .results
+        .into_iter()
+        .map(|r| crate::types::BatchCancelLegResult {
+            order_id: r.order_id.to_string(),
+            cancelled: r.cancelled,
+            error_code: r.error_code,
+        })
+        .collect();
+    let success = !results.is_empty() && results.iter().all(|r| r.cancelled);
+    crate::types::BatchCancelAck {
+        success,
+        sequence: ack.sequence.to_string(),
+        results,
+    }
+}
+
+fn batch_modify_ack_from_proto(ack: sequencer::BatchModifyAck) -> crate::types::BatchModifyAck {
+    let results: Vec<crate::types::BatchModifyLegResult> = ack
+        .results
+        .into_iter()
+        .map(|r| crate::types::BatchModifyLegResult {
+            order_id: r.order_id.to_string(),
+            modified: r.modified,
+            error_code: r.error_code,
+        })
+        .collect();
+    let success = !results.is_empty() && results.iter().all(|r| r.modified);
+    crate::types::BatchModifyAck {
+        success,
+        sequence: ack.sequence.to_string(),
+        results,
+    }
+}
+
+/// Decode a MassQuoteAck (legacy NodeResponse wrapper or direct message).
 pub fn parse_mass_quote_ack(data: &[u8]) -> Result<crate::types::MassQuoteAck, GodarkError> {
-    let resp = sequencer::NodeResponse::decode(data)
-        .map_err(|e| GodarkError::Encryption(format!("decode NodeResponse: {e}")))?;
-    let ack = match resp.inner {
-        Some(sequencer::node_response::Inner::MassQuoteAck(a)) => a,
-        other => {
-            return Err(GodarkError::Order {
-                message: format!(
-                    "Expected mass_quote_ack, got {}",
-                    node_response_kind(&other)
-                ),
-                error_code: None,
-            });
-        }
-    };
+    let (variant, payload) = resolve_rest_payload(data, Some("mass_quote_ack"));
+    if variant != "mass_quote_ack" {
+        return Err(GodarkError::Order {
+            message: format!("Expected mass_quote_ack, got {variant}"),
+            error_code: None,
+        });
+    }
+    let ack = sequencer::MassQuoteAck::decode(payload.as_slice())
+        .map_err(|e| GodarkError::Encryption(format!("decode MassQuoteAck: {e}")))?;
     let results: Vec<crate::types::MassQuoteLegResult> = ack
         .results
         .into_iter()
@@ -372,23 +400,17 @@ pub fn parse_mass_quote_ack(data: &[u8]) -> Result<crate::types::MassQuoteAck, G
     })
 }
 
-/// Decode a `NodeResponse` carrying a `BatchCancelAck`. `success` is true when
-/// every id was cancelled.
+/// Decode a BatchCancelAck (legacy NodeResponse wrapper or direct message).
 pub fn parse_batch_cancel_ack(data: &[u8]) -> Result<crate::types::BatchCancelAck, GodarkError> {
-    let resp = sequencer::NodeResponse::decode(data)
-        .map_err(|e| GodarkError::Encryption(format!("decode NodeResponse: {e}")))?;
-    let ack = match resp.inner {
-        Some(sequencer::node_response::Inner::BatchCancelAck(a)) => a,
-        other => {
-            return Err(GodarkError::Order {
-                message: format!(
-                    "Expected batch_cancel_ack, got {}",
-                    node_response_kind(&other)
-                ),
-                error_code: None,
-            });
-        }
-    };
+    let (variant, payload) = resolve_rest_payload(data, Some("batch_cancel_ack"));
+    if variant != "batch_cancel_ack" {
+        return Err(GodarkError::Order {
+            message: format!("Expected batch_cancel_ack, got {variant}"),
+            error_code: None,
+        });
+    }
+    let ack = sequencer::BatchCancelAck::decode(payload.as_slice())
+        .map_err(|e| GodarkError::Encryption(format!("decode BatchCancelAck: {e}")))?;
     let results: Vec<crate::types::BatchCancelLegResult> = ack
         .results
         .into_iter()
@@ -406,23 +428,17 @@ pub fn parse_batch_cancel_ack(data: &[u8]) -> Result<crate::types::BatchCancelAc
     })
 }
 
-/// Decode a `NodeResponse` carrying a `BatchModifyAck`. `success` is true when
-/// every leg was modified.
+/// Decode a BatchModifyAck (legacy NodeResponse wrapper or direct message).
 pub fn parse_batch_modify_ack(data: &[u8]) -> Result<crate::types::BatchModifyAck, GodarkError> {
-    let resp = sequencer::NodeResponse::decode(data)
-        .map_err(|e| GodarkError::Encryption(format!("decode NodeResponse: {e}")))?;
-    let ack = match resp.inner {
-        Some(sequencer::node_response::Inner::BatchModifyAck(a)) => a,
-        other => {
-            return Err(GodarkError::Order {
-                message: format!(
-                    "Expected batch_modify_ack, got {}",
-                    node_response_kind(&other)
-                ),
-                error_code: None,
-            });
-        }
-    };
+    let (variant, payload) = resolve_rest_payload(data, Some("batch_modify_ack"));
+    if variant != "batch_modify_ack" {
+        return Err(GodarkError::Order {
+            message: format!("Expected batch_modify_ack, got {variant}"),
+            error_code: None,
+        });
+    }
+    let ack = sequencer::BatchModifyAck::decode(payload.as_slice())
+        .map_err(|e| GodarkError::Encryption(format!("decode BatchModifyAck: {e}")))?;
     let results: Vec<crate::types::BatchModifyLegResult> = ack
         .results
         .into_iter()
@@ -440,13 +456,137 @@ pub fn parse_batch_modify_ack(data: &[u8]) -> Result<crate::types::BatchModifyAc
     })
 }
 
-fn node_response_kind(inner: &Option<sequencer::node_response::Inner>) -> &'static str {
-    match inner {
-        Some(sequencer::node_response::Inner::MassQuoteAck(_)) => "mass_quote_ack",
-        Some(sequencer::node_response::Inner::BatchCancelAck(_)) => "batch_cancel_ack",
-        Some(sequencer::node_response::Inner::BatchModifyAck(_)) => "batch_modify_ack",
-        Some(_) => "other",
-        None => "unknown",
+fn read_varint(data: &[u8], mut i: usize) -> Result<(u64, usize), GodarkError> {
+    let mut shift = 0u32;
+    let mut result = 0u64;
+    while i < data.len() {
+        let b = data[i];
+        i += 1;
+        result |= u64::from(b & 0x7F) << shift;
+        if b & 0x80 == 0 {
+            return Ok((result, i));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(GodarkError::Encryption("varint overflow".into()));
+        }
+    }
+    Err(GodarkError::Encryption("truncated varint".into()))
+}
+
+fn write_varint(mut value: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let mut b = (value & 0x7F) as u8;
+        value >>= 7;
+        if value != 0 {
+            b |= 0x80;
+        }
+        out.push(b);
+        if value == 0 {
+            break;
+        }
+    }
+    out
+}
+
+fn legacy_node_response_field_num(variant: &str) -> Option<u32> {
+    match variant {
+        "ack" => Some(1),
+        "fill" => Some(2),
+        "open_orders_snapshot" => Some(3),
+        "node_ready" => Some(4),
+        "mass_quote_ack" => Some(5),
+        "batch_cancel_ack" => Some(6),
+        "batch_modify_ack" => Some(7),
+        "positions_snapshot" => Some(8),
+        "account_margin_update" => Some(9),
+        "cancel_all_ack" => Some(10),
+        "close_all_ack" => Some(11),
+        "reverse_ack" => Some(12),
+        _ => None,
+    }
+}
+
+fn legacy_node_response_field_name(field_num: u32) -> Option<&'static str> {
+    match field_num {
+        1 => Some("ack"),
+        2 => Some("fill"),
+        3 => Some("open_orders_snapshot"),
+        4 => Some("node_ready"),
+        5 => Some("mass_quote_ack"),
+        6 => Some("batch_cancel_ack"),
+        7 => Some("batch_modify_ack"),
+        8 => Some("positions_snapshot"),
+        9 => Some("account_margin_update"),
+        10 => Some("cancel_all_ack"),
+        11 => Some("close_all_ack"),
+        12 => Some("reverse_ack"),
+        _ => None,
+    }
+}
+
+pub fn wrap_legacy_node_response(variant: &str, inner: &[u8]) -> Vec<u8> {
+    let field_num = legacy_node_response_field_num(variant).expect("known legacy variant");
+    let mut out = vec![((field_num << 3) | 2) as u8];
+    out.extend(write_varint(inner.len() as u64));
+    out.extend_from_slice(inner);
+    out
+}
+
+fn unwrap_legacy_node_response(data: &[u8]) -> Option<(String, Vec<u8>)> {
+    if data.is_empty() {
+        return None;
+    }
+    let tag = data[0];
+    let wire_type = tag & 0x07;
+    let field_num = u32::from(tag >> 3);
+    let variant = legacy_node_response_field_name(field_num)?.to_string();
+    if wire_type != 2 {
+        return None;
+    }
+    let (length, i) = read_varint(data, 1).ok()?;
+    let end = i + length as usize;
+    if end != data.len() {
+        return None;
+    }
+    Some((variant, data[i..end].to_vec()))
+}
+
+fn resolve_rest_payload(data: &[u8], expected: Option<&str>) -> (String, Vec<u8>) {
+    if let Some((variant, inner)) = unwrap_legacy_node_response(data) {
+        return (variant, inner);
+    }
+    if let Some(variant) = expected {
+        return (variant.to_string(), data.to_vec());
+    }
+    ("ack".to_string(), data.to_vec())
+}
+
+fn ack_from_proto(ack: sequencer::AckMessage) -> NodeResponseKind {
+    let (success, error_code, order_status) = match ack.ack_outcome {
+        Some(o) => {
+            let mut success = o.kind == sequencer::AckOutcomeKind::Applied as i32;
+            let error_code = o.business_error_code.or(o.system_error_code);
+            if error_code.is_some() {
+                success = false;
+            }
+            (
+                success,
+                error_code,
+                o.order_status.map(OrderStatus::from_proto),
+            )
+        }
+        None => (false, None, None),
+    };
+    NodeResponseKind::Ack {
+        sequence: ack.sequence,
+        order_id: ack.order_id,
+        success,
+        error_code,
+        reject_text: ack.reject_text,
+        correlation_id: ack.correlation_id,
+        order_status,
     }
 }
 
@@ -523,72 +663,68 @@ pub enum NodeResponseKind {
     OpenOrdersSnapshot(OpenOrdersSnapshot),
     PositionsSnapshot(PositionsSnapshot),
     AccountMarginUpdate(AccountMarginUpdate),
-    TpslAck {
-        correlation_id: Vec<u8>,
-        parent_order_id: u64,
-        take_profit: Option<String>,
-        stop_loss: Option<String>,
-        error_code: Option<u32>,
-        reject_text: Option<String>,
-    },
+    MassQuoteAck(crate::types::MassQuoteAck),
+    BatchCancelAck(crate::types::BatchCancelAck),
+    BatchModifyAck(crate::types::BatchModifyAck),
     Unknown,
 }
 
 pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError> {
-    let resp = sequencer::NodeResponse::decode(data)?;
-    match resp.inner {
-        Some(sequencer::node_response::Inner::Ack(ack)) => {
-            let (success, error_code, order_status) = match ack.ack_outcome {
-                Some(o) => (
-                    o.kind == sequencer::AckOutcomeKind::Applied as i32,
-                    o.business_error_code.or(o.system_error_code),
-                    o.order_status.map(OrderStatus::from_proto),
-                ),
-                None => (false, None, None),
-            };
-            Ok(NodeResponseKind::Ack {
-                sequence: ack.sequence,
-                order_id: ack.order_id,
-                success,
-                error_code,
-                reject_text: ack.reject_text,
-                correlation_id: ack.correlation_id,
-                order_status,
+    let (variant, payload) = resolve_rest_payload(data, Some("ack"));
+    match variant.as_str() {
+        "ack" => {
+            let ack = sequencer::AckMessage::decode(payload.as_slice())?;
+            Ok(ack_from_proto(ack))
+        }
+        "fill" => {
+            let fill = sequencer::TradeMessage::decode(payload.as_slice())?;
+            Ok(NodeResponseKind::Fill {
+                trade_id: fill.trade_id,
+                taker_order_id: fill.taker_order_id,
+                maker_order_id: fill.maker_order_id,
+                symbol_id: fill.symbol_id,
+                timestamp: fill.timestamp,
+                correlation_id: fill.correlation_id,
             })
         }
-        Some(sequencer::node_response::Inner::Fill(fill)) => Ok(NodeResponseKind::Fill {
-            trade_id: fill.trade_id,
-            taker_order_id: fill.taker_order_id,
-            maker_order_id: fill.maker_order_id,
-            symbol_id: fill.symbol_id,
-            timestamp: fill.timestamp,
-            correlation_id: fill.correlation_id,
-        }),
-        Some(sequencer::node_response::Inner::OpenOrdersSnapshot(s)) => Ok(
-            NodeResponseKind::OpenOrdersSnapshot(parse_open_orders_snapshot(s)),
-        ),
-        Some(sequencer::node_response::Inner::PositionsSnapshot(s)) => Ok(
-            NodeResponseKind::PositionsSnapshot(parse_positions_snapshot(s)),
-        ),
-        Some(sequencer::node_response::Inner::AccountMarginUpdate(s)) => Ok(
-            NodeResponseKind::AccountMarginUpdate(parse_account_margin_update(s)),
-        ),
-        Some(sequencer::node_response::Inner::TpslAck(t)) => Ok(NodeResponseKind::TpslAck {
-            correlation_id: t.correlation_id,
-            parent_order_id: t.parent_order_id,
-            take_profit: t.take_profit,
-            stop_loss: t.stop_loss,
-            error_code: t.error_code,
-            reject_text: t.reject_text,
-        }),
-        Some(sequencer::node_response::Inner::NodeReady(_))
-        | Some(sequencer::node_response::Inner::MassQuoteAck(_))
-        | Some(sequencer::node_response::Inner::BatchCancelAck(_))
-        | Some(sequencer::node_response::Inner::BatchModifyAck(_))
-        | Some(sequencer::node_response::Inner::CancelAllAck(_))
-        | Some(sequencer::node_response::Inner::CloseAllAck(_))
-        | Some(sequencer::node_response::Inner::ReverseAck(_)) => Ok(NodeResponseKind::Unknown),
-        None => Ok(NodeResponseKind::Unknown),
+        "open_orders_snapshot" => {
+            let s = sequencer::OpenOrdersSnapshot::decode(payload.as_slice())?;
+            Ok(NodeResponseKind::OpenOrdersSnapshot(
+                parse_open_orders_snapshot(s),
+            ))
+        }
+        "positions_snapshot" => {
+            let s = sequencer::PositionsSnapshot::decode(payload.as_slice())?;
+            Ok(NodeResponseKind::PositionsSnapshot(
+                parse_positions_snapshot(s),
+            ))
+        }
+        "account_margin_update" => {
+            let s = sequencer::AccountMarginUpdate::decode(payload.as_slice())?;
+            Ok(NodeResponseKind::AccountMarginUpdate(
+                parse_account_margin_update(s),
+            ))
+        }
+        "mass_quote_ack" => {
+            let a = sequencer::MassQuoteAck::decode(payload.as_slice())?;
+            Ok(NodeResponseKind::MassQuoteAck(mass_quote_ack_from_proto(a)))
+        }
+        "batch_cancel_ack" => {
+            let a = sequencer::BatchCancelAck::decode(payload.as_slice())?;
+            Ok(NodeResponseKind::BatchCancelAck(
+                batch_cancel_ack_from_proto(a),
+            ))
+        }
+        "batch_modify_ack" => {
+            let a = sequencer::BatchModifyAck::decode(payload.as_slice())?;
+            Ok(NodeResponseKind::BatchModifyAck(
+                batch_modify_ack_from_proto(a),
+            ))
+        }
+        "node_ready" | "cancel_all_ack" | "close_all_ack" | "reverse_ack" => {
+            Ok(NodeResponseKind::Unknown)
+        }
+        _ => Ok(NodeResponseKind::Unknown),
     }
 }
 
@@ -729,46 +865,10 @@ pub fn parse_balance_update(msg: sequencer::BalanceUpdateMessage) -> BalanceUpda
 pub fn parse_funding_rate_update(msg: sequencer::FundingRateUpdateMessage) -> FundingRateUpdate {
     FundingRateUpdate {
         symbol_id: msg.symbol_id,
-        funding_rate: msg.funding_rate,
+        funding_rate: msg.funding_rate.clone(),
         timestamp: msg.timestamp,
-        last_funding_rate: msg.last_funding_rate,
+        last_funding_rate: msg.last_funding_rate.clone(),
     }
-}
-
-pub fn parse_funding_rate_snapshot_json(val: &serde_json::Value) -> Vec<FundingRateUpdate> {
-    if val.get("type").and_then(|v| v.as_str()) != Some("funding_rate_snapshot") {
-        return vec![];
-    }
-    let Some(rows) = val.get("rows").and_then(|v| v.as_array()) else {
-        return vec![];
-    };
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let Some(obj) = row.as_object() else {
-            continue;
-        };
-        let funding_rate = obj
-            .get("funding_rate")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if funding_rate.is_empty() {
-            continue;
-        }
-        let symbol_id = obj.get("symbol_id").and_then(|v| v.as_u64()).unwrap_or(0);
-        let last_funding_rate = obj
-            .get("last_funding_rate")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let timestamp = obj.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-        out.push(FundingRateUpdate {
-            symbol_id,
-            funding_rate: funding_rate.to_string(),
-            timestamp,
-            last_funding_rate,
-        });
-    }
-    out
 }
 
 pub fn parse_account_margin_update(msg: sequencer::AccountMarginUpdate) -> AccountMarginUpdate {
@@ -780,9 +880,6 @@ pub fn parse_account_margin_update(msg: sequencer::AccountMarginUpdate) -> Accou
             position_margin: a.position_margin,
             reserved_order_margin: a.reserved_order_margin,
             free_collateral: a.free_collateral,
-            isolated_margin: a.isolated_margin,
-            isolated_equity: a.isolated_equity,
-            cross_im: a.cross_im,
         }),
     }
 }
@@ -1103,6 +1200,8 @@ mod tests {
             node_id: 1,
             sequence: 99,
             correlation_id: vec![],
+            error_code: None,
+            reject_text: None,
             results: vec![
                 sequencer::MassQuoteLegResult {
                     leg_index: 0,
@@ -1130,10 +1229,8 @@ mod tests {
                 },
             ],
         };
-        let resp = sequencer::NodeResponse {
-            inner: Some(sequencer::node_response::Inner::MassQuoteAck(ack)),
-        };
-        let parsed = parse_mass_quote_ack(&resp.encode_to_vec()).expect("parse");
+        let wire = wrap_legacy_node_response("mass_quote_ack", &ack.encode_to_vec());
+        let parsed = parse_mass_quote_ack(&wire).expect("parse");
         assert!(!parsed.success);
         assert_eq!(parsed.sequence, "99");
         assert_eq!(parsed.results.len(), 3);
@@ -1155,6 +1252,8 @@ mod tests {
             node_id: 1,
             sequence: 5,
             correlation_id: vec![],
+            error_code: None,
+            reject_text: None,
             results: vec![
                 sequencer::BatchCancelLegResult {
                     order_id: 11,
@@ -1168,10 +1267,8 @@ mod tests {
                 },
             ],
         };
-        let resp = sequencer::NodeResponse {
-            inner: Some(sequencer::node_response::Inner::BatchCancelAck(ack)),
-        };
-        let parsed = parse_batch_cancel_ack(&resp.encode_to_vec()).expect("parse");
+        let wire = wrap_legacy_node_response("batch_cancel_ack", &ack.encode_to_vec());
+        let parsed = parse_batch_cancel_ack(&wire).expect("parse");
         assert!(!parsed.success);
         assert_eq!(parsed.results[0].order_id, "11");
         assert!(parsed.results[0].cancelled);
@@ -1185,16 +1282,16 @@ mod tests {
             node_id: 1,
             sequence: 7,
             correlation_id: vec![],
+            error_code: None,
+            reject_text: None,
             results: vec![sequencer::BatchModifyLegResult {
                 order_id: 5,
                 modified: true,
                 error_code: None,
             }],
         };
-        let resp = sequencer::NodeResponse {
-            inner: Some(sequencer::node_response::Inner::BatchModifyAck(ack)),
-        };
-        let parsed = parse_batch_modify_ack(&resp.encode_to_vec()).expect("parse");
+        let wire = wrap_legacy_node_response("batch_modify_ack", &ack.encode_to_vec());
+        let parsed = parse_batch_modify_ack(&wire).expect("parse");
         assert!(parsed.success);
         assert_eq!(parsed.sequence, "7");
         assert_eq!(parsed.results[0].order_id, "5");
@@ -1232,10 +1329,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let resp = sequencer::NodeResponse {
-            inner: Some(sequencer::node_response::Inner::Ack(ack)),
-        };
-        let bytes = resp.encode_to_vec();
+        let bytes = wrap_legacy_node_response("ack", &ack.encode_to_vec());
         match parse_node_response(&bytes).expect("parse") {
             NodeResponseKind::Ack {
                 sequence,
@@ -1248,7 +1342,7 @@ mod tests {
             } => {
                 assert_eq!(sequence, 8);
                 assert_eq!(order_id, 9);
-                assert!(success);
+                assert!(!success);
                 assert_eq!(error_code, Some(404));
                 assert!(reject_text.is_none());
                 assert_eq!(correlation_id, vec![1, 2, 3]);
@@ -1273,10 +1367,9 @@ mod tests {
             }),
             ..Default::default()
         };
-        let resp = sequencer::NodeResponse {
-            inner: Some(sequencer::node_response::Inner::Ack(ack)),
-        };
-        match parse_node_response(&resp.encode_to_vec()).expect("parse") {
+        match parse_node_response(&wrap_legacy_node_response("ack", &ack.encode_to_vec()))
+            .expect("parse")
+        {
             NodeResponseKind::Ack {
                 success,
                 error_code,
@@ -1305,10 +1398,7 @@ mod tests {
             correlation_id: vec![1, 2],
             maker_remaining_qty: None,
         };
-        let resp = sequencer::NodeResponse {
-            inner: Some(sequencer::node_response::Inner::Fill(trade)),
-        };
-        let bytes = resp.encode_to_vec();
+        let bytes = wrap_legacy_node_response("fill", &trade.encode_to_vec());
         match parse_node_response(&bytes).expect("parse") {
             NodeResponseKind::Fill {
                 trade_id,
@@ -1542,8 +1632,8 @@ mod tests {
         let f = sequencer::FundingRateUpdateMessage {
             symbol_id: 1,
             funding_rate: "0.0001".to_string(),
+            last_funding_rate: "0.0002".to_string(),
             timestamp: 1_700_000_004,
-            last_funding_rate: "0.00009".to_string(),
         };
         let msg = sequencer::SequencerToEdgeMessage {
             inner: Some(sequencer::sequencer_to_edge_message::Inner::FundingRateUpdate(f)),
@@ -1552,7 +1642,7 @@ mod tests {
             EdgeMessage::FundingRateUpdate(u) => {
                 assert_eq!(u.symbol_id, 1);
                 assert_eq!(u.funding_rate, "0.0001");
-                assert_eq!(u.last_funding_rate, "0.00009");
+                assert_eq!(u.last_funding_rate, "0.0002");
                 assert_eq!(u.timestamp, 1_700_000_004);
             }
             other => panic!("expected FundingRateUpdate, got {other:?}"),
