@@ -865,11 +865,46 @@ pub fn parse_balance_update(msg: sequencer::BalanceUpdateMessage) -> BalanceUpda
 pub fn parse_funding_rate_update(msg: sequencer::FundingRateUpdateMessage) -> FundingRateUpdate {
     FundingRateUpdate {
         symbol_id: msg.symbol_id,
-        current_rate: msg.funding_rate.clone(),
-        predicted_rate: msg.last_funding_rate.clone(),
-        next_funding_time: 0,
+        funding_rate: msg.funding_rate.clone(),
         timestamp: msg.timestamp,
+        last_funding_rate: msg.last_funding_rate.clone(),
     }
+}
+
+pub fn parse_funding_rate_snapshot_json(val: &serde_json::Value) -> Vec<FundingRateUpdate> {
+    if val.get("type").and_then(|v| v.as_str()) != Some("funding_rate_snapshot") {
+        return vec![];
+    }
+    let Some(rows) = val.get("rows").and_then(|v| v.as_array()) else {
+        return vec![];
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(obj) = row.as_object() else {
+            continue;
+        };
+        let funding_rate = obj
+            .get("funding_rate")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if funding_rate.is_empty() {
+            continue;
+        }
+        let symbol_id = obj.get("symbol_id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let last_funding_rate = obj
+            .get("last_funding_rate")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let timestamp = obj.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+        out.push(FundingRateUpdate {
+            symbol_id,
+            funding_rate: funding_rate.to_string(),
+            timestamp,
+            last_funding_rate,
+        });
+    }
+    out
 }
 
 pub fn parse_account_margin_update(msg: sequencer::AccountMarginUpdate) -> AccountMarginUpdate {
@@ -881,6 +916,9 @@ pub fn parse_account_margin_update(msg: sequencer::AccountMarginUpdate) -> Accou
             position_margin: a.position_margin,
             reserved_order_margin: a.reserved_order_margin,
             free_collateral: a.free_collateral,
+            isolated_margin: a.isolated_margin,
+            isolated_equity: a.isolated_equity,
+            cross_im: a.cross_im,
         }),
     }
 }
@@ -1642,9 +1680,9 @@ mod tests {
         match parse_sequencer_to_edge_message(&msg.encode_to_vec()).expect("parse") {
             EdgeMessage::FundingRateUpdate(u) => {
                 assert_eq!(u.symbol_id, 1);
-                assert_eq!(u.current_rate, "0.0001");
-                assert_eq!(u.predicted_rate, "0.0002");
-                assert_eq!(u.next_funding_time, 0);
+                assert_eq!(u.funding_rate, "0.0001");
+                assert_eq!(u.last_funding_rate, "0.0002");
+                assert_eq!(u.timestamp, 1_700_000_004);
             }
             other => panic!("expected FundingRateUpdate, got {other:?}"),
         }

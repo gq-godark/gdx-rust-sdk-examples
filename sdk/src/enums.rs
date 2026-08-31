@@ -251,6 +251,7 @@ pub(crate) fn response_message_type_to_proto(s: &str) -> i32 {
         "cancel_all_ack" => 13,
         "close_all_ack" => 14,
         "reverse_ack" => 15,
+        "tpsl_ack" => 16,
         _ => 0,
     }
 }
@@ -373,6 +374,7 @@ mod tests {
         assert_eq!(response_message_type_to_proto("ack"), 3);
         assert_eq!(response_message_type_to_proto("open_orders_snapshot"), 4);
         assert_eq!(response_message_type_to_proto("positions_snapshot"), 5);
+        assert_eq!(response_message_type_to_proto("tpsl_ack"), 16);
         assert_eq!(response_message_type_to_proto("unknown"), 0);
     }
 
