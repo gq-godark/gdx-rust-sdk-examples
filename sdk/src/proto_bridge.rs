@@ -689,15 +689,21 @@ pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError>
         }
         "open_orders_snapshot" => {
             let s = sequencer::OpenOrdersSnapshot::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::OpenOrdersSnapshot(parse_open_orders_snapshot(s)))
+            Ok(NodeResponseKind::OpenOrdersSnapshot(
+                parse_open_orders_snapshot(s),
+            ))
         }
         "positions_snapshot" => {
             let s = sequencer::PositionsSnapshot::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::PositionsSnapshot(parse_positions_snapshot(s)))
+            Ok(NodeResponseKind::PositionsSnapshot(
+                parse_positions_snapshot(s),
+            ))
         }
         "account_margin_update" => {
             let s = sequencer::AccountMarginUpdate::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::AccountMarginUpdate(parse_account_margin_update(s)))
+            Ok(NodeResponseKind::AccountMarginUpdate(
+                parse_account_margin_update(s),
+            ))
         }
         "mass_quote_ack" => {
             let a = sequencer::MassQuoteAck::decode(payload.as_slice())?;
@@ -705,11 +711,15 @@ pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError>
         }
         "batch_cancel_ack" => {
             let a = sequencer::BatchCancelAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::BatchCancelAck(batch_cancel_ack_from_proto(a)))
+            Ok(NodeResponseKind::BatchCancelAck(
+                batch_cancel_ack_from_proto(a),
+            ))
         }
         "batch_modify_ack" => {
             let a = sequencer::BatchModifyAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::BatchModifyAck(batch_modify_ack_from_proto(a)))
+            Ok(NodeResponseKind::BatchModifyAck(
+                batch_modify_ack_from_proto(a),
+            ))
         }
         "node_ready" | "cancel_all_ack" | "close_all_ack" | "reverse_ack" => {
             Ok(NodeResponseKind::Unknown)
@@ -1358,7 +1368,9 @@ mod tests {
             }),
             ..Default::default()
         };
-        match parse_node_response(&wrap_legacy_node_response("ack", &ack.encode_to_vec())).expect("parse") {
+        match parse_node_response(&wrap_legacy_node_response("ack", &ack.encode_to_vec()))
+            .expect("parse")
+        {
             NodeResponseKind::Ack {
                 success,
                 error_code,
