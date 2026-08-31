@@ -487,8 +487,8 @@ async fn main() {
     while let Ok(f) = funding_rate_rx.try_recv() {
         funding_count += 1;
         println!(
-            "FUND   symbol={}  current={}  predicted={}",
-            f.symbol_id, f.current_rate, f.predicted_rate
+            "FUND   symbol={}  rate={}  last={}",
+            f.symbol_id, f.funding_rate, f.last_funding_rate
         );
     }
     let mut error_count = 0usize;
