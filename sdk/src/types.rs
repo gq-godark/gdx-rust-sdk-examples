@@ -167,7 +167,7 @@ pub struct OrderUpdate {
     pub timestamp: u64,
 }
 
-/// Authenticated user profile (`GET` platform `/auth/me` when available).
+/// Authenticated user profile (`GET /api/v1/auth/me`, session JWT only).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeProfile {
     #[serde(default, deserialize_with = "deserialize_null_string")]
@@ -269,10 +269,12 @@ pub struct SystemHealthUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FundingRateUpdate {
     pub symbol_id: u64,
-    pub current_rate: String,
-    pub predicted_rate: String,
-    pub next_funding_time: u64,
+    /// In-progress hourly rate (TWAP / 8), decimal fraction.
+    pub funding_rate: String,
+    /// Wall-clock emission time (ns since epoch).
     pub timestamp: u64,
+    /// Last applied hourly rate, decimal fraction.
+    pub last_funding_rate: String,
 }
 
 /// One working order from a [`OpenOrdersSnapshot`].
@@ -316,6 +318,12 @@ pub struct AccountMarginSummary {
     pub position_margin: String,
     pub reserved_order_margin: String,
     pub free_collateral: String,
+    /// Isolated cash locks (no UPL).
+    pub isolated_margin: String,
+    /// Isolated cash + isolated UPL, floored per position.
+    pub isolated_equity: String,
+    /// Cross position IM (no order holds).
+    pub cross_im: String,
 }
 
 /// Dedicated account-margin push for a user. Emitted whenever collateral,
