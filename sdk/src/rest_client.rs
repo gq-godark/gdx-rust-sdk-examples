@@ -149,7 +149,6 @@ pub(crate) fn resolve_rest_hpke_pin(explicit: Option<String>, env: Environment) 
     rest_baked_hpke_pin(env).map(str::to_string)
 }
 
-
 fn json_u128(value: &Value, key: &str) -> Option<u128> {
     value.get(key).and_then(|field| {
         field

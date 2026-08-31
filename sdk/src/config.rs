@@ -302,11 +302,7 @@ impl GodarkConfigBuilder {
         let hpke_static_public_key_hex = self
             .hpke_static_public_key_hex
             .or_else(resolve_hpke_static_public_key_env)
-            .or_else(|| {
-                environment
-                    .hpke_static_public_key_hex()
-                    .map(str::to_string)
-            });
+            .or_else(|| environment.hpke_static_public_key_hex().map(str::to_string));
 
         let place_order_terminal_timeout = self
             .place_order_terminal_timeout
@@ -797,7 +793,10 @@ mod tests {
             .passphrase("pp")
             .build()
             .unwrap();
-        assert_eq!(cfg.hpke_static_public_key_hex.as_deref(), Some(env_pin.as_str()));
+        assert_eq!(
+            cfg.hpke_static_public_key_hex.as_deref(),
+            Some(env_pin.as_str())
+        );
 
         std::env::remove_var("GDX_HPKE_STATIC_PUBLIC_KEY");
     }
