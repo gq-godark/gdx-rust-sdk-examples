@@ -1086,10 +1086,6 @@ impl GodarkClient {
                                             Ok(proto_bridge::NodeResponseKind::Ack {
                                                 correlation_id: raw,
                                                 ..
-                                            })
-                                            | Ok(proto_bridge::NodeResponseKind::TpslAck {
-                                                correlation_id: raw,
-                                                ..
                                             }) => {
                                                 if raw.len() == 16 {
                                                     let mut arr = [0u8; 16];
