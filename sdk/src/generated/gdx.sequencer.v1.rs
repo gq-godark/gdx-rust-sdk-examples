@@ -166,7 +166,7 @@ pub struct UnsubscribePositions {
 }
 /// Request for a synchronous snapshot of the caller's current open orders.
 /// Dispatched directly in the sequencer (no MPC fanout) and replied with
-/// an `OpenOrdersSnapshot` inside `NodeResponse`.
+/// an inner `OpenOrdersSnapshot` on the encrypted RPC body.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetOpenOrdersRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -174,8 +174,8 @@ pub struct GetOpenOrdersRequest {
     #[prost(bytes = "vec", tag = "2")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// Synchronous full-user positions snapshot (no MPC). Reply is `PositionsSnapshot`
-/// inside `NodeResponse`.
+/// Synchronous full-user positions snapshot (no MPC). Reply is an inner
+/// `PositionsSnapshot` on the encrypted RPC body.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetPositionsRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -183,8 +183,8 @@ pub struct GetPositionsRequest {
     #[prost(bytes = "vec", tag = "2")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// Synchronous account-margin snapshot (no MPC). Reply is `AccountMarginUpdate`
-/// inside `NodeResponse`.
+/// Synchronous account-margin snapshot (no MPC). Reply is an inner
+/// `AccountMarginUpdate` on the encrypted RPC body.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetAccountRequest {
     #[prost(bytes = "vec", tag = "1")]
@@ -258,6 +258,10 @@ pub struct OpenOrdersSnapshot {
     /// Fixed-point scale for client/WS decimal formatting (not used on CLOB ticks).
     #[prost(uint32, tag = "4")]
     pub decimal_places: u32,
+    #[prost(uint32, optional, tag = "5")]
+    pub error_code: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// One row of a terminal-state order for edge Postgres persistence
 /// (`OrderHistoryInsertMessage`) and Edge WS JSON history. Mirrors
@@ -367,13 +371,6 @@ pub mod sequencer_message {
         #[prost(message, tag = "12")]
         GetAccount(super::GetAccountRequest),
     }
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct FencedMessage {
-    #[prost(uint64, tag = "1")]
-    pub fencing_epoch: u64,
-    #[prost(message, optional, tag = "2")]
-    pub inner: ::core::option::Option<SequencerMessage>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PlaceOrderInput {
@@ -921,6 +918,10 @@ pub struct MassQuoteAck {
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(message, repeated, tag = "4")]
     pub results: ::prost::alloc::vec::Vec<MassQuoteLegResult>,
+    #[prost(uint32, optional, tag = "5")]
+    pub error_code: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct BatchCancelLegResult {
@@ -941,6 +942,10 @@ pub struct BatchCancelAck {
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(message, repeated, tag = "4")]
     pub results: ::prost::alloc::vec::Vec<BatchCancelLegResult>,
+    #[prost(uint32, optional, tag = "5")]
+    pub error_code: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CancelAllAck {
@@ -954,6 +959,10 @@ pub struct CancelAllAck {
     pub cancelled: u32,
     #[prost(uint64, repeated, tag = "5")]
     pub cancelled_order_ids: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint32, optional, tag = "6")]
+    pub error_code: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "7")]
+    pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CloseAllAck {
@@ -967,6 +976,10 @@ pub struct CloseAllAck {
     pub closed: u32,
     #[prost(uint64, repeated, tag = "5")]
     pub close_order_ids: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint32, optional, tag = "6")]
+    pub error_code: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "7")]
+    pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReverseAck {
@@ -1004,6 +1017,10 @@ pub struct BatchModifyAck {
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(message, repeated, tag = "4")]
     pub results: ::prost::alloc::vec::Vec<BatchModifyLegResult>,
+    #[prost(uint32, optional, tag = "5")]
+    pub error_code: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Phase 5 — liquidity pool command results (edge ↔ sequencer QUIC).
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
@@ -1068,58 +1085,6 @@ pub struct LiquidityPoolUserStatus {
     pub share_value: u64,
     #[prost(uint64, tag = "4")]
     pub cooldown_remaining_seconds: u64,
-}
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct NodeReady {
-    #[prost(uint64, tag = "1")]
-    pub node_id: u64,
-    #[prost(uint64, tag = "2")]
-    pub last_applied_seq: u64,
-    /// Live PrecomputeHealth wire byte (same encoding as AckMessage.node_health).
-    /// Idle tip-aligned heartbeats must report real pool state so the sequencer
-    /// never invents Ready from tip liveness alone after TripleExhausted.
-    #[prost(uint32, optional, tag = "3")]
-    pub node_health: ::core::option::Option<u32>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct NodeResponse {
-    #[prost(
-        oneof = "node_response::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13"
-    )]
-    pub inner: ::core::option::Option<node_response::Inner>,
-}
-/// Nested message and enum types in `NodeResponse`.
-pub mod node_response {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Inner {
-        #[prost(message, tag = "1")]
-        Ack(super::AckMessage),
-        #[prost(message, tag = "2")]
-        Fill(super::TradeMessage),
-        #[prost(message, tag = "3")]
-        OpenOrdersSnapshot(super::OpenOrdersSnapshot),
-        #[prost(message, tag = "4")]
-        NodeReady(super::NodeReady),
-        #[prost(message, tag = "5")]
-        MassQuoteAck(super::MassQuoteAck),
-        #[prost(message, tag = "6")]
-        BatchCancelAck(super::BatchCancelAck),
-        #[prost(message, tag = "7")]
-        BatchModifyAck(super::BatchModifyAck),
-        #[prost(message, tag = "8")]
-        PositionsSnapshot(super::PositionsSnapshot),
-        #[prost(message, tag = "9")]
-        AccountMarginUpdate(super::AccountMarginUpdate),
-        #[prost(message, tag = "10")]
-        CancelAllAck(super::CancelAllAck),
-        #[prost(message, tag = "11")]
-        CloseAllAck(super::CloseAllAck),
-        #[prost(message, tag = "12")]
-        ReverseAck(super::ReverseAck),
-        #[prost(message, tag = "13")]
-        TpslAck(super::TpslAck),
-    }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OrderUpdateMessage {
@@ -1549,13 +1514,6 @@ pub mod sequencer_to_edge_message {
         #[prost(message, tag = "13")]
         InstrumentUpdate(super::InstrumentUpdate),
     }
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct FencedEdgeMessage {
-    #[prost(uint64, tag = "1")]
-    pub fencing_epoch: u64,
-    #[prost(message, optional, tag = "2")]
-    pub inner: ::core::option::Option<SequencerToEdgeMessage>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

@@ -171,7 +171,6 @@ pub enum TransportEvent {
     RekeyRequired(Value),
     OrderUpdate(Value),
     EncryptedPush(Value),
-    PublicMessage(Value),
     HpkeSetupReply { conn_id: u64, established: bool },
     Disconnected,
 }
@@ -617,11 +616,6 @@ impl EdgeTransport {
                 // resolved after decrypt — do not divert acks around that path.
                 let _ = event_tx
                     .send(TransportEvent::EncryptedPush(val.clone()))
-                    .await;
-            }
-            "funding_rate_snapshot" | "volume_snapshot" | "open_interest_snapshot" => {
-                let _ = event_tx
-                    .send(TransportEvent::PublicMessage(val.clone()))
                     .await;
             }
             "ack" | "error" => {

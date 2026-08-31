@@ -3,6 +3,7 @@
 //! Protocol source of truth: **gdx-edge** + **gdx-sequencer** (HPKE Base,
 //! `TradingWsBinaryFrame`, REST one-shot HPKE).
 
+mod access_token;
 mod client;
 mod config;
 mod enums;
@@ -10,7 +11,6 @@ mod error;
 mod generated;
 mod hpke;
 mod instruments;
-mod market_data;
 mod order_error_code;
 mod proto_bridge;
 mod rest_client;
@@ -58,7 +58,6 @@ pub use config::{
 };
 pub use enums::{CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce};
 pub use error::GodarkError;
-pub use market_data::MarketDataClient;
 pub use order_error_code::{find as find_order_error, OrderErrorEntry, ORDER_ERROR_CODES};
 pub use rest_client::{GodarkRestClient, GodarkRestClientBuilder};
 pub use types::{
