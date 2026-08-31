@@ -299,10 +299,21 @@ impl GodarkConfigBuilder {
 
         let user_uuid = self.user_uuid.or_else(resolve_user_uuid_env);
         let environment = self.environment;
+        let pin_env = if self
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            infer_environment_from_edge_url(&base_url)
+        } else {
+            environment
+        };
         let hpke_static_public_key_hex = self
             .hpke_static_public_key_hex
             .or_else(resolve_hpke_static_public_key_env)
-            .or_else(|| environment.hpke_static_public_key_hex().map(str::to_string));
+            .or_else(|| pin_env.hpke_static_public_key_hex().map(str::to_string));
 
         let place_order_terminal_timeout = self
             .place_order_terminal_timeout
@@ -330,6 +341,32 @@ impl Default for GodarkConfigBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn infer_environment_from_edge_url(base: &str) -> Environment {
+    let mut host = base.trim().to_ascii_lowercase();
+    for prefix in ["https://", "http://", "wss://", "ws://"] {
+        if let Some(rest) = host.strip_prefix(prefix) {
+            host = rest.to_string();
+            break;
+        }
+    }
+    if let Some(i) = host.find('/') {
+        host.truncate(i);
+    }
+    if let Some(i) = host.find(':') {
+        host.truncate(i);
+    }
+    if host == "127.0.0.1" || host == "localhost" || host.ends_with(".localhost") {
+        return Environment::Localnet;
+    }
+    if host.contains("devnet") || host == "18.143.165.149" {
+        return Environment::Devnet;
+    }
+    if host.contains("godark-dex.com") {
+        return Environment::Testnet;
+    }
+    Environment::Testnet
 }
 
 /// Resolve passphrase: constructor arg wins, then env vars.
