@@ -10,14 +10,6 @@ repository = "https://github.com/gq-godark/gdx-sdk"
 authors = ["GoDark"]
 keywords = ["godark", "dex", "trading", "websocket", "crypto"]
 categories = ["api-bindings", "cryptography"]
-# Pre-generated protobuf bindings are committed under `src/generated/`, so
-# this bundled copy of `godark` does NOT regenerate them at build time -
-# consumers do not need `protoc` or `prost-build`. Ship only the library
-# target; the SDK's own examples and integration tests are excluded from
-# this distribution.
-autoexamples = false
-autotests = false
-autobenches = false
 
 [dependencies]
 # Async runtime
@@ -43,3 +35,14 @@ hex = "0.4"
 # Observability + errors
 tracing = "0.1"
 thiserror = "2"
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+futures-util = { version = "0.3", features = ["sink"] }
+prost = "0.13"
+base64 = "0.22"
+wiremock = "0.6"

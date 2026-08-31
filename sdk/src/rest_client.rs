@@ -1020,7 +1020,7 @@ impl GodarkRestClient {
         let plaintext = sealed
             .open_s2c(&hpke::nonce_from_u64(nonce), &aad, &ct)
             .map_err(|e| GodarkError::Encryption(format!("Failed to decrypt REST reply: {e}")))?;
-        proto_bridge::parse_node_response(&plaintext)
+        proto_bridge::parse_node_response_with_expected(&plaintext, Some(message_type))
     }
 }
 

@@ -670,7 +670,23 @@ pub enum NodeResponseKind {
 }
 
 pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError> {
-    let (variant, payload) = resolve_rest_payload(data, Some("ack"));
+    parse_node_response_with_expected(data, Some("ack"))
+}
+
+/// Decode REST snapshot/ack plaintext using the JSON ``message_type`` hint.
+pub fn parse_node_response_with_expected(
+    data: &[u8],
+    expected: Option<&str>,
+) -> Result<NodeResponseKind, GodarkError> {
+    let expected = expected.map(|s| {
+        let s = s.replace('-', "_");
+        if s == "account_margin" || s == "account_update" {
+            "account_margin_update".to_string()
+        } else {
+            s
+        }
+    });
+    let (variant, payload) = resolve_rest_payload(data, expected.as_deref());
     match variant.as_str() {
         "ack" => {
             let ack = sequencer::AckMessage::decode(payload.as_slice())?;
@@ -699,7 +715,7 @@ pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError>
                 parse_positions_snapshot(s),
             ))
         }
-        "account_margin_update" => {
+        "account_margin_update" | "account_update" => {
             let s = sequencer::AccountMarginUpdate::decode(payload.as_slice())?;
             Ok(NodeResponseKind::AccountMarginUpdate(
                 parse_account_margin_update(s),
