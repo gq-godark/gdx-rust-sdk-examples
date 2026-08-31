@@ -370,8 +370,7 @@ impl GodarkRestClient {
                 .and_then(|s| Uuid::parse_str(s).ok())
             {
                 self.user_uuid = Some(u);
-            } else if let Some(u) = crate::access_token::user_uuid_from_access_token_jwt(&bearer)
-            {
+            } else if let Some(u) = crate::access_token::user_uuid_from_access_token_jwt(&bearer) {
                 self.user_uuid = Some(u);
             }
         }
@@ -666,16 +665,15 @@ impl GodarkRestClient {
         let symbol_id = self.resolve_symbol(symbol)?;
         let uuid = self.current_user_uuid()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let plaintext = proto_bridge::build_batch_cancel_proto(
-            symbol_id,
-            uuid.as_bytes(),
-            order_ids,
-            &corr_id,
-        );
+        let plaintext =
+            proto_bridge::build_batch_cancel_proto(symbol_id, uuid.as_bytes(), order_ids, &corr_id);
         let (sealed, raw) = self
-            .send_encrypted(
-                EncryptedCall::new("batch_cancel", symbol_id, &plaintext, &corr_id),
-            )
+            .send_encrypted(EncryptedCall::new(
+                "batch_cancel",
+                symbol_id,
+                &plaintext,
+                &corr_id,
+            ))
             .await?;
         match self.decrypt_rest_node_response(&sealed, &raw)? {
             proto_bridge::NodeResponseKind::BatchCancelAck(ack) => Ok(ack),
@@ -697,16 +695,15 @@ impl GodarkRestClient {
         let symbol_id = self.resolve_symbol(symbol)?;
         let uuid = self.current_user_uuid()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let plaintext = proto_bridge::build_batch_modify_proto(
-            symbol_id,
-            uuid.as_bytes(),
-            legs,
-            &corr_id,
-        );
+        let plaintext =
+            proto_bridge::build_batch_modify_proto(symbol_id, uuid.as_bytes(), legs, &corr_id);
         let (sealed, raw) = self
-            .send_encrypted(
-                EncryptedCall::new("batch_modify", symbol_id, &plaintext, &corr_id),
-            )
+            .send_encrypted(EncryptedCall::new(
+                "batch_modify",
+                symbol_id,
+                &plaintext,
+                &corr_id,
+            ))
             .await?;
         match self.decrypt_rest_node_response(&sealed, &raw)? {
             proto_bridge::NodeResponseKind::BatchModifyAck(ack) => Ok(ack),
