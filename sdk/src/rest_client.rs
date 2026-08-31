@@ -268,6 +268,7 @@ impl GodarkRestClientBuilder {
             explicit_symbol_map: self.explicit_symbol_map,
             bearer: None,
             user_uuid,
+            token_scope: None,
             local_coid_index: HashMap::new(),
         })
     }
@@ -293,6 +294,7 @@ pub struct GodarkRestClient {
     explicit_symbol_map: bool,
     bearer: Option<String>,
     user_uuid: Option<Uuid>,
+    token_scope: Option<String>,
     /// Populated after decrypting successful place ACKs; drives cancel-by-coid without sentinel bodies.
     local_coid_index: HashMap<String, String>,
 }
@@ -304,6 +306,10 @@ impl GodarkRestClient {
 
     pub fn user_uuid(&self) -> Option<Uuid> {
         self.user_uuid
+    }
+
+    pub fn token_scope(&self) -> Option<&str> {
+        self.token_scope.as_deref()
     }
 
     fn resolve_symbol(&self, symbol: &str) -> Result<u64, GodarkError> {
@@ -352,12 +358,19 @@ impl GodarkRestClient {
             .map(String::from)
             .ok_or_else(|| GodarkError::Authentication("auth/token missing token".into()))?;
         self.bearer = Some(bearer.clone());
+        self.token_scope = auth_data
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         if self.user_uuid.is_none() {
             if let Some(u) = auth_data
                 .get("user_uuid")
                 .and_then(|v| v.as_str())
                 .and_then(|s| Uuid::parse_str(s).ok())
+            {
+                self.user_uuid = Some(u);
+            } else if let Some(u) = crate::access_token::user_uuid_from_access_token_jwt(&bearer)
             {
                 self.user_uuid = Some(u);
             }
@@ -373,6 +386,7 @@ impl GodarkRestClient {
             let _ = self.http.revoke_token(&b).await; // best-effort
         }
         self.bearer = None;
+        self.token_scope = None;
         self.local_coid_index.clear();
         Ok(())
     }
@@ -604,6 +618,117 @@ impl GodarkRestClient {
         }
     }
 
+    /// Bulk cancel-replace via encrypted `POST /api/v1/orders/massQuote`.
+    pub async fn mass_quote(
+        &mut self,
+        symbol: &str,
+        legs: &[crate::types::MassQuoteLegInput],
+        post_only: Option<bool>,
+    ) -> Result<crate::types::MassQuoteAck, GodarkError> {
+        if legs.is_empty() || legs.len() > 20 {
+            return Err(GodarkError::InvalidInput(
+                "mass quote accepts 1..=20 legs".into(),
+            ));
+        }
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let uuid = self.current_user_uuid()?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let plaintext = proto_bridge::build_mass_quote_proto(
+            symbol_id,
+            uuid.as_bytes(),
+            legs,
+            &corr_id,
+            post_only,
+        );
+        let (sealed, raw) = self
+            .send_encrypted(
+                EncryptedCall::new("mass_quote", symbol_id, &plaintext, &corr_id)
+                    .route(EncryptedRoute::PostPath("/api/v1/orders/massQuote")),
+            )
+            .await?;
+        match self.decrypt_rest_node_response(&sealed, &raw)? {
+            proto_bridge::NodeResponseKind::MassQuoteAck(ack) => Ok(ack),
+            other => Err(snapshot_rpc_error(other, "mass_quote_ack")),
+        }
+    }
+
+    /// Cancel up to 20 resting orders via encrypted `POST /api/v1/orders`.
+    pub async fn batch_cancel(
+        &mut self,
+        symbol: &str,
+        order_ids: &[u64],
+    ) -> Result<crate::types::BatchCancelAck, GodarkError> {
+        if order_ids.is_empty() || order_ids.len() > 20 {
+            return Err(GodarkError::InvalidInput(
+                "batch cancel accepts 1..=20 order ids".into(),
+            ));
+        }
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let uuid = self.current_user_uuid()?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let plaintext = proto_bridge::build_batch_cancel_proto(
+            symbol_id,
+            uuid.as_bytes(),
+            order_ids,
+            &corr_id,
+        );
+        let (sealed, raw) = self
+            .send_encrypted(
+                EncryptedCall::new("batch_cancel", symbol_id, &plaintext, &corr_id),
+            )
+            .await?;
+        match self.decrypt_rest_node_response(&sealed, &raw)? {
+            proto_bridge::NodeResponseKind::BatchCancelAck(ack) => Ok(ack),
+            other => Err(snapshot_rpc_error(other, "batch_cancel_ack")),
+        }
+    }
+
+    /// Post-only amend up to 20 resting orders via encrypted `POST /api/v1/orders`.
+    pub async fn batch_modify(
+        &mut self,
+        symbol: &str,
+        legs: &[crate::types::BatchModifyLegInput],
+    ) -> Result<crate::types::BatchModifyAck, GodarkError> {
+        if legs.is_empty() || legs.len() > 20 {
+            return Err(GodarkError::InvalidInput(
+                "batch modify accepts 1..=20 legs".into(),
+            ));
+        }
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let uuid = self.current_user_uuid()?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let plaintext = proto_bridge::build_batch_modify_proto(
+            symbol_id,
+            uuid.as_bytes(),
+            legs,
+            &corr_id,
+        );
+        let (sealed, raw) = self
+            .send_encrypted(
+                EncryptedCall::new("batch_modify", symbol_id, &plaintext, &corr_id),
+            )
+            .await?;
+        match self.decrypt_rest_node_response(&sealed, &raw)? {
+            proto_bridge::NodeResponseKind::BatchModifyAck(ack) => Ok(ack),
+            other => Err(snapshot_rpc_error(other, "batch_modify_ack")),
+        }
+    }
+
+    /// Public funding-rate snapshot (`GET /api/v1/market-data/funding-rates`).
+    pub async fn get_funding_rates(&self) -> Result<Value, GodarkError> {
+        self.http.get_funding_rates().await
+    }
+
+    /// Public open-interest snapshot (`GET /api/v1/market-data/open-interest`).
+    pub async fn get_open_interest(&self) -> Result<Value, GodarkError> {
+        self.http.get_open_interest().await
+    }
+
+    /// Public 24h volume snapshot (`GET /api/v1/market-data/volume`).
+    pub async fn get_volume(&self) -> Result<Value, GodarkError> {
+        self.http.get_volume().await
+    }
+
     async fn snapshot_rpc(
         &mut self,
         request_type: &str,
@@ -630,7 +755,11 @@ impl GodarkRestClient {
         self.decrypt_rest_node_response(&sealed, &raw)
     }
 
-    /// Fetch the authenticated user's profile from `GET /api/v1/auth/me`.
+    /// Fetch browser session profile from `GET /api/v1/auth/me`.
+    ///
+    /// Requires a **session** JWT (Dynamic login). API-key tokens from
+    /// `auth/token` are rejected; use [`Self::user_uuid()`] after [`Self::connect`]
+    /// instead (parsed from the access JWT `sub` claim).
     pub async fn get_me(&mut self) -> Result<MeProfile, GodarkError> {
         let bearer = self.current_bearer()?.to_string();
         let data = self.http.get_auth_me(&bearer).await?;

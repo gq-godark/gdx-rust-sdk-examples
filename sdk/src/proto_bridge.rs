@@ -146,30 +146,6 @@ pub fn build_modify_order_proto(
     req.encode_to_vec()
 }
 
-pub fn build_amend_tpsl_proto(
-    user_uuid: &[u8],
-    order_id: u64,
-    correlation_id_bytes: &[u8],
-    take_profit_price: Option<f64>,
-    stop_loss_price: Option<f64>,
-    symbol_id: Option<u64>,
-    position_side: Option<i32>,
-) -> Vec<u8> {
-    let amend = sequencer::AmendTpslRequest {
-        user_uuid: user_uuid.to_vec(),
-        order_id,
-        correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        take_profit_price,
-        stop_loss_price,
-        symbol_id,
-        position_side,
-    };
-    let req = sequencer::EdgeSequencerRequest {
-        inner: Some(sequencer::edge_sequencer_request::Inner::AmendTpsl(amend)),
-    };
-    req.encode_to_vec()
-}
-
 pub fn build_update_leverage_proto(
     user_uuid: &[u8],
     symbol_id: u64,
@@ -331,6 +307,64 @@ fn mass_quote_leg_status_str(status: i32) -> &'static str {
         Ok(sequencer::MassQuoteLegStatus::Failed) => "failed",
         Ok(sequencer::MassQuoteLegStatus::Unspecified) => "unspecified",
         Err(_) => "unknown",
+    }
+}
+
+fn mass_quote_ack_from_proto(ack: sequencer::MassQuoteAck) -> crate::types::MassQuoteAck {
+    let results: Vec<crate::types::MassQuoteLegResult> = ack
+        .results
+        .into_iter()
+        .map(|r| crate::types::MassQuoteLegResult {
+            leg_index: r.leg_index,
+            status: mass_quote_leg_status_str(r.status).to_string(),
+            cancelled_order_id: (r.cancelled_order_id != 0)
+                .then(|| r.cancelled_order_id.to_string()),
+            new_order_id: (r.new_order_id != 0).then(|| r.new_order_id.to_string()),
+            error_code: r.error_code,
+            fill_count: r.fill_count,
+        })
+        .collect();
+    let success = !results.is_empty() && results.iter().all(|r| r.status != "failed");
+    crate::types::MassQuoteAck {
+        success,
+        sequence: ack.sequence.to_string(),
+        results,
+    }
+}
+
+fn batch_cancel_ack_from_proto(ack: sequencer::BatchCancelAck) -> crate::types::BatchCancelAck {
+    let results: Vec<crate::types::BatchCancelLegResult> = ack
+        .results
+        .into_iter()
+        .map(|r| crate::types::BatchCancelLegResult {
+            order_id: r.order_id.to_string(),
+            cancelled: r.cancelled,
+            error_code: r.error_code,
+        })
+        .collect();
+    let success = !results.is_empty() && results.iter().all(|r| r.cancelled);
+    crate::types::BatchCancelAck {
+        success,
+        sequence: ack.sequence.to_string(),
+        results,
+    }
+}
+
+fn batch_modify_ack_from_proto(ack: sequencer::BatchModifyAck) -> crate::types::BatchModifyAck {
+    let results: Vec<crate::types::BatchModifyLegResult> = ack
+        .results
+        .into_iter()
+        .map(|r| crate::types::BatchModifyLegResult {
+            order_id: r.order_id.to_string(),
+            modified: r.modified,
+            error_code: r.error_code,
+        })
+        .collect();
+    let success = !results.is_empty() && results.iter().all(|r| r.modified);
+    crate::types::BatchModifyAck {
+        success,
+        sequence: ack.sequence.to_string(),
+        results,
     }
 }
 
@@ -523,14 +557,9 @@ pub enum NodeResponseKind {
     OpenOrdersSnapshot(OpenOrdersSnapshot),
     PositionsSnapshot(PositionsSnapshot),
     AccountMarginUpdate(AccountMarginUpdate),
-    TpslAck {
-        correlation_id: Vec<u8>,
-        parent_order_id: u64,
-        take_profit: Option<String>,
-        stop_loss: Option<String>,
-        error_code: Option<u32>,
-        reject_text: Option<String>,
-    },
+    MassQuoteAck(crate::types::MassQuoteAck),
+    BatchCancelAck(crate::types::BatchCancelAck),
+    BatchModifyAck(crate::types::BatchModifyAck),
     Unknown,
 }
 
@@ -539,11 +568,18 @@ pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError>
     match resp.inner {
         Some(sequencer::node_response::Inner::Ack(ack)) => {
             let (success, error_code, order_status) = match ack.ack_outcome {
-                Some(o) => (
-                    o.kind == sequencer::AckOutcomeKind::Applied as i32,
-                    o.business_error_code.or(o.system_error_code),
-                    o.order_status.map(OrderStatus::from_proto),
-                ),
+                Some(o) => {
+                    let mut success = o.kind == sequencer::AckOutcomeKind::Applied as i32;
+                    let error_code = o.business_error_code.or(o.system_error_code);
+                    if error_code.is_some() {
+                        success = false;
+                    }
+                    (
+                        success,
+                        error_code,
+                        o.order_status.map(OrderStatus::from_proto),
+                    )
+                }
                 None => (false, None, None),
             };
             Ok(NodeResponseKind::Ack {
@@ -573,21 +609,20 @@ pub fn parse_node_response(data: &[u8]) -> Result<NodeResponseKind, GodarkError>
         Some(sequencer::node_response::Inner::AccountMarginUpdate(s)) => Ok(
             NodeResponseKind::AccountMarginUpdate(parse_account_margin_update(s)),
         ),
-        Some(sequencer::node_response::Inner::TpslAck(t)) => Ok(NodeResponseKind::TpslAck {
-            correlation_id: t.correlation_id,
-            parent_order_id: t.parent_order_id,
-            take_profit: t.take_profit,
-            stop_loss: t.stop_loss,
-            error_code: t.error_code,
-            reject_text: t.reject_text,
-        }),
+        Some(sequencer::node_response::Inner::MassQuoteAck(a)) => {
+            Ok(NodeResponseKind::MassQuoteAck(mass_quote_ack_from_proto(a)))
+        }
+        Some(sequencer::node_response::Inner::BatchCancelAck(a)) => {
+            Ok(NodeResponseKind::BatchCancelAck(batch_cancel_ack_from_proto(a)))
+        }
+        Some(sequencer::node_response::Inner::BatchModifyAck(a)) => {
+            Ok(NodeResponseKind::BatchModifyAck(batch_modify_ack_from_proto(a)))
+        }
         Some(sequencer::node_response::Inner::NodeReady(_))
-        | Some(sequencer::node_response::Inner::MassQuoteAck(_))
-        | Some(sequencer::node_response::Inner::BatchCancelAck(_))
-        | Some(sequencer::node_response::Inner::BatchModifyAck(_))
         | Some(sequencer::node_response::Inner::CancelAllAck(_))
         | Some(sequencer::node_response::Inner::CloseAllAck(_))
-        | Some(sequencer::node_response::Inner::ReverseAck(_)) => Ok(NodeResponseKind::Unknown),
+        | Some(sequencer::node_response::Inner::ReverseAck(_))
+        | Some(sequencer::node_response::Inner::TpslAck(_)) => Ok(NodeResponseKind::Unknown),
         None => Ok(NodeResponseKind::Unknown),
     }
 }
@@ -729,52 +764,11 @@ pub fn parse_balance_update(msg: sequencer::BalanceUpdateMessage) -> BalanceUpda
 pub fn parse_funding_rate_update(msg: sequencer::FundingRateUpdateMessage) -> FundingRateUpdate {
     FundingRateUpdate {
         symbol_id: msg.symbol_id,
-        funding_rate: msg.funding_rate,
+        current_rate: msg.funding_rate.clone(),
+        predicted_rate: msg.last_funding_rate.clone(),
+        next_funding_time: 0,
         timestamp: msg.timestamp,
-        last_funding_rate: msg.last_funding_rate,
     }
-}
-
-pub fn parse_funding_rate_snapshot_json(val: &serde_json::Value) -> Vec<FundingRateUpdate> {
-    if val.get("type").and_then(|v| v.as_str()) != Some("funding_rate_snapshot") {
-        return vec![];
-    }
-    let Some(rows) = val.get("rows").and_then(|v| v.as_array()) else {
-        return vec![];
-    };
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let Some(obj) = row.as_object() else {
-            continue;
-        };
-        let funding_rate = obj
-            .get("funding_rate")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if funding_rate.is_empty() {
-            continue;
-        }
-        let symbol_id = obj
-            .get("symbol_id")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let last_funding_rate = obj
-            .get("last_funding_rate")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let timestamp = obj
-            .get("timestamp")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        out.push(FundingRateUpdate {
-            symbol_id,
-            funding_rate: funding_rate.to_string(),
-            timestamp,
-            last_funding_rate,
-        });
-    }
-    out
 }
 
 pub fn parse_account_margin_update(msg: sequencer::AccountMarginUpdate) -> AccountMarginUpdate {
@@ -786,9 +780,6 @@ pub fn parse_account_margin_update(msg: sequencer::AccountMarginUpdate) -> Accou
             position_margin: a.position_margin,
             reserved_order_margin: a.reserved_order_margin,
             free_collateral: a.free_collateral,
-            isolated_margin: a.isolated_margin,
-            isolated_equity: a.isolated_equity,
-            cross_im: a.cross_im,
         }),
     }
 }
@@ -1547,9 +1538,12 @@ mod tests {
     fn test_parse_funding_rate_update_round_trip() {
         let f = sequencer::FundingRateUpdateMessage {
             symbol_id: 1,
-            funding_rate: "0.0001".to_string(),
+            current_rate: "0.0001".to_string(),
+            predicted_rate: "0.0002".to_string(),
+            next_funding_time: 1_700_003_600,
             timestamp: 1_700_000_004,
-            last_funding_rate: "0.00009".to_string(),
+            max_rate_bps: None,
+            funding_period_hours: None,
         };
         let msg = sequencer::SequencerToEdgeMessage {
             inner: Some(sequencer::sequencer_to_edge_message::Inner::FundingRateUpdate(f)),
@@ -1557,9 +1551,9 @@ mod tests {
         match parse_sequencer_to_edge_message(&msg.encode_to_vec()).expect("parse") {
             EdgeMessage::FundingRateUpdate(u) => {
                 assert_eq!(u.symbol_id, 1);
-                assert_eq!(u.funding_rate, "0.0001");
-                assert_eq!(u.last_funding_rate, "0.00009");
-                assert_eq!(u.timestamp, 1_700_000_004);
+                assert_eq!(u.current_rate, "0.0001");
+                assert_eq!(u.predicted_rate, "0.0002");
+                assert_eq!(u.next_funding_time, 1_700_003_600);
             }
             other => panic!("expected FundingRateUpdate, got {other:?}"),
         }

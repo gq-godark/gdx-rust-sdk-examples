@@ -252,6 +252,39 @@ impl RestTransport {
             .map_err(|e| GodarkError::Connection(format!("GET /auth/me: {e}")))?;
         parse_ok_json(r).await
     }
+
+    /// Public funding rates (`GET /api/v1/market-data/funding-rates`, raw JSON array).
+    pub async fn get_funding_rates(&self) -> Result<Value> {
+        let r = self
+            .client
+            .get(self.url("/api/v1/market-data/funding-rates"))
+            .send()
+            .await
+            .map_err(|e| GodarkError::Connection(format!("GET funding-rates: {e}")))?;
+        parse_ok_json(r).await
+    }
+
+    /// Public open interest (`GET /api/v1/market-data/open-interest`, raw JSON array).
+    pub async fn get_open_interest(&self) -> Result<Value> {
+        let r = self
+            .client
+            .get(self.url("/api/v1/market-data/open-interest"))
+            .send()
+            .await
+            .map_err(|e| GodarkError::Connection(format!("GET open-interest: {e}")))?;
+        parse_ok_json(r).await
+    }
+
+    /// Public 24h volume (`GET /api/v1/market-data/volume`, raw JSON object).
+    pub async fn get_volume(&self) -> Result<Value> {
+        let r = self
+            .client
+            .get(self.url("/api/v1/market-data/volume"))
+            .send()
+            .await
+            .map_err(|e| GodarkError::Connection(format!("GET volume: {e}")))?;
+        parse_ok_json(r).await
+    }
 }
 
 fn data_clone_from_env(v: &Value) -> Result<Value> {

@@ -242,6 +242,7 @@ pub(crate) fn response_message_type_to_proto(s: &str) -> i32 {
         "positions_snapshot" => 5,
         "balance_and_position" => 6,
         "account_margin_update" => 7,
+        "account_update" => 7, // devnet alias
         "mass_quote_ack" => 8,
         "batch_cancel_ack" => 9,
         "batch_modify_ack" => 10,
@@ -250,7 +251,6 @@ pub(crate) fn response_message_type_to_proto(s: &str) -> i32 {
         "cancel_all_ack" => 13,
         "close_all_ack" => 14,
         "reverse_ack" => 15,
-        "tpsl_ack" => 16,
         _ => 0,
     }
 }
@@ -373,7 +373,6 @@ mod tests {
         assert_eq!(response_message_type_to_proto("ack"), 3);
         assert_eq!(response_message_type_to_proto("open_orders_snapshot"), 4);
         assert_eq!(response_message_type_to_proto("positions_snapshot"), 5);
-        assert_eq!(response_message_type_to_proto("tpsl_ack"), 16);
         assert_eq!(response_message_type_to_proto("unknown"), 0);
     }
 

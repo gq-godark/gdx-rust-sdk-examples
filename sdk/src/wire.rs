@@ -64,7 +64,6 @@ pub fn encrypted_push_to_json(push: &edge::EncryptedEdgeResponse) -> Option<serd
         10 => "batch_modify_ack",
         11 => "tpsl_update",
         12 => "leverage_settings",
-        16 => "tpsl_ack",
         _ => "unknown",
     };
     let corr = if h.correlation_id.is_empty() {
