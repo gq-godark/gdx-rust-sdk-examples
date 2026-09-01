@@ -12,10 +12,9 @@ use crate::generated::health::v1 as health;
 use crate::generated::sequencer::v1 as sequencer;
 use crate::types::{
     AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, CountAck, FundingRateUpdate,
-    TpslAck,
     LeverageSetting, LeverageSettings, OpenOrderRow, OpenOrdersSnapshot, OrderUpdate,
-    PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource,
-    SystemHealthUpdate,
+    PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource, SystemHealthUpdate,
+    TpslAck,
 };
 
 /// Encode a correlation id (16 raw UUID bytes, big-endian layout) as the
@@ -136,7 +135,9 @@ pub fn build_cancel_all_proto(
         user_uuid: user_uuid.to_vec(),
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
     };
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::CancelAll(cancel_all))
+    encode_edge_request(sequencer::edge_sequencer_request::Inner::CancelAll(
+        cancel_all,
+    ))
 }
 
 pub fn build_close_all_proto(
@@ -149,7 +150,9 @@ pub fn build_close_all_proto(
         user_uuid: user_uuid.to_vec(),
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
     };
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::CloseAll(close_all))
+    encode_edge_request(sequencer::edge_sequencer_request::Inner::CloseAll(
+        close_all,
+    ))
 }
 
 pub fn build_reverse_proto(
@@ -1292,7 +1295,10 @@ mod tests {
         };
         assert!(place.reduce_only);
         assert!(place.post_only);
-        assert_eq!(place.stp_mode, crate::enums::StpMode::CancelAggressor.to_proto());
+        assert_eq!(
+            place.stp_mode,
+            crate::enums::StpMode::CancelAggressor.to_proto()
+        );
     }
 
     #[test]
@@ -1334,15 +1340,7 @@ mod tests {
 
     #[test]
     fn test_build_modify_order_new_trigger_price() {
-        let bytes = build_modify_order_proto(
-            7,
-            &TEST_UUID,
-            9,
-            None,
-            None,
-            Some(88.25),
-            &TEST_UUID,
-        );
+        let bytes = build_modify_order_proto(7, &TEST_UUID, 9, None, None, Some(88.25), &TEST_UUID);
         let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
         let modify = match decoded.inner {
             Some(sequencer::edge_sequencer_request::Inner::Modify(m)) => m,
@@ -1398,15 +1396,8 @@ mod tests {
 
     #[test]
     fn test_build_modify_order_roundtrip() {
-        let bytes = build_modify_order_proto(
-            7,
-            &TEST_UUID,
-            9,
-            Some(2.25),
-            Some(3.5),
-            None,
-            &TEST_UUID,
-        );
+        let bytes =
+            build_modify_order_proto(7, &TEST_UUID, 9, Some(2.25), Some(3.5), None, &TEST_UUID);
         let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
         let modify = match decoded.inner {
             Some(sequencer::edge_sequencer_request::Inner::Modify(m)) => m,
@@ -2087,10 +2078,7 @@ mod tests {
                 assert_eq!(settings.settings[0].leverage, 5);
                 assert_eq!(settings.settings[1].symbol_id, 7);
                 assert_eq!(settings.server_timestamp, Some(1_700_000_005));
-                assert_eq!(
-                    settings.user_uuid,
-                    Some(Uuid::from_bytes(TEST_UUID))
-                );
+                assert_eq!(settings.user_uuid, Some(Uuid::from_bytes(TEST_UUID)));
             }
             other => panic!("expected LeverageSettings, got {other:?}"),
         }

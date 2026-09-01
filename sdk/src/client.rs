@@ -173,9 +173,7 @@ impl GodarkClient {
 
     /// Per-symbol leverage settings pushed on positions subscribe and after
     /// `update_leverage`.
-    pub fn take_leverage_settings_receiver(
-        &mut self,
-    ) -> Option<mpsc::Receiver<LeverageSettings>> {
+    pub fn take_leverage_settings_receiver(&mut self) -> Option<mpsc::Receiver<LeverageSettings>> {
         self.leverage_settings_rx.take()
     }
 
@@ -527,11 +525,8 @@ impl GodarkClient {
         let body_symbol_id = symbol.map(|sym| self.resolve_symbol(sym)).transpose()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let uuid = self.current_user_uuid()?;
-        let plaintext = proto_bridge::build_cancel_all_proto(
-            body_symbol_id,
-            uuid.as_bytes(),
-            &corr_id,
-        );
+        let plaintext =
+            proto_bridge::build_cancel_all_proto(body_symbol_id, uuid.as_bytes(), &corr_id);
         let response = self
             .send_encrypted_command("cancel_all", header_symbol_id, &plaintext, &corr_id)
             .await?;
@@ -552,11 +547,8 @@ impl GodarkClient {
         let body_symbol_id = symbol.map(|sym| self.resolve_symbol(sym)).transpose()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let uuid = self.current_user_uuid()?;
-        let plaintext = proto_bridge::build_close_all_proto(
-            body_symbol_id,
-            uuid.as_bytes(),
-            &corr_id,
-        );
+        let plaintext =
+            proto_bridge::build_close_all_proto(body_symbol_id, uuid.as_bytes(), &corr_id);
         let response = self
             .send_encrypted_command("close_all", header_symbol_id, &plaintext, &corr_id)
             .await?;
@@ -572,8 +564,7 @@ impl GodarkClient {
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let uuid = self.current_user_uuid()?;
-        let plaintext =
-            proto_bridge::build_reverse_proto(symbol_id, uuid.as_bytes(), &corr_id);
+        let plaintext = proto_bridge::build_reverse_proto(symbol_id, uuid.as_bytes(), &corr_id);
         let response = self
             .send_encrypted_command("reverse", symbol_id, &plaintext, &corr_id)
             .await?;
@@ -1193,10 +1184,7 @@ impl GodarkClient {
         Ok(ack)
     }
 
-    fn parse_tpsl_ack_response(
-        &self,
-        msg: &Value,
-    ) -> Result<crate::types::TpslAck, GodarkError> {
+    fn parse_tpsl_ack_response(&self, msg: &Value) -> Result<crate::types::TpslAck, GodarkError> {
         let plaintext = self.decrypt_command_plaintext(msg, "tpsl_ack")?;
         let ack = proto_bridge::parse_tpsl_ack(&plaintext)?;
         if let Some(code) = ack.error_code {
