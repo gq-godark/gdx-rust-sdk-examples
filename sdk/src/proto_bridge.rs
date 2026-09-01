@@ -637,24 +637,7 @@ fn unwrap_legacy_node_response(data: &[u8]) -> Option<(String, Vec<u8>)> {
     Some((variant, data[i..end].to_vec()))
 }
 
-fn is_direct_hotpath_count_ack(expected: Option<&str>) -> bool {
-    matches!(
-        expected,
-        Some("cancel_all_ack") | Some("close_all_ack") | Some("reverse_ack")
-    )
-}
-
 fn resolve_rest_payload(data: &[u8], expected: Option<&str>) -> (String, Vec<u8>) {
-    // Hotpath count acks are usually direct protobuf; field 3 collides with legacy snapshot wrap.
-    if is_direct_hotpath_count_ack(expected) {
-        let expected = expected.unwrap();
-        if let Some((variant, inner)) = unwrap_legacy_node_response(data) {
-            if variant == expected {
-                return (variant, inner);
-            }
-        }
-        return (expected.to_string(), data.to_vec());
-    }
     if let Some((variant, inner)) = unwrap_legacy_node_response(data) {
         return (variant, inner);
     }
@@ -662,6 +645,81 @@ fn resolve_rest_payload(data: &[u8], expected: Option<&str>) -> (String, Vec<u8>
         return (variant.to_string(), data.to_vec());
     }
     ("ack".to_string(), data.to_vec())
+}
+
+fn decode_node_response_variant(
+    variant: &str,
+    payload: &[u8],
+) -> Result<NodeResponseKind, GodarkError> {
+    match variant {
+        "ack" => {
+            let ack = sequencer::AckMessage::decode(payload)?;
+            Ok(ack_from_proto(ack))
+        }
+        "fill" => {
+            let fill = sequencer::TradeMessage::decode(payload)?;
+            Ok(NodeResponseKind::Fill {
+                trade_id: fill.trade_id,
+                taker_order_id: fill.taker_order_id,
+                maker_order_id: fill.maker_order_id,
+                symbol_id: fill.symbol_id,
+                timestamp: fill.timestamp,
+                correlation_id: fill.correlation_id,
+            })
+        }
+        "open_orders_snapshot" => {
+            let s = sequencer::OpenOrdersSnapshot::decode(payload)?;
+            Ok(NodeResponseKind::OpenOrdersSnapshot(
+                parse_open_orders_snapshot(s),
+            ))
+        }
+        "positions_snapshot" => {
+            let s = sequencer::PositionsSnapshot::decode(payload)?;
+            Ok(NodeResponseKind::PositionsSnapshot(
+                parse_positions_snapshot(s),
+            ))
+        }
+        "account_margin_update" | "account_update" => {
+            let s = sequencer::AccountMarginUpdate::decode(payload)?;
+            Ok(NodeResponseKind::AccountMarginUpdate(
+                parse_account_margin_update(s),
+            ))
+        }
+        "mass_quote_ack" => {
+            let a = sequencer::MassQuoteAck::decode(payload)?;
+            Ok(NodeResponseKind::MassQuoteAck(mass_quote_ack_from_proto(a)))
+        }
+        "batch_cancel_ack" => {
+            let a = sequencer::BatchCancelAck::decode(payload)?;
+            Ok(NodeResponseKind::BatchCancelAck(
+                batch_cancel_ack_from_proto(a),
+            ))
+        }
+        "batch_modify_ack" => {
+            let a = sequencer::BatchModifyAck::decode(payload)?;
+            Ok(NodeResponseKind::BatchModifyAck(
+                batch_modify_ack_from_proto(a),
+            ))
+        }
+        "cancel_all_ack" => {
+            let a = sequencer::CancelAllAck::decode(payload)?;
+            Ok(NodeResponseKind::CountAck(count_ack_from_cancel_all(a)))
+        }
+        "close_all_ack" => {
+            let a = sequencer::CloseAllAck::decode(payload)?;
+            Ok(NodeResponseKind::CountAck(count_ack_from_close_all(a)))
+        }
+        "reverse_ack" => {
+            let a = sequencer::ReverseAck::decode(payload)?;
+            Ok(NodeResponseKind::CountAck(count_ack_from_reverse(a)))
+        }
+        "tpsl_ack" => {
+            let a = sequencer::TpslAck::decode(payload)?;
+            Ok(NodeResponseKind::TpslAck(tpsl_ack_from_proto(a)))
+        }
+        "node_ready" => Ok(NodeResponseKind::Unknown),
+        _ => Ok(NodeResponseKind::Unknown),
+    }
 }
 
 fn ack_from_proto(ack: sequencer::AckMessage) -> NodeResponseKind {
@@ -790,75 +848,17 @@ pub fn parse_node_response_with_expected(
         }
     });
     let (variant, payload) = resolve_rest_payload(data, expected.as_deref());
-    match variant.as_str() {
-        "ack" => {
-            let ack = sequencer::AckMessage::decode(payload.as_slice())?;
-            Ok(ack_from_proto(ack))
+    let first = decode_node_response_variant(&variant, &payload);
+    if first.is_err() {
+        if let Some(exp) = expected.as_deref() {
+            if exp != variant {
+                if let Ok(kind) = decode_node_response_variant(exp, data) {
+                    return Ok(kind);
+                }
+            }
         }
-        "fill" => {
-            let fill = sequencer::TradeMessage::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::Fill {
-                trade_id: fill.trade_id,
-                taker_order_id: fill.taker_order_id,
-                maker_order_id: fill.maker_order_id,
-                symbol_id: fill.symbol_id,
-                timestamp: fill.timestamp,
-                correlation_id: fill.correlation_id,
-            })
-        }
-        "open_orders_snapshot" => {
-            let s = sequencer::OpenOrdersSnapshot::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::OpenOrdersSnapshot(
-                parse_open_orders_snapshot(s),
-            ))
-        }
-        "positions_snapshot" => {
-            let s = sequencer::PositionsSnapshot::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::PositionsSnapshot(
-                parse_positions_snapshot(s),
-            ))
-        }
-        "account_margin_update" | "account_update" => {
-            let s = sequencer::AccountMarginUpdate::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::AccountMarginUpdate(
-                parse_account_margin_update(s),
-            ))
-        }
-        "mass_quote_ack" => {
-            let a = sequencer::MassQuoteAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::MassQuoteAck(mass_quote_ack_from_proto(a)))
-        }
-        "batch_cancel_ack" => {
-            let a = sequencer::BatchCancelAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::BatchCancelAck(
-                batch_cancel_ack_from_proto(a),
-            ))
-        }
-        "batch_modify_ack" => {
-            let a = sequencer::BatchModifyAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::BatchModifyAck(
-                batch_modify_ack_from_proto(a),
-            ))
-        }
-        "cancel_all_ack" => {
-            let a = sequencer::CancelAllAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::CountAck(count_ack_from_cancel_all(a)))
-        }
-        "close_all_ack" => {
-            let a = sequencer::CloseAllAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::CountAck(count_ack_from_close_all(a)))
-        }
-        "reverse_ack" => {
-            let a = sequencer::ReverseAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::CountAck(count_ack_from_reverse(a)))
-        }
-        "tpsl_ack" => {
-            let a = sequencer::TpslAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::TpslAck(tpsl_ack_from_proto(a)))
-        }
-        "node_ready" => Ok(NodeResponseKind::Unknown),
-        _ => Ok(NodeResponseKind::Unknown),
     }
+    first
 }
 
 fn tpsl_ack_from_proto(ack: sequencer::TpslAck) -> TpslAck {
@@ -1365,6 +1365,84 @@ mod tests {
         assert_eq!(parsed.sequence, "99");
         assert_eq!(parsed.count, 2);
         assert_eq!(parsed.order_ids, vec!["10".to_string(), "20".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_cancel_all_ack_direct_hotpath() {
+        let ack = sequencer::CancelAllAck {
+            node_id: 1,
+            sequence: 42,
+            correlation_id: vec![9u8; 16],
+            error_code: None,
+            reject_text: None,
+            cancelled: 1,
+            cancelled_order_ids: vec![7],
+        };
+        let wire = ack.encode_to_vec();
+        let parsed = parse_count_ack(&wire, "cancel_all_ack").expect("parse direct hotpath");
+        assert_eq!(parsed.sequence, "42");
+        assert_eq!(parsed.count, 1);
+    }
+
+    #[test]
+    fn test_parse_count_ack_legacy_rejection_ack() {
+        let ack = sequencer::AckMessage {
+            sequence: 42,
+            order_id: 0,
+            correlation_id: vec![9u8; 16],
+            pool_ack: None,
+            reject_text: Some("no open orders".into()),
+            ack_outcome: Some(sequencer::AckOutcomeWire {
+                kind: sequencer::AckOutcomeKind::SystemFailed as i32,
+                business_error_code: Some(1234),
+                ..Default::default()
+            }),
+        };
+        let wire = wrap_legacy_node_response("ack", &ack.encode_to_vec());
+        let err = parse_count_ack(&wire, "cancel_all_ack").expect_err("rejection");
+        assert!(err.to_string().contains("1234") || err.to_string().contains("no open orders"));
+    }
+
+    #[test]
+    fn test_parse_open_orders_snapshot_direct_not_misidentified_as_ack() {
+        let row = sequencer::OpenOrderRow {
+            order_id: 1,
+            symbol_id: 7,
+            side: Side::Buy.to_proto(),
+            order_type: OrderType::Limit.to_proto(),
+            price: "100".into(),
+            quantity: "1".into(),
+            filled_qty: "0".into(),
+            remaining_qty: "1".into(),
+            order_status: OrderStatus::New.to_proto(),
+            time_in_force: TimeInForce::Gtc.to_proto(),
+            leverage: 1,
+            timestamp: 0,
+            correlation_id: vec![],
+            expiry_time: None,
+            reduce_only: false,
+            post_only: false,
+            take_profit: None,
+            stop_loss: None,
+            tpsl_status: None,
+            close_reason: None,
+            peg_offset_bps: None,
+            trigger_price: None,
+        };
+        let snap = sequencer::OpenOrdersSnapshot {
+            rows: vec![row],
+            server_timestamp: 0,
+            correlation_id: vec![],
+            decimal_places: 0,
+            error_code: None,
+            reject_text: None,
+        };
+        let wire = snap.encode_to_vec();
+        match parse_node_response_with_expected(&wire, Some("open_orders_snapshot")).expect("parse")
+        {
+            NodeResponseKind::OpenOrdersSnapshot(parsed) => assert_eq!(parsed.rows.len(), 1),
+            other => panic!("expected OpenOrdersSnapshot, got {other:?}"),
+        }
     }
 
     #[test]
