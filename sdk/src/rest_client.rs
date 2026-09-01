@@ -108,7 +108,7 @@ pub(crate) fn infer_environment_from_rest_url(rest_base: &str) -> Environment {
     if host == "127.0.0.1" || host == "localhost" || host.ends_with(".localhost") {
         return Environment::Localnet;
     }
-    if host.contains("devnet") || host == "18.143.165.149" {
+    if host.contains("devnet") {
         return Environment::Devnet;
     }
     if host.contains("godark-dex.com") {
@@ -423,17 +423,22 @@ impl GodarkRestClient {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        if self.user_uuid.is_none() {
-            if let Some(u) = auth_data
-                .get("user_uuid")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())
-            {
-                self.user_uuid = Some(u);
-            } else if let Some(u) = crate::access_token::user_uuid_from_access_token_jwt(&bearer) {
-                self.user_uuid = Some(u);
-            }
+        let mut resolved: Option<Uuid> = auth_data
+            .get("user_uuid")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
+        if resolved.is_none() {
+            resolved = crate::access_token::user_uuid_from_access_token_jwt(&bearer);
         }
+        if resolved.is_none() {
+            resolved = self.user_uuid;
+        }
+        self.user_uuid = Some(resolved.ok_or_else(|| {
+            GodarkError::Session(
+                "REST auth succeeded but user identity missing; JWT sub and fallback UUID both absent"
+                    .into(),
+            )
+        })?);
 
         // Encrypted REST uses one-shot HPKE per request (no persistent session).
         Ok(())
@@ -483,6 +488,7 @@ impl GodarkRestClient {
             min_fill_size,
             expiry_time,
             &corr_id,
+            crate::types::PlaceOrderOptions::default(),
             timestamp_ns(),
         );
 
@@ -572,6 +578,7 @@ impl GodarkRestClient {
         symbol: &str,
         new_price: Option<f64>,
         new_quantity: Option<f64>,
+        new_trigger_price: Option<f64>,
     ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
         let uuid = self.current_user_uuid()?;
@@ -585,6 +592,7 @@ impl GodarkRestClient {
             symbol_id,
             new_price,
             new_quantity,
+            new_trigger_price,
             &corr_id,
         );
         self.send_encrypted_order(
@@ -1177,12 +1185,20 @@ mod tests {
 
     #[test]
     fn builder_accepts_legacy_api_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = clear_env(&[
+            "GODARK_API_KEY",
+            "GDX_API_KEY",
+            "GODARK_USER_UUID",
+            "GDX_USER_UUID",
+        ]);
         let c = GodarkRestClient::builder()
             .api_key("k")
             .rest_base_url("http://localhost:4000")
             .build()
             .unwrap();
         assert_eq!(c.user_uuid(), None);
+        restore_env(saved);
     }
 
     #[test]
@@ -1200,7 +1216,7 @@ mod tests {
             .api_key("k")
             .build()
             .unwrap();
-        assert_eq!(c.rest_base_url, "http://18.143.165.149:13300");
+        assert_eq!(c.rest_base_url, "https://api.devnet.godark-dex.com");
         restore_env(saved);
     }
 
@@ -1338,7 +1354,7 @@ mod tests {
             Environment::Devnet
         );
         assert_eq!(
-            infer_environment_from_rest_url("http://18.143.165.149:13300"),
+            infer_environment_from_rest_url("https://api.devnet.godark-dex.com"),
             Environment::Devnet
         );
         assert_eq!(
@@ -1417,7 +1433,7 @@ mod tests {
         ]);
         let c = GodarkRestClient::builder()
             .api_key("k")
-            .rest_base_url("http://18.143.165.149:13300")
+            .rest_base_url("https://api.devnet.godark-dex.com")
             .build()
             .unwrap();
         assert_eq!(
@@ -1464,7 +1480,7 @@ mod tests {
             .api_key("k")
             .build()
             .unwrap();
-        assert_eq!(c.rest_base_url, "http://18.143.165.149:13300");
+        assert_eq!(c.rest_base_url, "https://api.devnet.godark-dex.com");
         assert_eq!(
             c.hpke_static_public_key_hex.as_deref(),
             Some(REST_DEVNET_HPKE_STATIC_PUBLIC_KEY_HEX)

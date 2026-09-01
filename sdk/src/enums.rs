@@ -12,9 +12,9 @@ pub enum Side {
 pub enum OrderType {
     Market,
     Limit,
-    PegToMid,
-    PegToBid,
-    PegToAsk,
+    Peg,
+    StopMarket,
+    StopLimit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,6 +46,26 @@ pub enum OrderUpdateType {
     ModifyRejected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum StpMode {
+    #[default]
+    Unspecified,
+    CancelResting,
+    CancelAggressor,
+    CancelBoth,
+}
+
+impl StpMode {
+    pub(crate) fn to_proto(self) -> i32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::CancelResting => 1,
+            Self::CancelAggressor => 2,
+            Self::CancelBoth => 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CancelReason {
     UserRequested,
@@ -57,6 +77,8 @@ pub enum CancelReason {
     LiquidatedCanceled,
     MarginCanceled,
     ReduceOnly,
+    StpExpireTaker,
+    StpCancelResting,
 }
 
 // Proto i32 -> enum conversions
@@ -83,9 +105,9 @@ impl OrderType {
         match v {
             1 => Self::Market,
             2 => Self::Limit,
-            3 => Self::PegToMid,
-            4 => Self::PegToBid,
-            5 => Self::PegToAsk,
+            3 => Self::Peg,
+            4 => Self::StopMarket,
+            5 => Self::StopLimit,
             _ => Self::Limit,
         }
     }
@@ -94,9 +116,9 @@ impl OrderType {
         match self {
             Self::Market => 1,
             Self::Limit => 2,
-            Self::PegToMid => 3,
-            Self::PegToBid => 4,
-            Self::PegToAsk => 5,
+            Self::Peg => 3,
+            Self::StopMarket => 4,
+            Self::StopLimit => 5,
         }
     }
 }
@@ -186,6 +208,8 @@ impl CancelReason {
             7 => Some(Self::LiquidatedCanceled),
             8 => Some(Self::MarginCanceled),
             9 => Some(Self::ReduceOnly),
+            10 => Some(Self::StpExpireTaker),
+            11 => Some(Self::StpCancelResting),
             _ => None,
         }
     }
@@ -201,6 +225,8 @@ impl CancelReason {
             Self::LiquidatedCanceled => 7,
             Self::MarginCanceled => 8,
             Self::ReduceOnly => 9,
+            Self::StpExpireTaker => 10,
+            Self::StpCancelResting => 11,
         }
     }
 }
@@ -273,9 +299,9 @@ mod tests {
         let variants = [
             OrderType::Market,
             OrderType::Limit,
-            OrderType::PegToMid,
-            OrderType::PegToBid,
-            OrderType::PegToAsk,
+            OrderType::Peg,
+            OrderType::StopMarket,
+            OrderType::StopLimit,
         ];
         for v in variants {
             assert_eq!(OrderType::from_proto(v.to_proto()), v);
@@ -374,6 +400,9 @@ mod tests {
         assert_eq!(response_message_type_to_proto("ack"), 3);
         assert_eq!(response_message_type_to_proto("open_orders_snapshot"), 4);
         assert_eq!(response_message_type_to_proto("positions_snapshot"), 5);
+        assert_eq!(response_message_type_to_proto("cancel_all_ack"), 13);
+        assert_eq!(response_message_type_to_proto("close_all_ack"), 14);
+        assert_eq!(response_message_type_to_proto("reverse_ack"), 15);
         assert_eq!(response_message_type_to_proto("tpsl_ack"), 16);
         assert_eq!(response_message_type_to_proto("unknown"), 0);
     }
