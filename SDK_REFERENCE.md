@@ -61,7 +61,7 @@ The MM examples expect:
 - `GODARK_API_KEY_ID` (required)
 - `GODARK_API_SECRET` (required)
 - `GODARK_PASSPHRASE` (required for API key-pair auth)
-- `GDX_NOISE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`. Or set `noise_static_public_key_hex` on `GodarkClient::builder()`.
+- `GDX_HPKE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_HPKE_STATIC_PUBKEY`, `GODARK_HPKE_STATIC_PUBLIC_KEY`. Or set `hpke_static_public_key_hex` on `GodarkClient::builder()`.
 - `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
 
 Use `.env.example` as the template for your local `.env`. The shared helper
@@ -121,7 +121,7 @@ To consume `godark` from your own project outside this repo, either:
 | `place_order` | `async fn place_order(symbol, side, order_type, quantity, price?, tif, post_only, ...) -> Result<OrderAck>` | Place encrypted order |
 | `update_leverage` | `async fn update_leverage(symbol, leverage) -> Result<OrderAck>` | Set per-symbol account leverage |
 | `cancel_order` | `async fn cancel_order(order_id, symbol) -> Result<OrderAck>` | Cancel order |
-| `modify_order` | `async fn modify_order(order_id, symbol, new_price?, new_quantity?) -> Result<OrderAck>` | Modify order |
+| `modify_order` | `async fn modify_order(order_id, symbol, new_price?, new_quantity?, new_trigger_price?) -> Result<OrderAck>` | Modify price, quantity, and/or stop trigger |
 | `mass_quote` | `async fn mass_quote(symbol, legs, post_only?) -> Result<MassQuoteAck>` | Bulk cancel-replace ladder |
 
 ### Subscriptions

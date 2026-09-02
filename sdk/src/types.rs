@@ -36,6 +36,45 @@ pub struct LeverageSetting {
 pub struct LeverageSettings {
     #[serde(default)]
     pub settings: Vec<LeverageSetting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_uuid: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_timestamp: Option<u64>,
+}
+
+/// Optional place-order flags mirrored from gdx-web / sequencer `PlaceOrderInput`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlaceOrderOptions {
+    pub reduce_only: bool,
+    pub post_only: bool,
+    pub stp_mode: crate::enums::StpMode,
+    pub peg_offset_bps: Option<i32>,
+    pub trigger_price: Option<f64>,
+    pub take_profit_price: Option<f64>,
+    pub stop_loss_price: Option<f64>,
+}
+
+/// RPC reply for amend / cancel TP-SL (`NodeResponse::tpsl_ack`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TpslAck {
+    pub parent_order_id: String,
+    #[serde(default)]
+    pub take_profit: Option<String>,
+    #[serde(default)]
+    pub stop_loss: Option<String>,
+    pub error_code: Option<u32>,
+    pub reject_text: Option<String>,
+}
+
+/// Ack for account-wide `cancel_all`, `close_all`, or per-symbol `reverse`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CountAck {
+    pub sequence: String,
+    pub count: u32,
+    #[serde(default)]
+    pub order_ids: Vec<String>,
+    pub error_code: Option<u32>,
+    pub reject_text: Option<String>,
 }
 
 /// Confirmation boundary for high-level [`crate::GodarkClient::place_order`].
@@ -161,11 +200,13 @@ pub struct OrderUpdate {
     pub cancel_reason: Option<CancelReason>,
     pub reject_reason: Option<String>,
     pub msg: Option<String>,
+    pub reduce_only: bool,
+    pub post_only: bool,
     pub correlation_id: u128,
     pub timestamp: u64,
 }
 
-/// Authenticated user profile (`GET` platform `/auth/me` when available).
+/// Authenticated user profile (`GET /api/v1/auth/me`, session JWT only).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeProfile {
     #[serde(default, deserialize_with = "deserialize_null_string")]
@@ -267,10 +308,12 @@ pub struct SystemHealthUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FundingRateUpdate {
     pub symbol_id: u64,
-    pub current_rate: String,
-    pub predicted_rate: String,
-    pub next_funding_time: u64,
+    /// In-progress hourly rate (TWAP / 8), decimal fraction.
+    pub funding_rate: String,
+    /// Wall-clock emission time (ns since epoch).
     pub timestamp: u64,
+    /// Last applied hourly rate, decimal fraction.
+    pub last_funding_rate: String,
 }
 
 /// One working order from a [`OpenOrdersSnapshot`].
@@ -314,6 +357,12 @@ pub struct AccountMarginSummary {
     pub position_margin: String,
     pub reserved_order_margin: String,
     pub free_collateral: String,
+    /// Isolated cash locks (no UPL).
+    pub isolated_margin: String,
+    /// Isolated cash + isolated UPL, floored per position.
+    pub isolated_equity: String,
+    /// Cross position IM (no order holds).
+    pub cross_im: String,
 }
 
 /// Dedicated account-margin push for a user. Emitted whenever collateral,
@@ -364,6 +413,8 @@ mod tests {
             cancel_reason: Some(CancelReason::UserRequested),
             reject_reason: Some("bad".to_string()),
             msg: Some("detail".to_string()),
+            reduce_only: true,
+            post_only: false,
             correlation_id: 999,
             timestamp: 1_700_000_000,
         };
@@ -411,6 +462,8 @@ mod tests {
             cancel_reason: None,
             reject_reason: None,
             msg: None,
+            reduce_only: false,
+            post_only: false,
             correlation_id: 0,
             timestamp: 0,
         };

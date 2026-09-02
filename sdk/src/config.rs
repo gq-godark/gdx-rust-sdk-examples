@@ -17,22 +17,31 @@ use crate::error::GodarkError;
 /// the `base_url` builder, `GODARK_EDGE_URL`, or `GDX_EDGE_URL`. Either
 /// `<host>` or `<host>/ws/v1` resolve to the same endpoint.
 const DEFAULT_EDGE_BASE_URL: &str = "wss://api.godark-dex.com";
-const DEVNET_EDGE_BASE_URL: &str = "ws://18.143.165.149:13300";
+const DEVNET_EDGE_BASE_URL: &str = "wss://api.devnet.godark-dex.com";
 const LOCALNET_EDGE_BASE_URL: &str = "ws://127.0.0.1:13300";
+
+/// Sequencer HPKE static public key for public testnet (64 hex).
+const TESTNET_HPKE_STATIC_PUBLIC_KEY_HEX: &str =
+    "a9fdd7f26c0de36d82811e9fe1df2509960cd5b25eef037355e209b9222bea7d";
+
+/// Sequencer HPKE static public key for public devnet (64 hex).
+const DEVNET_HPKE_STATIC_PUBLIC_KEY_HEX: &str =
+    "a6807e2f6cd04b54cc19be2fd4faea2a1239f1e2896912d91222678ab54cdd45";
 
 const DEFAULT_SYMBOLS_JSON: &str = include_str!("../shared/symbols.json");
 
-/// Named deployment target. Selects the default edge / REST URL.
+/// Named deployment target. Selects the default edge / REST URL and, when known,
+/// a baked-in sequencer HPKE public key pin.
 ///
 /// Explicit `.base_url(...)` / `.hpke_static_public_key_hex(...)` and env vars
-/// still win over these presets. HPKE sequencer pins are not baked in.
+/// still win over these presets. Localnet has no baked pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Environment {
     /// Public testnet (`wss://api.godark-dex.com`).
     #[default]
     Testnet,
-    /// Public devnet (`ws://18.143.165.149:13300`).
+    /// Public devnet (`wss://api.devnet.godark-dex.com`).
     Devnet,
     /// Local `gdx up` edge (`ws://127.0.0.1:13300`).
     Localnet,
@@ -54,16 +63,21 @@ impl Environment {
     pub const fn rest_base_url(self) -> &'static str {
         match self {
             Self::Testnet => "https://api.godark-dex.com",
-            Self::Devnet => "http://18.143.165.149:13300",
+            Self::Devnet => "https://api.devnet.godark-dex.com",
             Self::Localnet => "http://127.0.0.1:13300",
         }
     }
 
-    /// Sequencer HPKE static public key (64 hex). Not baked in; set via builder or env.
+    /// Sequencer HPKE static public key (64 hex) when baked in for this environment.
+    ///
+    /// Testnet and Devnet return a pin; Localnet returns `None` (set via builder or env).
     #[must_use]
     pub const fn hpke_static_public_key_hex(self) -> Option<&'static str> {
-        let _ = self;
-        None
+        match self {
+            Self::Testnet => Some(TESTNET_HPKE_STATIC_PUBLIC_KEY_HEX),
+            Self::Devnet => Some(DEVNET_HPKE_STATIC_PUBLIC_KEY_HEX),
+            Self::Localnet => None,
+        }
     }
 }
 
@@ -110,7 +124,7 @@ pub struct GodarkConfig {
     /// `.user_uuid()` builder call or `GODARK_USER_UUID` / `GDX_USER_UUID`.
     pub user_uuid: Option<Uuid>,
     /// Pinned sequencer HPKE static X25519 public key (64 hex).
-    /// From `.hpke_static_public_key_hex()` or `GDX_HPKE_STATIC_PUBLIC_KEY`.
+    /// From `.hpke_static_public_key_hex()`, `GDX_HPKE_STATIC_PUBLIC_KEY`, or Environment preset.
     pub hpke_static_public_key_hex: Option<String>,
     /// How long [`Confirmation::Book`](crate::types::Confirmation::Book)
     /// waits for an OPEN/reject/fill/cancel update after the fast ack.
@@ -284,9 +298,22 @@ impl GodarkConfigBuilder {
         );
 
         let user_uuid = self.user_uuid.or_else(resolve_user_uuid_env);
+        let environment = self.environment;
+        let pin_env = if self
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            infer_environment_from_edge_url(&base_url)
+        } else {
+            environment
+        };
         let hpke_static_public_key_hex = self
             .hpke_static_public_key_hex
-            .or_else(resolve_hpke_static_public_key_env);
+            .or_else(resolve_hpke_static_public_key_env)
+            .or_else(|| pin_env.hpke_static_public_key_hex().map(str::to_string));
 
         let place_order_terminal_timeout = self
             .place_order_terminal_timeout
@@ -314,6 +341,32 @@ impl Default for GodarkConfigBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn infer_environment_from_edge_url(base: &str) -> Environment {
+    let mut host = base.trim().to_ascii_lowercase();
+    for prefix in ["https://", "http://", "wss://", "ws://"] {
+        if let Some(rest) = host.strip_prefix(prefix) {
+            host = rest.to_string();
+            break;
+        }
+    }
+    if let Some(i) = host.find('/') {
+        host.truncate(i);
+    }
+    if let Some(i) = host.find(':') {
+        host.truncate(i);
+    }
+    if host == "127.0.0.1" || host == "localhost" || host.ends_with(".localhost") {
+        return Environment::Localnet;
+    }
+    if host.contains("devnet") {
+        return Environment::Devnet;
+    }
+    if host.contains("godark-dex.com") {
+        return Environment::Testnet;
+    }
+    Environment::Testnet
 }
 
 /// Resolve passphrase: constructor arg wins, then env vars.
@@ -418,6 +471,54 @@ pub(crate) fn gomarket_url(base_url: &str) -> String {
         url = stripped.to_string();
     }
     format!("{url}/ws/gomarket")
+}
+
+/// True when the resolved URL is the public-docs `/ws/v1` path (ignores trailing slash / query).
+pub fn is_docs_wire_url(url: &str) -> bool {
+    let cut = url.split(['?', '#']).next().unwrap_or(url);
+    cut.trim_end_matches('/').ends_with("/ws/v1")
+}
+
+fn env_first(keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Ok(v) = env::var(key) {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+fn env_truthy(keys: &[&str]) -> bool {
+    for key in keys {
+        if let Ok(v) = env::var(key) {
+            let raw = v.trim().to_lowercase();
+            if matches!(raw.as_str(), "1" | "true" | "yes" | "on") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Resolve the market-data WebSocket URL.
+///
+/// Hosted edges default to `/ws/v1`. Override with `GODARK_MARKET_DATA_WS_URL`,
+/// or set `GODARK_MARKET_DATA_USE_GOMARKET=1` for `/ws/gomarket`.
+pub fn resolve_market_data_ws_url(base_url: &str) -> String {
+    if let Some(override_url) = env_first(&["GODARK_MARKET_DATA_WS_URL", "GDX_MARKET_DATA_WS_URL"])
+    {
+        return override_url;
+    }
+    if env_truthy(&[
+        "GODARK_MARKET_DATA_USE_GOMARKET",
+        "GDX_MARKET_DATA_USE_GOMARKET",
+    ]) {
+        return gomarket_url(base_url.trim());
+    }
+    ws_url(base_url.trim())
 }
 
 #[cfg(test)]
@@ -614,12 +715,13 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_default_environment_has_no_baked_hpke_pin() {
+    fn test_builder_default_environment_uses_baked_hpke_pin() {
         let _guard = ENV_LOCK.lock().unwrap();
         for key in [
             "GDX_HPKE_STATIC_PUBLIC_KEY",
             "GDX_HPKE_STATIC_PUBKEY",
             "GODARK_HPKE_STATIC_PUBLIC_KEY",
+            "VITE_GDX_HPKE_STATIC_PUBKEY",
             "GODARK_EDGE_URL",
             "GDX_EDGE_URL",
         ] {
@@ -633,13 +735,23 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(cfg.base_url, "wss://api.godark-dex.com");
-        assert_eq!(cfg.hpke_static_public_key_hex, None);
+        assert_eq!(
+            cfg.hpke_static_public_key_hex.as_deref(),
+            Some(super::TESTNET_HPKE_STATIC_PUBLIC_KEY_HEX)
+        );
     }
 
     #[test]
-    fn test_builder_devnet_url() {
+    fn test_builder_devnet_url_and_baked_hpke_pin() {
         let _guard = ENV_LOCK.lock().unwrap();
-        for key in ["GODARK_EDGE_URL", "GDX_EDGE_URL"] {
+        for key in [
+            "GDX_HPKE_STATIC_PUBLIC_KEY",
+            "GDX_HPKE_STATIC_PUBKEY",
+            "GODARK_HPKE_STATIC_PUBLIC_KEY",
+            "VITE_GDX_HPKE_STATIC_PUBKEY",
+            "GODARK_EDGE_URL",
+            "GDX_EDGE_URL",
+        ] {
             std::env::remove_var(key);
         }
 
@@ -650,8 +762,11 @@ mod tests {
             .passphrase("pp")
             .build()
             .unwrap();
-        assert_eq!(cfg.base_url, "ws://18.143.165.149:13300");
-        assert_eq!(cfg.hpke_static_public_key_hex, None);
+        assert_eq!(cfg.base_url, "wss://api.devnet.godark-dex.com");
+        assert_eq!(
+            cfg.hpke_static_public_key_hex.as_deref(),
+            Some(super::DEVNET_HPKE_STATIC_PUBLIC_KEY_HEX)
+        );
     }
 
     #[test]
@@ -690,6 +805,37 @@ mod tests {
             cfg.hpke_static_public_key_hex.as_deref(),
             Some("1111111111111111111111111111111111111111111111111111111111111111")
         );
+    }
+
+    #[test]
+    fn test_builder_env_hpke_overrides_environment_preset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for key in [
+            "GDX_HPKE_STATIC_PUBLIC_KEY",
+            "GDX_HPKE_STATIC_PUBKEY",
+            "GODARK_HPKE_STATIC_PUBLIC_KEY",
+            "VITE_GDX_HPKE_STATIC_PUBKEY",
+            "GODARK_EDGE_URL",
+            "GDX_EDGE_URL",
+        ] {
+            std::env::remove_var(key);
+        }
+        let env_pin = "22".repeat(32);
+        std::env::set_var("GDX_HPKE_STATIC_PUBLIC_KEY", &env_pin);
+
+        let cfg = GodarkConfigBuilder::new()
+            .environment(Environment::Testnet)
+            .api_key_id("id")
+            .api_secret("secret")
+            .passphrase("pp")
+            .build()
+            .unwrap();
+        assert_eq!(
+            cfg.hpke_static_public_key_hex.as_deref(),
+            Some(env_pin.as_str())
+        );
+
+        std::env::remove_var("GDX_HPKE_STATIC_PUBLIC_KEY");
     }
 
     #[test]

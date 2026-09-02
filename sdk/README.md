@@ -65,7 +65,7 @@ let config = GodarkClient::builder()
 | Environment | Default URL |
 |---|---|
 | Testnet | `wss://api.godark-dex.com/ws/v1` |
-| Devnet | `ws://18.143.165.149:13300/ws/v1` |
+| Devnet | `wss://api.devnet.godark-dex.com/ws/v1` |
 | Localnet | `ws://127.0.0.1:13300/ws/v1` |
 
 HPKE pins are **not** baked into the crate. Set `.hpke_static_public_key_hex(...)`

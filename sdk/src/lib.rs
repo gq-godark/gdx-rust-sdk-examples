@@ -3,6 +3,7 @@
 //! Protocol source of truth: **gdx-edge** + **gdx-sequencer** (HPKE Base,
 //! `TradingWsBinaryFrame`, REST one-shot HPKE).
 
+mod access_token;
 mod client;
 mod config;
 mod enums;
@@ -55,14 +56,17 @@ pub use client::GodarkClient;
 pub use config::{
     resolve_passphrase, Environment, GodarkConfig, GodarkConfigBuilder, TransportConfig,
 };
-pub use enums::{CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce};
+pub use enums::{
+    CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, StpMode, TimeInForce,
+};
 pub use error::GodarkError;
 pub use order_error_code::{find as find_order_error, OrderErrorEntry, ORDER_ERROR_CODES};
 pub use rest_client::{GodarkRestClient, GodarkRestClientBuilder};
 pub use types::{
     AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, BatchCancelAck, BatchCancelLegResult,
-    BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation, FundingRateUpdate,
-    LeverageSetting, LeverageSettings, MassQuoteAck, MassQuoteLegInput, MassQuoteLegResult,
-    MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck, OrderUpdate, PositionRow,
-    PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent, SystemHealthUpdate,
+    BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation, CountAck,
+    FundingRateUpdate, LeverageSetting, LeverageSettings, MassQuoteAck, MassQuoteLegInput,
+    MassQuoteLegResult, MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck, OrderUpdate,
+    PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
+    SystemHealthUpdate, TpslAck,
 };

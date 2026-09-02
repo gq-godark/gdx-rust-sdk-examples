@@ -64,6 +64,10 @@ pub fn encrypted_push_to_json(push: &edge::EncryptedEdgeResponse) -> Option<serd
         10 => "batch_modify_ack",
         11 => "tpsl_update",
         12 => "leverage_settings",
+        13 => "cancel_all_ack",
+        14 => "close_all_ack",
+        15 => "reverse_ack",
+        16 => "tpsl_ack",
         _ => "unknown",
     };
     let corr = if h.correlation_id.is_empty() {
@@ -133,4 +137,39 @@ pub fn encode_encrypted_push(resp: edge::EncryptedEdgeResponse) -> Vec<u8> {
         body: Some(edge::trading_ws_binary_frame::Body::EncryptedPush(resp)),
     };
     frame.encode_to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generated::edge::v1 as edge;
+
+    fn push_json_for_message_type(message_type: i32) -> serde_json::Value {
+        let push = edge::EncryptedEdgeResponse {
+            version: WIRE_VERSION,
+            header: Some(edge::ResponseHeader {
+                message_type,
+                ..Default::default()
+            }),
+            encrypted_body: vec![1, 2, 3],
+        };
+        encrypted_push_to_json(&push).expect("json")
+    }
+
+    #[test]
+    fn encrypted_push_decodes_count_ack_message_types() {
+        for (ty, name) in [
+            (13, "cancel_all_ack"),
+            (14, "close_all_ack"),
+            (15, "reverse_ack"),
+            (16, "tpsl_ack"),
+        ] {
+            let json = push_json_for_message_type(ty);
+            assert_eq!(
+                json.get("message_type").and_then(|v| v.as_str()),
+                Some(name),
+                "type {ty} should decode as {name}"
+            );
+        }
+    }
 }

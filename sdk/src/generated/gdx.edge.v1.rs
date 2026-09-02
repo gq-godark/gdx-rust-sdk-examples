@@ -152,3 +152,79 @@ pub mod trading_ws_binary_frame {
         SessionControl(super::SessionControl),
     }
 }
+/// Edge ↔ sequencer hop: QUIC stream + u32 BE length + this oneof.
+/// Same shape as lightweight QUIC RPC (qrpc): no HTTP/gRPC on this hop.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EdgeToSequencerFrame {
+    #[prost(oneof = "edge_to_sequencer_frame::Body", tags = "1, 2, 3, 4, 5, 6, 7")]
+    pub body: ::core::option::Option<edge_to_sequencer_frame::Body>,
+}
+/// Nested message and enum types in `EdgeToSequencerFrame`.
+pub mod edge_to_sequencer_frame {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "1")]
+        EncryptedRequest(super::EncryptedEdgeRequest),
+        #[prost(message, tag = "2")]
+        RestEncryptedRequest(super::RestEncryptedEdgeRequest),
+        #[prost(message, tag = "3")]
+        TradeQuery(super::super::super::sequencer::v1::EdgeSequencerRequest),
+        #[prost(message, tag = "4")]
+        AdminRequest(super::super::super::sequencer::v1::EdgeSequencerRequest),
+        #[prost(message, tag = "5")]
+        HpkeSetup(super::HpkeSetup),
+        #[prost(message, tag = "6")]
+        SessionClose(super::SessionClose),
+        #[prost(message, tag = "7")]
+        SessionControl(super::SessionControl),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SequencerToEdgeFrame {
+    /// Used by `cleartext_push` only. 0 otherwise.
+    #[prost(uint64, tag = "20")]
+    pub fencing_epoch: u64,
+    #[prost(
+        oneof = "sequencer_to_edge_frame::Body",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16"
+    )]
+    pub body: ::core::option::Option<sequencer_to_edge_frame::Body>,
+}
+/// Nested message and enum types in `SequencerToEdgeFrame`.
+pub mod sequencer_to_edge_frame {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "1")]
+        S2cReply(super::EncryptedEdgeResponse),
+        #[prost(message, tag = "2")]
+        Stream(super::EncryptedEdgeResponse),
+        #[prost(message, tag = "3")]
+        RestReply(super::RestEncryptedEdgeResponse),
+        #[prost(message, tag = "4")]
+        HpkeSetupReply(super::HpkeSetupReply),
+        #[prost(message, tag = "5")]
+        CleartextPush(super::super::super::sequencer::v1::SequencerToEdgeMessage),
+        #[prost(message, tag = "6")]
+        Ack(super::super::super::sequencer::v1::AckMessage),
+        #[prost(message, tag = "7")]
+        OpenOrders(super::super::super::sequencer::v1::OpenOrdersSnapshot),
+        #[prost(message, tag = "8")]
+        Positions(super::super::super::sequencer::v1::PositionsSnapshot),
+        #[prost(message, tag = "9")]
+        AccountMargin(super::super::super::sequencer::v1::AccountMarginUpdate),
+        #[prost(message, tag = "10")]
+        MassQuoteAck(super::super::super::sequencer::v1::MassQuoteAck),
+        #[prost(message, tag = "11")]
+        BatchCancelAck(super::super::super::sequencer::v1::BatchCancelAck),
+        #[prost(message, tag = "12")]
+        CancelAllAck(super::super::super::sequencer::v1::CancelAllAck),
+        #[prost(message, tag = "13")]
+        CloseAllAck(super::super::super::sequencer::v1::CloseAllAck),
+        #[prost(message, tag = "14")]
+        ReverseAck(super::super::super::sequencer::v1::ReverseAck),
+        #[prost(message, tag = "15")]
+        BatchModifyAck(super::super::super::sequencer::v1::BatchModifyAck),
+        #[prost(message, tag = "16")]
+        TpslAck(super::super::super::sequencer::v1::TpslAck),
+    }
+}

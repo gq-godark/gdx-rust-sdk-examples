@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use godark::{
-    Environment, GodarkClient, GodarkRestClient, MassQuoteLegInput, OrderType, Side, TimeInForce,
-    TransportConfig,
+    Confirmation, Environment, GodarkClient, GodarkRestClient, MassQuoteLegInput, OrderType,
+    PlaceOrderOptions, Side, TimeInForce, TransportConfig,
 };
 
 #[path = "dotenv.rs"]
@@ -128,6 +128,9 @@ async fn main() {
     let mut funding_rate_rx = client
         .take_funding_rate_receiver()
         .expect("funding rate receiver");
+    let mut leverage_settings_rx = client
+        .take_leverage_settings_receiver()
+        .expect("leverage settings receiver");
     let mut error_rx = client.take_error_receiver().expect("error receiver");
 
     println!("Connecting...");
@@ -142,12 +145,12 @@ async fn main() {
         .unwrap_or_default();
     println!("Authenticated as user_uuid={user}  (HPKE session)");
 
-    if let Err(e) = client.subscribe(&["orders", "positions"]).await {
+    if let Err(e) = client.subscribe(&["orders", "positions", "funding_rate"]).await {
         eprintln!("Subscribe failed: {e}");
         client.disconnect().await;
         std::process::exit(1);
     }
-    println!("Subscribed to order + position updates");
+    println!("Subscribed to order + position + funding updates");
 
     // Drain the initial PositionsSnapshot the sequencer pushes right after subscribe.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -177,42 +180,18 @@ async fn main() {
         }
     }
 
-    println!("Setting leverage to 1 via GodarkRestClient.update_leverage...");
+    println!("Setting leverage to 1 via GodarkClient.update_leverage...");
+    if let Err(e) = async {
+        let ack = client.update_leverage(SYMBOL, 1).await?;
+        println!(
+            "update_leverage: success={}  order_id={}",
+            ack.success, ack.order_id
+        );
+        Ok::<(), godark::GodarkError>(())
+    }
+    .await
     {
-        let mut rest_builder = GodarkRestClient::builder();
-        if let Some(legacy) = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]) {
-            rest_builder = rest_builder.api_key(legacy);
-            if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
-                rest_builder = rest_builder.user_uuid(uid);
-            }
-        } else {
-            rest_builder = rest_builder
-                .api_key_id(dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).unwrap())
-                .api_secret(dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).unwrap())
-                .passphrase(dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).unwrap());
-        }
-        if let Some(base) = edge_override.as_deref() {
-            let rest = base
-                .replace("wss://", "https://")
-                .replace("ws://", "http://")
-                .trim_end_matches("/ws/v1")
-                .to_string();
-            rest_builder = rest_builder.rest_base_url(rest);
-        }
-        let mut rest = rest_builder.build().expect("rest config");
-        if let Err(e) = async {
-            rest.connect().await?;
-            let ack = rest.update_leverage(SYMBOL, 1).await?;
-            println!(
-                "update_leverage: success={}  order_id={}",
-                ack.success, ack.order_id
-            );
-            rest.disconnect().await
-        }
-        .await
-        {
-            dotenv::print_order_error("update_leverage rejected", &e);
-        }
+        dotenv::print_order_error("update_leverage rejected", &e);
     }
 
     let mark = live_mark_price();
@@ -252,7 +231,7 @@ async fn main() {
     let modify_px = (mark * 0.996 * 10.0).round() / 10.0;
     println!("Modifying order price to {modify_px}...");
     match client
-        .modify_order(&buy_ack.order_id, SYMBOL, Some(modify_px), None)
+        .modify_order(&buy_ack.order_id, SYMBOL, Some(modify_px), None, None)
         .await
     {
         Ok(ack) => println!("Modified: order_id={}", ack.order_id),
@@ -265,7 +244,7 @@ async fn main() {
     let sell_px = (mark * 1.03 * 10.0).round() / 10.0;
     println!("Placing limit SELL @ {sell_px}...");
     match client
-        .place_order(
+        .place_order_with_options(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
@@ -275,6 +254,11 @@ async fn main() {
             false,
             None,
             None,
+            Confirmation::Book,
+            PlaceOrderOptions {
+                post_only: true,
+                ..Default::default()
+            },
         )
         .await
     {
@@ -355,23 +339,16 @@ async fn main() {
     drain_orders(&mut order_rx, "after MASS QUOTE");
 
     if !resting_ids.is_empty() {
-        println!(
-            "Batch-cancelling {} ladder orders (cleanup)...",
-            resting_ids.len()
-        );
-        match client.batch_cancel(SYMBOL, &resting_ids).await {
-            Ok(bc) => {
-                for r in &bc.results {
-                    println!(
-                        "  cancel id={}: cancelled={}  err={:?}",
-                        r.order_id, r.cancelled, r.error_code
-                    );
-                }
-            }
-            Err(e) => dotenv::print_order_error("Batch cancel rejected", &e),
+        println!("cancel_all_orders (ladder cleanup)...");
+        match client.cancel_all_orders(Some(SYMBOL)).await {
+            Ok(ca) => println!(
+                "  cancel_all: count={}  ids={:?}",
+                ca.count, ca.order_ids
+            ),
+            Err(e) => dotenv::print_order_error("cancel_all rejected", &e),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
-        drain_orders(&mut order_rx, "after BATCH CANCEL");
+        drain_orders(&mut order_rx, "after CANCEL ALL");
     }
 
     // Crossing BUY ~5% above mark (within oracle band): post_only true vs false.
@@ -418,21 +395,14 @@ async fn main() {
                 }
             }
             if !stray_ids.is_empty() {
-                println!(
-                    "Batch-cancelling {} post_only=false remainder(s)...",
-                    stray_ids.len()
-                );
-                match client.batch_cancel(SYMBOL, &stray_ids).await {
-                    Ok(bc) => {
-                        for r in &bc.results {
-                            println!(
-                                "  cancel id={}: cancelled={} err={:?}",
-                                r.order_id, r.cancelled, r.error_code
-                            );
-                        }
-                    }
+                println!("cancel_all_orders (post_only=false remainder cleanup)...");
+                match client.cancel_all_orders(Some(SYMBOL)).await {
+                    Ok(ca) => println!(
+                        "  cancel_all: count={}  ids={:?}",
+                        ca.count, ca.order_ids
+                    ),
                     Err(e) => dotenv::print_order_error(
-                        "post_only=false remainder cancel rejected",
+                        "post_only=false remainder cancel_all rejected",
                         &e,
                     ),
                 }
@@ -477,19 +447,37 @@ async fn main() {
     while let Ok(a) = account_margin_rx.try_recv() {
         margin_count += 1;
         println!(
-            "MARGIN user={}  ts={}  has_summary={}",
+            "MARGIN user={}  ts={}  isolated_margin={}  cross_im={}",
             a.user_uuid,
             a.server_timestamp,
-            a.account.is_some()
+            a.account
+                .as_ref()
+                .map(|s| s.isolated_margin.as_str())
+                .unwrap_or(""),
+            a.account
+                .as_ref()
+                .map(|s| s.cross_im.as_str())
+                .unwrap_or("")
         );
     }
     let mut funding_count = 0usize;
     while let Ok(f) = funding_rate_rx.try_recv() {
         funding_count += 1;
         println!(
-            "FUND   symbol={}  current={}  predicted={}",
-            f.symbol_id, f.current_rate, f.predicted_rate
+            "FUND   symbol={}  rate={}  last={}",
+            f.symbol_id, f.funding_rate, f.last_funding_rate
         );
+    }
+    let mut leverage_count = 0usize;
+    while let Ok(ls) = leverage_settings_rx.try_recv() {
+        leverage_count += 1;
+        let rows: Vec<String> = ls
+            .settings
+            .iter()
+            .take(5)
+            .map(|r| format!("{}={}x", r.symbol_id, r.leverage))
+            .collect();
+        println!("LEVERAGE settings=[{}]", rows.join(", "));
     }
     let mut error_count = 0usize;
     while let Ok(e) = error_rx.try_recv() {
@@ -502,7 +490,7 @@ async fn main() {
     println!(
         "  Pushes: snapshots={snap_count}  health={health_count}  \
          balance={balance_count}  margin={margin_count}  \
-         funding={funding_count}"
+         funding={funding_count}  leverage={leverage_count}"
     );
     println!("  Non-fatal errors received: {error_count}");
     println!("{sep}");
@@ -515,8 +503,20 @@ fn drain_orders(rx: &mut tokio::sync::mpsc::Receiver<godark::OrderUpdate>, label
     let mut count = 0usize;
     while let Ok(u) = rx.try_recv() {
         count += 1;
+        let badges = format!(
+            "{}{}{}",
+            u.cancel_reason
+                .map(|r| format!("  cancel_reason={r:?}"))
+                .unwrap_or_default(),
+            if u.reduce_only {
+                "  reduce_only=true"
+            } else {
+                ""
+            },
+            if u.post_only { "  post_only=true" } else { "" },
+        );
         println!(
-            "ORDER  {:?}  id={}  status={:?}  filled={}  remaining={}",
+            "ORDER  {:?}  id={}  status={:?}  filled={}  remaining={}{badges}",
             u.update_type, u.order_id, u.status, u.filled_qty, u.remaining_qty
         );
     }

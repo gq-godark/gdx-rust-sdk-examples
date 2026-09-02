@@ -13,7 +13,10 @@
 //!   GODARK_PASSPHRASE=...
 //!   # GODARK_EDGE_URL=...   (optional; default Environment::Testnet)
 
-use godark::{Environment, GodarkClient, GodarkError, OrderType, Side, TimeInForce};
+use godark::{
+    Confirmation, Environment, GodarkClient, GodarkError, OrderType, PlaceOrderOptions, Side,
+    TimeInForce,
+};
 
 #[path = "dotenv.rs"]
 mod dotenv;
@@ -68,7 +71,7 @@ async fn main() -> Result<(), GodarkError> {
     let mark = live_mark_price();
     let sell_px = (mark * 1.03 * 10.0).round() / 10.0;
     match client
-        .place_order(
+        .place_order_with_options(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
@@ -78,6 +81,11 @@ async fn main() -> Result<(), GodarkError> {
             false,
             None,
             None,
+            Confirmation::Book,
+            PlaceOrderOptions {
+                post_only: true,
+                ..Default::default()
+            },
         )
         .await
     {
@@ -88,8 +96,11 @@ async fn main() -> Result<(), GodarkError> {
             );
             // Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let cancel = client.cancel_order(&ack.order_id, SYMBOL).await?;
-            println!("Cancel OK -- order_id={}", cancel.order_id);
+            let cancel = client.cancel_all_orders(Some(SYMBOL)).await?;
+            println!(
+                "cancel_all OK -- count={} ids={:?}",
+                cancel.count, cancel.order_ids
+            );
         }
         Err(e) => {
             dotenv::print_order_error("Order rejected", &e);
