@@ -53,7 +53,7 @@ The MM examples expect:
 - `GODARK_API_KEY_ID` (required)
 - `GODARK_API_SECRET` (required)
 - `GODARK_PASSPHRASE` (required for API key-pair auth)
-- `GDX_NOISE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`
+- `GDX_HPKE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_HPKE_STATIC_PUBKEY`, `GODARK_HPKE_STATIC_PUBLIC_KEY`
 - `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
 
 Use `.env.example` as the template for your local `.env`.
@@ -80,7 +80,7 @@ distribution; also available under `sdk/` for path-dependency builds).
 |--------|----------------------|---------|
 | `place_order` | `async fn place_order(symbol, side, order_type, quantity, price?, tif, post_only, ...) -> Result<OrderAck>` | Place encrypted order |
 | `cancel_order` | `async fn cancel_order(order_id, symbol) -> Result<OrderAck>` | Cancel order |
-| `modify_order` | `async fn modify_order(order_id, symbol, new_price?, new_quantity?) -> Result<OrderAck>` | Modify order |
+| `modify_order` | `async fn modify_order(order_id, symbol, new_price?, new_quantity?, new_trigger_price?) -> Result<OrderAck>` | Modify price, quantity, and/or stop trigger |
 
 ### Subscriptions
 

@@ -11,7 +11,6 @@ mod error;
 mod generated;
 mod hpke;
 mod instruments;
-mod market_data;
 mod order_error_code;
 mod proto_bridge;
 mod rest_client;
@@ -57,15 +56,17 @@ pub use client::GodarkClient;
 pub use config::{
     resolve_passphrase, Environment, GodarkConfig, GodarkConfigBuilder, TransportConfig,
 };
-pub use enums::{CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce};
+pub use enums::{
+    CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, StpMode, TimeInForce,
+};
 pub use error::GodarkError;
-pub use market_data::MarketDataClient;
 pub use order_error_code::{find as find_order_error, OrderErrorEntry, ORDER_ERROR_CODES};
 pub use rest_client::{GodarkRestClient, GodarkRestClientBuilder};
 pub use types::{
     AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, BatchCancelAck, BatchCancelLegResult,
-    BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation, FundingRateUpdate,
-    LeverageSetting, LeverageSettings, MassQuoteAck, MassQuoteLegInput, MassQuoteLegResult,
-    MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck, OrderUpdate, PositionRow,
-    PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent, SystemHealthUpdate,
+    BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation, CountAck,
+    FundingRateUpdate, LeverageSetting, LeverageSettings, MassQuoteAck, MassQuoteLegInput,
+    MassQuoteLegResult, MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck, OrderUpdate,
+    PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
+    SystemHealthUpdate, TpslAck,
 };

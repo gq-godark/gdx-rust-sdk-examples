@@ -17,7 +17,7 @@ use crate::error::GodarkError;
 /// the `base_url` builder, `GODARK_EDGE_URL`, or `GDX_EDGE_URL`. Either
 /// `<host>` or `<host>/ws/v1` resolve to the same endpoint.
 const DEFAULT_EDGE_BASE_URL: &str = "wss://api.godark-dex.com";
-const DEVNET_EDGE_BASE_URL: &str = "ws://18.143.165.149:13300";
+const DEVNET_EDGE_BASE_URL: &str = "wss://api.devnet.godark-dex.com";
 const LOCALNET_EDGE_BASE_URL: &str = "ws://127.0.0.1:13300";
 
 /// Sequencer HPKE static public key for public testnet (64 hex).
@@ -41,7 +41,7 @@ pub enum Environment {
     /// Public testnet (`wss://api.godark-dex.com`).
     #[default]
     Testnet,
-    /// Public devnet (`ws://18.143.165.149:13300`).
+    /// Public devnet (`wss://api.devnet.godark-dex.com`).
     Devnet,
     /// Local `gdx up` edge (`ws://127.0.0.1:13300`).
     Localnet,
@@ -63,7 +63,7 @@ impl Environment {
     pub const fn rest_base_url(self) -> &'static str {
         match self {
             Self::Testnet => "https://api.godark-dex.com",
-            Self::Devnet => "http://18.143.165.149:13300",
+            Self::Devnet => "https://api.devnet.godark-dex.com",
             Self::Localnet => "http://127.0.0.1:13300",
         }
     }
@@ -360,7 +360,7 @@ fn infer_environment_from_edge_url(base: &str) -> Environment {
     if host == "127.0.0.1" || host == "localhost" || host.ends_with(".localhost") {
         return Environment::Localnet;
     }
-    if host.contains("devnet") || host == "18.143.165.149" {
+    if host.contains("devnet") {
         return Environment::Devnet;
     }
     if host.contains("godark-dex.com") {
@@ -762,7 +762,7 @@ mod tests {
             .passphrase("pp")
             .build()
             .unwrap();
-        assert_eq!(cfg.base_url, "ws://18.143.165.149:13300");
+        assert_eq!(cfg.base_url, "wss://api.devnet.godark-dex.com");
         assert_eq!(
             cfg.hpke_static_public_key_hex.as_deref(),
             Some(super::DEVNET_HPKE_STATIC_PUBLIC_KEY_HEX)

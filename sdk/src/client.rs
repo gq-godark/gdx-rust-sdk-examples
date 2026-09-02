@@ -22,8 +22,8 @@ use crate::proto_bridge::{self, EdgeMessage};
 use crate::session::CryptoSession;
 use crate::transport::{EdgeTransport, TransportEvent};
 use crate::types::{
-    AccountMarginUpdate, BalanceUpdate, Confirmation, FundingRateUpdate, OrderAck, OrderUpdate,
-    PositionsSnapshot, ReconnectEvent, SystemHealthUpdate,
+    AccountMarginUpdate, BalanceUpdate, Confirmation, FundingRateUpdate, LeverageSettings,
+    OrderAck, OrderUpdate, PositionsSnapshot, ReconnectEvent, SystemHealthUpdate,
 };
 use crate::wire;
 
@@ -61,6 +61,8 @@ pub struct GodarkClient {
     funding_rate_rx: Option<mpsc::Receiver<FundingRateUpdate>>,
     account_margin_tx: mpsc::Sender<AccountMarginUpdate>,
     account_margin_rx: Option<mpsc::Receiver<AccountMarginUpdate>>,
+    leverage_settings_tx: mpsc::Sender<LeverageSettings>,
+    leverage_settings_rx: Option<mpsc::Receiver<LeverageSettings>>,
     error_tx: mpsc::Sender<GodarkError>,
     error_rx: Option<mpsc::Receiver<GodarkError>>,
     event_handle: Option<JoinHandle<()>>,
@@ -89,6 +91,7 @@ impl GodarkClient {
         let (balance_tx, balance_rx) = mpsc::channel(64);
         let (funding_rate_tx, funding_rate_rx) = mpsc::channel(64);
         let (account_margin_tx, account_margin_rx) = mpsc::channel(64);
+        let (leverage_settings_tx, leverage_settings_rx) = mpsc::channel(64);
         let (error_tx, error_rx) = mpsc::channel(256);
         let (reconnect_tx, reconnect_rx) = mpsc::channel(256);
         Self {
@@ -112,6 +115,8 @@ impl GodarkClient {
             funding_rate_rx: Some(funding_rate_rx),
             account_margin_tx,
             account_margin_rx: Some(account_margin_rx),
+            leverage_settings_tx,
+            leverage_settings_rx: Some(leverage_settings_rx),
             error_tx,
             error_rx: Some(error_rx),
             event_handle: None,
@@ -164,6 +169,12 @@ impl GodarkClient {
     /// Receive account-level margin summaries.
     pub fn take_account_margin_receiver(&mut self) -> Option<mpsc::Receiver<AccountMarginUpdate>> {
         self.account_margin_rx.take()
+    }
+
+    /// Per-symbol leverage settings pushed on positions subscribe and after
+    /// `update_leverage`.
+    pub fn take_leverage_settings_receiver(&mut self) -> Option<mpsc::Receiver<LeverageSettings>> {
+        self.leverage_settings_rx.take()
     }
 
     /// Receive non-fatal background errors (rekey failures, push decrypt/parse failures).
@@ -284,13 +295,39 @@ impl GodarkClient {
         .await
     }
 
+    /// Place an order with optional reduce-only / post-only / STP flags.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn place_order_with_options(
+        &self,
+        symbol: &str,
+        side: Side,
+        order_type: OrderType,
+        quantity: f64,
+        price: Option<f64>,
+        time_in_force: TimeInForce,
+        aon: bool,
+        min_fill_size: Option<f64>,
+        expiry_time: Option<u64>,
+        confirmation: Confirmation,
+        options: crate::types::PlaceOrderOptions,
+    ) -> Result<OrderAck, GodarkError> {
+        self.place_order_with_confirmation_and_options(
+            symbol,
+            side,
+            order_type,
+            quantity,
+            price,
+            time_in_force,
+            aon,
+            min_fill_size,
+            expiry_time,
+            confirmation,
+            options,
+        )
+        .await
+    }
+
     /// Place an order with an explicit confirmation boundary.
-    ///
-    /// * [`Confirmation::Book`] (safe default) — after a successful ack, wait for
-    ///   a matching terminal order update and map `REJECTED` to
-    ///   [`GodarkError::Order`] with code + `reject_text`/`msg`.
-    /// * [`Confirmation::Ack`] — return as soon as the sequencer acknowledges;
-    ///   the caller must consume order updates for later rejects/fills.
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order_with_confirmation(
         &self,
@@ -304,6 +341,44 @@ impl GodarkClient {
         min_fill_size: Option<f64>,
         expiry_time: Option<u64>,
         confirmation: Confirmation,
+    ) -> Result<OrderAck, GodarkError> {
+        self.place_order_with_confirmation_and_options(
+            symbol,
+            side,
+            order_type,
+            quantity,
+            price,
+            time_in_force,
+            aon,
+            min_fill_size,
+            expiry_time,
+            confirmation,
+            crate::types::PlaceOrderOptions::default(),
+        )
+        .await
+    }
+
+    /// Place an order with an explicit confirmation boundary and order flags.
+    ///
+    /// * [`Confirmation::Book`] (safe default) — after a successful ack, wait for
+    ///   a matching terminal order update and map `REJECTED` to
+    ///   [`GodarkError::Order`] with code + `reject_text`/`msg`.
+    /// * [`Confirmation::Ack`] — return as soon as the sequencer acknowledges;
+    ///   the caller must consume order updates for later rejects/fills.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn place_order_with_confirmation_and_options(
+        &self,
+        symbol: &str,
+        side: Side,
+        order_type: OrderType,
+        quantity: f64,
+        price: Option<f64>,
+        time_in_force: TimeInForce,
+        aon: bool,
+        min_fill_size: Option<f64>,
+        expiry_time: Option<u64>,
+        confirmation: Confirmation,
+        options: crate::types::PlaceOrderOptions,
     ) -> Result<OrderAck, GodarkError> {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
@@ -322,6 +397,7 @@ impl GodarkClient {
             min_fill_size,
             expiry_time,
             &corr_id,
+            options,
             timestamp_ns(),
         );
 
@@ -391,6 +467,7 @@ impl GodarkClient {
         symbol: &str,
         new_price: Option<f64>,
         new_quantity: Option<f64>,
+        new_trigger_price: Option<f64>,
     ) -> Result<OrderAck, GodarkError> {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
@@ -407,6 +484,7 @@ impl GodarkClient {
             symbol_id,
             new_price,
             new_quantity,
+            new_trigger_price,
             &corr_id,
         );
 
@@ -431,6 +509,140 @@ impl GodarkClient {
         );
         self.send_encrypted_order("update_leverage", symbol_id, &plaintext, &corr_id)
             .await
+    }
+
+    /// Cancel all open orders. When `symbol` is `None`, cancels across every market.
+    pub async fn cancel_all_orders(
+        &self,
+        symbol: Option<&str>,
+    ) -> Result<crate::types::CountAck, GodarkError> {
+        self.ensure_ready()?;
+        let header_symbol_id = if let Some(sym) = symbol {
+            self.resolve_symbol(sym)?
+        } else {
+            0
+        };
+        let body_symbol_id = symbol.map(|sym| self.resolve_symbol(sym)).transpose()?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+        let plaintext =
+            proto_bridge::build_cancel_all_proto(body_symbol_id, uuid.as_bytes(), &corr_id);
+        let response = self
+            .send_encrypted_command("cancel_all", header_symbol_id, &plaintext, &corr_id)
+            .await?;
+        self.parse_count_ack_response(&response, "cancel_all_ack")
+    }
+
+    /// Close all positions at market (reduce-only IOC). Scoped to `symbol` when set.
+    pub async fn close_all(
+        &self,
+        symbol: Option<&str>,
+    ) -> Result<crate::types::CountAck, GodarkError> {
+        self.ensure_ready()?;
+        let header_symbol_id = if let Some(sym) = symbol {
+            self.resolve_symbol(sym)?
+        } else {
+            0
+        };
+        let body_symbol_id = symbol.map(|sym| self.resolve_symbol(sym)).transpose()?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+        let plaintext =
+            proto_bridge::build_close_all_proto(body_symbol_id, uuid.as_bytes(), &corr_id);
+        let response = self
+            .send_encrypted_command("close_all", header_symbol_id, &plaintext, &corr_id)
+            .await?;
+        self.parse_count_ack_response(&response, "close_all_ack")
+    }
+
+    /// Reverse the open position on `symbol` (flatten + open opposite side).
+    pub async fn reverse_position(
+        &self,
+        symbol: &str,
+    ) -> Result<crate::types::CountAck, GodarkError> {
+        self.ensure_ready()?;
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+        let plaintext = proto_bridge::build_reverse_proto(symbol_id, uuid.as_bytes(), &corr_id);
+        let response = self
+            .send_encrypted_command("reverse", symbol_id, &plaintext, &corr_id)
+            .await?;
+        self.parse_count_ack_response(&response, "reverse_ack")
+    }
+
+    /// Amend / attach TP-SL on a resting order or open position.
+    ///
+    /// Set `order_id` to `"0"` and supply `position_side` to attach TP/SL to an open
+    /// position leg with no existing attachment. Price fields: `None` = leave unchanged,
+    /// `Some(0.0)` = clear that leg, `Some(x)` where `x > 0` = set.
+    pub async fn amend_tpsl(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        take_profit_price: Option<f64>,
+        stop_loss_price: Option<f64>,
+        position_side: Option<crate::enums::Side>,
+    ) -> Result<crate::types::TpslAck, GodarkError> {
+        self.ensure_ready()?;
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let oid: u64 = order_id
+            .parse()
+            .map_err(|_| GodarkError::Config(format!("Invalid order_id: {order_id}")))?;
+        if oid == 0 && position_side.is_none() {
+            return Err(GodarkError::Config(
+                "position_side is required when order_id is 0".into(),
+            ));
+        }
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+        let body_symbol_id = if oid == 0 { Some(symbol_id) } else { None };
+        let plaintext = proto_bridge::build_amend_tpsl_proto(
+            uuid.as_bytes(),
+            oid,
+            &corr_id,
+            take_profit_price,
+            stop_loss_price,
+            body_symbol_id,
+            position_side,
+        );
+        let response = self
+            .send_encrypted_command("amend_tpsl", symbol_id, &plaintext, &corr_id)
+            .await?;
+        self.parse_tpsl_ack_response(&response)
+    }
+
+    /// Cancel TP/SL without cancelling the parent entry or flattening the position.
+    pub async fn cancel_tpsl(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        position_side: Option<crate::enums::Side>,
+    ) -> Result<crate::types::TpslAck, GodarkError> {
+        self.ensure_ready()?;
+        let symbol_id = self.resolve_symbol(symbol)?;
+        let oid: u64 = order_id
+            .parse()
+            .map_err(|_| GodarkError::Config(format!("Invalid order_id: {order_id}")))?;
+        if oid == 0 && position_side.is_none() {
+            return Err(GodarkError::Config(
+                "position_side is required when order_id is 0".into(),
+            ));
+        }
+        let corr_id = Uuid::new_v4().into_bytes().to_vec();
+        let uuid = self.current_user_uuid()?;
+        let body_symbol_id = if oid == 0 { Some(symbol_id) } else { None };
+        let plaintext = proto_bridge::build_cancel_tpsl_proto(
+            uuid.as_bytes(),
+            oid,
+            &corr_id,
+            body_symbol_id,
+            position_side,
+        );
+        let response = self
+            .send_encrypted_command("cancel_tpsl", symbol_id, &plaintext, &corr_id)
+            .await?;
+        self.parse_tpsl_ack_response(&response)
     }
 
     // ------------------------------------------------------------------
@@ -956,6 +1168,34 @@ impl GodarkClient {
         }
     }
 
+    fn parse_count_ack_response(
+        &self,
+        msg: &Value,
+        message_type: &str,
+    ) -> Result<crate::types::CountAck, GodarkError> {
+        let plaintext = self.decrypt_command_plaintext(msg, message_type)?;
+        let ack = proto_bridge::parse_count_ack(&plaintext, message_type)?;
+        if let Some(code) = ack.error_code {
+            return Err(crate::order_error_code::make_order_error_from_code(
+                Some(code),
+                ack.reject_text.as_deref(),
+            ));
+        }
+        Ok(ack)
+    }
+
+    fn parse_tpsl_ack_response(&self, msg: &Value) -> Result<crate::types::TpslAck, GodarkError> {
+        let plaintext = self.decrypt_command_plaintext(msg, "tpsl_ack")?;
+        let ack = proto_bridge::parse_tpsl_ack(&plaintext)?;
+        if let Some(code) = ack.error_code {
+            return Err(crate::order_error_code::make_order_error_from_code(
+                Some(code),
+                ack.reject_text.as_deref(),
+            ));
+        }
+        Ok(ack)
+    }
+
     fn register_place_outcome_waiter(
         &self,
     ) -> Result<(u64, oneshot::Receiver<Result<OrderUpdate, GodarkError>>), GodarkError> {
@@ -1036,6 +1276,7 @@ impl GodarkClient {
         let balance_tx = self.balance_tx.clone();
         let funding_rate_tx = self.funding_rate_tx.clone();
         let account_margin_tx = self.account_margin_tx.clone();
+        let leverage_settings_tx = self.leverage_settings_tx.clone();
         let error_tx = self.error_tx.clone();
         let session = Arc::clone(&self.session);
         let user_uuid = Arc::clone(&self.user_uuid);
@@ -1137,6 +1378,9 @@ impl GodarkClient {
                                         }
                                         DecodedPush::AccountMargin(a) => {
                                             let _ = account_margin_tx.send(a).await;
+                                        }
+                                        DecodedPush::LeverageSettings(settings) => {
+                                            let _ = leverage_settings_tx.send(settings).await;
                                         }
                                         DecodedPush::BalanceAndPosition { balance, positions } => {
                                             if let Some(b) = balance {
@@ -1560,6 +1804,7 @@ enum DecodedPush {
         balance: Option<BalanceUpdate>,
         positions: Option<PositionsSnapshot>,
     },
+    LeverageSettings(LeverageSettings),
     Ignored,
 }
 
@@ -1639,6 +1884,7 @@ fn decode_decrypted_push(message_type: &str, plaintext: &[u8]) -> Result<Decoded
         EdgeMessage::BalanceAndPosition { balance, positions } => {
             Ok(DecodedPush::BalanceAndPosition { balance, positions })
         }
+        EdgeMessage::LeverageSettings(settings) => Ok(DecodedPush::LeverageSettings(settings)),
         EdgeMessage::Unknown => Ok(DecodedPush::Ignored),
     }
 }
@@ -2158,7 +2404,7 @@ mod tests {
     async fn test_modify_order_when_disconnected() {
         let client = GodarkClient::new(test_config());
         let err = client
-            .modify_order("12345", "BTC-USDC-PERP", Some(100.0), None)
+            .modify_order("12345", "BTC-USDC-PERP", Some(100.0), None, None)
             .await
             .unwrap_err();
         assert!(matches!(err, GodarkError::Connection(_)));

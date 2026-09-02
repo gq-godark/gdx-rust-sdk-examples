@@ -11,9 +11,10 @@ use crate::generated::edge::v1 as edge;
 use crate::generated::health::v1 as health;
 use crate::generated::sequencer::v1 as sequencer;
 use crate::types::{
-    AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, FundingRateUpdate, OpenOrderRow,
-    OpenOrdersSnapshot, OrderUpdate, PositionRow, PositionsSnapshot, PositionsSnapshotSource,
-    SystemHealthUpdate,
+    AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, CountAck, FundingRateUpdate,
+    LeverageSetting, LeverageSettings, OpenOrderRow, OpenOrdersSnapshot, OrderUpdate,
+    PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource, SystemHealthUpdate,
+    TpslAck,
 };
 
 /// Encode a correlation id (16 raw UUID bytes, big-endian layout) as the
@@ -72,6 +73,7 @@ pub fn build_place_order_proto(
     min_fill_size: Option<f64>,
     expiry_time: Option<u64>,
     correlation_id_bytes: &[u8],
+    options: PlaceOrderOptions,
     _timestamp: u64,
 ) -> Vec<u8> {
     let min_fill_size = if aon && min_fill_size.is_none() {
@@ -90,13 +92,13 @@ pub fn build_place_order_proto(
         expiry_time,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
         user_uuid: user_uuid.to_vec(),
-        stp_mode: 0,
-        post_only: false,
-        reduce_only: false,
-        stop_loss_price: None,
-        take_profit_price: None,
-        peg_offset_bps: None,
-        trigger_price: None,
+        stp_mode: options.stp_mode.to_proto(),
+        post_only: options.post_only,
+        reduce_only: options.reduce_only,
+        stop_loss_price: options.stop_loss_price,
+        take_profit_price: options.take_profit_price,
+        peg_offset_bps: options.peg_offset_bps,
+        trigger_price: options.trigger_price,
     };
     let req = sequencer::EdgeSequencerRequest {
         inner: Some(sequencer::edge_sequencer_request::Inner::Place(place)),
@@ -123,12 +125,94 @@ pub fn build_cancel_order_proto(
     req.encode_to_vec()
 }
 
+pub fn build_cancel_all_proto(
+    symbol_id: Option<u64>,
+    user_uuid: &[u8],
+    correlation_id_bytes: &[u8],
+) -> Vec<u8> {
+    let cancel_all = sequencer::CancelAllInput {
+        symbol_id,
+        user_uuid: user_uuid.to_vec(),
+        correlation_id: correlation_id_body_bytes(correlation_id_bytes),
+    };
+    encode_edge_request(sequencer::edge_sequencer_request::Inner::CancelAll(
+        cancel_all,
+    ))
+}
+
+pub fn build_close_all_proto(
+    symbol_id: Option<u64>,
+    user_uuid: &[u8],
+    correlation_id_bytes: &[u8],
+) -> Vec<u8> {
+    let close_all = sequencer::CloseAllInput {
+        symbol_id,
+        user_uuid: user_uuid.to_vec(),
+        correlation_id: correlation_id_body_bytes(correlation_id_bytes),
+    };
+    encode_edge_request(sequencer::edge_sequencer_request::Inner::CloseAll(
+        close_all,
+    ))
+}
+
+pub fn build_reverse_proto(
+    symbol_id: u64,
+    user_uuid: &[u8],
+    correlation_id_bytes: &[u8],
+) -> Vec<u8> {
+    let reverse = sequencer::ReverseInput {
+        symbol_id,
+        user_uuid: user_uuid.to_vec(),
+        correlation_id: correlation_id_body_bytes(correlation_id_bytes),
+    };
+    encode_edge_request(sequencer::edge_sequencer_request::Inner::Reverse(reverse))
+}
+
+pub fn build_amend_tpsl_proto(
+    user_uuid: &[u8],
+    order_id: u64,
+    correlation_id_bytes: &[u8],
+    take_profit_price: Option<f64>,
+    stop_loss_price: Option<f64>,
+    symbol_id: Option<u64>,
+    position_side: Option<crate::enums::Side>,
+) -> Vec<u8> {
+    let amend = sequencer::AmendTpslRequest {
+        user_uuid: user_uuid.to_vec(),
+        order_id,
+        correlation_id: correlation_id_body_bytes(correlation_id_bytes),
+        take_profit_price,
+        stop_loss_price,
+        symbol_id,
+        position_side: position_side.map(crate::enums::Side::to_proto),
+    };
+    encode_edge_request(sequencer::edge_sequencer_request::Inner::AmendTpsl(amend))
+}
+
+pub fn build_cancel_tpsl_proto(
+    user_uuid: &[u8],
+    order_id: u64,
+    correlation_id_bytes: &[u8],
+    symbol_id: Option<u64>,
+    position_side: Option<crate::enums::Side>,
+) -> Vec<u8> {
+    let cancel = sequencer::CancelTpslRequest {
+        user_uuid: user_uuid.to_vec(),
+        order_id,
+        correlation_id: correlation_id_body_bytes(correlation_id_bytes),
+        symbol_id,
+        position_side: position_side.map(crate::enums::Side::to_proto),
+    };
+    encode_edge_request(sequencer::edge_sequencer_request::Inner::CancelTpsl(cancel))
+}
+
 pub fn build_modify_order_proto(
     order_id: u64,
     user_uuid: &[u8],
     symbol_id: u64,
     new_price: Option<f64>,
     new_quantity: Option<f64>,
+    new_trigger_price: Option<f64>,
     correlation_id_bytes: &[u8],
 ) -> Vec<u8> {
     let modify = sequencer::ModifyOrderInput {
@@ -138,7 +222,7 @@ pub fn build_modify_order_proto(
         new_quantity,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
         user_uuid: user_uuid.to_vec(),
-        new_trigger_price: None,
+        new_trigger_price,
     };
     let req = sequencer::EdgeSequencerRequest {
         inner: Some(sequencer::edge_sequencer_request::Inner::Modify(modify)),
@@ -563,6 +647,81 @@ fn resolve_rest_payload(data: &[u8], expected: Option<&str>) -> (String, Vec<u8>
     ("ack".to_string(), data.to_vec())
 }
 
+fn decode_node_response_variant(
+    variant: &str,
+    payload: &[u8],
+) -> Result<NodeResponseKind, GodarkError> {
+    match variant {
+        "ack" => {
+            let ack = sequencer::AckMessage::decode(payload)?;
+            Ok(ack_from_proto(ack))
+        }
+        "fill" => {
+            let fill = sequencer::TradeMessage::decode(payload)?;
+            Ok(NodeResponseKind::Fill {
+                trade_id: fill.trade_id,
+                taker_order_id: fill.taker_order_id,
+                maker_order_id: fill.maker_order_id,
+                symbol_id: fill.symbol_id,
+                timestamp: fill.timestamp,
+                correlation_id: fill.correlation_id,
+            })
+        }
+        "open_orders_snapshot" => {
+            let s = sequencer::OpenOrdersSnapshot::decode(payload)?;
+            Ok(NodeResponseKind::OpenOrdersSnapshot(
+                parse_open_orders_snapshot(s),
+            ))
+        }
+        "positions_snapshot" => {
+            let s = sequencer::PositionsSnapshot::decode(payload)?;
+            Ok(NodeResponseKind::PositionsSnapshot(
+                parse_positions_snapshot(s),
+            ))
+        }
+        "account_margin_update" | "account_update" => {
+            let s = sequencer::AccountMarginUpdate::decode(payload)?;
+            Ok(NodeResponseKind::AccountMarginUpdate(
+                parse_account_margin_update(s),
+            ))
+        }
+        "mass_quote_ack" => {
+            let a = sequencer::MassQuoteAck::decode(payload)?;
+            Ok(NodeResponseKind::MassQuoteAck(mass_quote_ack_from_proto(a)))
+        }
+        "batch_cancel_ack" => {
+            let a = sequencer::BatchCancelAck::decode(payload)?;
+            Ok(NodeResponseKind::BatchCancelAck(
+                batch_cancel_ack_from_proto(a),
+            ))
+        }
+        "batch_modify_ack" => {
+            let a = sequencer::BatchModifyAck::decode(payload)?;
+            Ok(NodeResponseKind::BatchModifyAck(
+                batch_modify_ack_from_proto(a),
+            ))
+        }
+        "cancel_all_ack" => {
+            let a = sequencer::CancelAllAck::decode(payload)?;
+            Ok(NodeResponseKind::CountAck(count_ack_from_cancel_all(a)))
+        }
+        "close_all_ack" => {
+            let a = sequencer::CloseAllAck::decode(payload)?;
+            Ok(NodeResponseKind::CountAck(count_ack_from_close_all(a)))
+        }
+        "reverse_ack" => {
+            let a = sequencer::ReverseAck::decode(payload)?;
+            Ok(NodeResponseKind::CountAck(count_ack_from_reverse(a)))
+        }
+        "tpsl_ack" => {
+            let a = sequencer::TpslAck::decode(payload)?;
+            Ok(NodeResponseKind::TpslAck(tpsl_ack_from_proto(a)))
+        }
+        "node_ready" => Ok(NodeResponseKind::Unknown),
+        _ => Ok(NodeResponseKind::Unknown),
+    }
+}
+
 fn ack_from_proto(ack: sequencer::AckMessage) -> NodeResponseKind {
     let (success, error_code, order_status) = match ack.ack_outcome {
         Some(o) => {
@@ -666,6 +825,8 @@ pub enum NodeResponseKind {
     MassQuoteAck(crate::types::MassQuoteAck),
     BatchCancelAck(crate::types::BatchCancelAck),
     BatchModifyAck(crate::types::BatchModifyAck),
+    CountAck(CountAck),
+    TpslAck(TpslAck),
     Unknown,
 }
 
@@ -687,60 +848,108 @@ pub fn parse_node_response_with_expected(
         }
     });
     let (variant, payload) = resolve_rest_payload(data, expected.as_deref());
-    match variant.as_str() {
-        "ack" => {
-            let ack = sequencer::AckMessage::decode(payload.as_slice())?;
-            Ok(ack_from_proto(ack))
+    let first = decode_node_response_variant(&variant, &payload);
+    if first.is_err() {
+        if let Some(exp) = expected.as_deref() {
+            if exp != variant {
+                if let Ok(kind) = decode_node_response_variant(exp, data) {
+                    return Ok(kind);
+                }
+            }
         }
-        "fill" => {
-            let fill = sequencer::TradeMessage::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::Fill {
-                trade_id: fill.trade_id,
-                taker_order_id: fill.taker_order_id,
-                maker_order_id: fill.maker_order_id,
-                symbol_id: fill.symbol_id,
-                timestamp: fill.timestamp,
-                correlation_id: fill.correlation_id,
-            })
-        }
-        "open_orders_snapshot" => {
-            let s = sequencer::OpenOrdersSnapshot::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::OpenOrdersSnapshot(
-                parse_open_orders_snapshot(s),
-            ))
-        }
-        "positions_snapshot" => {
-            let s = sequencer::PositionsSnapshot::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::PositionsSnapshot(
-                parse_positions_snapshot(s),
-            ))
-        }
-        "account_margin_update" | "account_update" => {
-            let s = sequencer::AccountMarginUpdate::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::AccountMarginUpdate(
-                parse_account_margin_update(s),
-            ))
-        }
-        "mass_quote_ack" => {
-            let a = sequencer::MassQuoteAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::MassQuoteAck(mass_quote_ack_from_proto(a)))
-        }
-        "batch_cancel_ack" => {
-            let a = sequencer::BatchCancelAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::BatchCancelAck(
-                batch_cancel_ack_from_proto(a),
-            ))
-        }
-        "batch_modify_ack" => {
-            let a = sequencer::BatchModifyAck::decode(payload.as_slice())?;
-            Ok(NodeResponseKind::BatchModifyAck(
-                batch_modify_ack_from_proto(a),
-            ))
-        }
-        "node_ready" | "cancel_all_ack" | "close_all_ack" | "reverse_ack" => {
-            Ok(NodeResponseKind::Unknown)
-        }
-        _ => Ok(NodeResponseKind::Unknown),
+    }
+    first
+}
+
+fn tpsl_ack_from_proto(ack: sequencer::TpslAck) -> TpslAck {
+    TpslAck {
+        parent_order_id: ack.parent_order_id.to_string(),
+        take_profit: ack.take_profit,
+        stop_loss: ack.stop_loss,
+        error_code: ack.error_code,
+        reject_text: ack.reject_text,
+    }
+}
+
+/// Decode a `tpsl_ack` plaintext body.
+pub fn parse_tpsl_ack(data: &[u8]) -> Result<TpslAck, GodarkError> {
+    match parse_node_response_with_expected(data, Some("tpsl_ack"))? {
+        NodeResponseKind::TpslAck(ack) => Ok(ack),
+        NodeResponseKind::Ack {
+            success: false,
+            error_code,
+            reject_text,
+            ..
+        } => Err(crate::order_error_code::make_order_error_from_code(
+            error_code,
+            reject_text.as_deref(),
+        )),
+        other => Err(GodarkError::Order {
+            message: format!("Expected tpsl_ack, got {other:?}"),
+            error_code: None,
+        }),
+    }
+}
+
+fn count_ack_from_cancel_all(ack: sequencer::CancelAllAck) -> CountAck {
+    CountAck {
+        sequence: ack.sequence.to_string(),
+        count: ack.cancelled,
+        order_ids: ack
+            .cancelled_order_ids
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
+        error_code: ack.error_code,
+        reject_text: ack.reject_text,
+    }
+}
+
+fn count_ack_from_close_all(ack: sequencer::CloseAllAck) -> CountAck {
+    CountAck {
+        sequence: ack.sequence.to_string(),
+        count: ack.closed,
+        order_ids: ack
+            .close_order_ids
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
+        error_code: ack.error_code,
+        reject_text: ack.reject_text,
+    }
+}
+
+fn count_ack_from_reverse(ack: sequencer::ReverseAck) -> CountAck {
+    CountAck {
+        sequence: ack.sequence.to_string(),
+        count: ack.reversed,
+        order_ids: ack
+            .reverse_order_ids
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
+        error_code: ack.error_code,
+        reject_text: ack.reject_text,
+    }
+}
+
+/// Decode a `cancel_all_ack` / `close_all_ack` / `reverse_ack` plaintext body.
+pub fn parse_count_ack(data: &[u8], expected: &str) -> Result<CountAck, GodarkError> {
+    match parse_node_response_with_expected(data, Some(expected))? {
+        NodeResponseKind::CountAck(ack) => Ok(ack),
+        NodeResponseKind::Ack {
+            success: false,
+            error_code,
+            reject_text,
+            ..
+        } => Err(crate::order_error_code::make_order_error_from_code(
+            error_code,
+            reject_text.as_deref(),
+        )),
+        other => Err(GodarkError::Order {
+            message: format!("Expected count ack, got {other:?}"),
+            error_code: None,
+        }),
     }
 }
 
@@ -787,6 +996,7 @@ pub enum EdgeMessage {
         balance: Option<BalanceUpdate>,
         positions: Option<PositionsSnapshot>,
     },
+    LeverageSettings(LeverageSettings),
     /// Recognized proto variant that this SDK build doesn't decode.
     Unknown,
 }
@@ -939,6 +1149,21 @@ pub fn parse_account_margin_update(msg: sequencer::AccountMarginUpdate) -> Accou
     }
 }
 
+pub fn parse_leverage_settings(msg: sequencer::LeverageSettings) -> LeverageSettings {
+    LeverageSettings {
+        settings: msg
+            .settings
+            .into_iter()
+            .map(|row| LeverageSetting {
+                symbol_id: row.symbol_id,
+                leverage: row.leverage,
+            })
+            .collect(),
+        user_uuid: (!msg.user_uuid.is_empty()).then(|| uuid_from_bytes(&msg.user_uuid)),
+        server_timestamp: Some(msg.server_timestamp).filter(|ts| *ts != 0),
+    }
+}
+
 pub fn parse_sequencer_to_edge_message(data: &[u8]) -> Result<EdgeMessage, GodarkError> {
     let msg = sequencer::SequencerToEdgeMessage::decode(data)?;
     match msg.inner {
@@ -968,12 +1193,16 @@ pub fn parse_sequencer_to_edge_message(data: &[u8]) -> Result<EdgeMessage, Godar
                 positions: bp.pos_data.map(parse_positions_snapshot),
             })
         }
+        Some(sequencer::sequencer_to_edge_message::Inner::TpslUpdate(_))
+        | Some(sequencer::sequencer_to_edge_message::Inner::InstrumentUpdate(_)) => {
+            Ok(EdgeMessage::Unknown)
+        }
+        Some(sequencer::sequencer_to_edge_message::Inner::LeverageSettings(ls)) => {
+            Ok(EdgeMessage::LeverageSettings(parse_leverage_settings(ls)))
+        }
         Some(sequencer::sequencer_to_edge_message::Inner::OrderHistoryInsert(_))
         | Some(sequencer::sequencer_to_edge_message::Inner::OpenInterestUpdate(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::FundingPayment(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::TpslUpdate(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::LeverageSettings(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::InstrumentUpdate(_)) => {
+        | Some(sequencer::sequencer_to_edge_message::Inner::FundingPayment(_)) => {
             Ok(EdgeMessage::Unknown)
         }
         None => Ok(EdgeMessage::Unknown),
@@ -1010,6 +1239,7 @@ mod tests {
             Some(0.5),
             Some(999),
             &TEST_UUID,
+            PlaceOrderOptions::default(),
             1_234_567_890,
         );
         let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
@@ -1033,6 +1263,200 @@ mod tests {
     }
 
     #[test]
+    fn test_build_place_order_respects_options() {
+        let options = PlaceOrderOptions {
+            reduce_only: true,
+            post_only: true,
+            stp_mode: crate::enums::StpMode::CancelAggressor,
+            peg_offset_bps: None,
+            trigger_price: None,
+            take_profit_price: None,
+            stop_loss_price: None,
+        };
+        let bytes = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Limit,
+            1.0,
+            &TEST_UUID,
+            Some(100.0),
+            TimeInForce::Gtc,
+            false,
+            None,
+            None,
+            &TEST_UUID,
+            options,
+            0,
+        );
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let place = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::Place(p)) => p,
+            other => panic!("expected Place, got {:?}", other),
+        };
+        assert!(place.reduce_only);
+        assert!(place.post_only);
+        assert_eq!(
+            place.stp_mode,
+            crate::enums::StpMode::CancelAggressor.to_proto()
+        );
+    }
+
+    #[test]
+    fn test_build_place_order_peg_stop_and_tpsl_fields() {
+        let options = PlaceOrderOptions {
+            reduce_only: false,
+            post_only: false,
+            stp_mode: crate::enums::StpMode::Unspecified,
+            peg_offset_bps: Some(12),
+            trigger_price: Some(95.5),
+            take_profit_price: Some(110.0),
+            stop_loss_price: Some(90.0),
+        };
+        let bytes = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Peg,
+            1.0,
+            &TEST_UUID,
+            None,
+            TimeInForce::Gtc,
+            false,
+            None,
+            None,
+            &TEST_UUID,
+            options,
+            0,
+        );
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let place = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::Place(p)) => p,
+            other => panic!("expected Place, got {:?}", other),
+        };
+        assert_eq!(place.peg_offset_bps, Some(12));
+        assert_eq!(place.trigger_price, Some(95.5));
+        assert_eq!(place.take_profit_price, Some(110.0));
+        assert_eq!(place.stop_loss_price, Some(90.0));
+    }
+
+    #[test]
+    fn test_build_modify_order_new_trigger_price() {
+        let bytes = build_modify_order_proto(7, &TEST_UUID, 9, None, None, Some(88.25), &TEST_UUID);
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let modify = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::Modify(m)) => m,
+            other => panic!("expected Modify, got {:?}", other),
+        };
+        assert_eq!(modify.new_trigger_price, Some(88.25));
+    }
+
+    #[test]
+    fn test_parse_cancel_all_ack_roundtrip() {
+        let ack = sequencer::CancelAllAck {
+            node_id: 1,
+            sequence: 99,
+            correlation_id: vec![],
+            error_code: None,
+            reject_text: None,
+            cancelled: 2,
+            cancelled_order_ids: vec![10, 20],
+        };
+        let wire = wrap_legacy_node_response("cancel_all_ack", &ack.encode_to_vec());
+        let parsed = parse_count_ack(&wire, "cancel_all_ack").expect("parse");
+        assert_eq!(parsed.sequence, "99");
+        assert_eq!(parsed.count, 2);
+        assert_eq!(parsed.order_ids, vec!["10".to_string(), "20".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_cancel_all_ack_direct_hotpath() {
+        let ack = sequencer::CancelAllAck {
+            node_id: 1,
+            sequence: 42,
+            correlation_id: vec![9u8; 16],
+            error_code: None,
+            reject_text: None,
+            cancelled: 1,
+            cancelled_order_ids: vec![7],
+        };
+        let wire = ack.encode_to_vec();
+        let parsed = parse_count_ack(&wire, "cancel_all_ack").expect("parse direct hotpath");
+        assert_eq!(parsed.sequence, "42");
+        assert_eq!(parsed.count, 1);
+    }
+
+    #[test]
+    fn test_parse_count_ack_legacy_rejection_ack() {
+        let ack = sequencer::AckMessage {
+            sequence: 42,
+            order_id: 0,
+            correlation_id: vec![9u8; 16],
+            pool_ack: None,
+            reject_text: Some("no open orders".into()),
+            ack_outcome: Some(sequencer::AckOutcomeWire {
+                kind: sequencer::AckOutcomeKind::SystemFailed as i32,
+                business_error_code: Some(1234),
+                ..Default::default()
+            }),
+        };
+        let wire = wrap_legacy_node_response("ack", &ack.encode_to_vec());
+        let err = parse_count_ack(&wire, "cancel_all_ack").expect_err("rejection");
+        assert!(err.to_string().contains("1234") || err.to_string().contains("no open orders"));
+    }
+
+    #[test]
+    fn test_parse_open_orders_snapshot_direct_not_misidentified_as_ack() {
+        let row = sequencer::OpenOrderRow {
+            order_id: 1,
+            symbol_id: 7,
+            side: Side::Buy.to_proto(),
+            order_type: OrderType::Limit.to_proto(),
+            price: "100".into(),
+            quantity: "1".into(),
+            filled_qty: "0".into(),
+            remaining_qty: "1".into(),
+            order_status: OrderStatus::New.to_proto(),
+            time_in_force: TimeInForce::Gtc.to_proto(),
+            leverage: 1,
+            timestamp: 0,
+            correlation_id: vec![],
+            expiry_time: None,
+            reduce_only: false,
+            post_only: false,
+            take_profit: None,
+            stop_loss: None,
+            tpsl_status: None,
+            close_reason: None,
+            peg_offset_bps: None,
+            trigger_price: None,
+        };
+        let snap = sequencer::OpenOrdersSnapshot {
+            rows: vec![row],
+            server_timestamp: 0,
+            correlation_id: vec![],
+            decimal_places: 0,
+            error_code: None,
+            reject_text: None,
+        };
+        let wire = snap.encode_to_vec();
+        match parse_node_response_with_expected(&wire, Some("open_orders_snapshot")).expect("parse")
+        {
+            NodeResponseKind::OpenOrdersSnapshot(parsed) => assert_eq!(parsed.rows.len(), 1),
+            other => panic!("expected OpenOrdersSnapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_cancel_all_roundtrip() {
+        let bytes = build_cancel_all_proto(Some(7), &TEST_UUID, &TEST_UUID);
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let cancel_all = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::CancelAll(c)) => c,
+            other => panic!("expected CancelAll, got {:?}", other),
+        };
+        assert_eq!(cancel_all.symbol_id, Some(7));
+    }
+
+    #[test]
     fn test_build_cancel_order_roundtrip() {
         let bytes = build_cancel_order_proto(10, &TEST_UUID, 30, &TEST_UUID);
         let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
@@ -1050,7 +1474,8 @@ mod tests {
 
     #[test]
     fn test_build_modify_order_roundtrip() {
-        let bytes = build_modify_order_proto(7, &TEST_UUID, 9, Some(2.25), Some(3.5), &TEST_UUID);
+        let bytes =
+            build_modify_order_proto(7, &TEST_UUID, 9, Some(2.25), Some(3.5), None, &TEST_UUID);
         let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
         let modify = match decoded.inner {
             Some(sequencer::edge_sequencer_request::Inner::Modify(m)) => m,
@@ -1701,6 +2126,39 @@ mod tests {
                 assert_eq!(u.timestamp, 1_700_000_004);
             }
             other => panic!("expected FundingRateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_leverage_settings_roundtrip() {
+        let ls = sequencer::LeverageSettings {
+            user_uuid: TEST_UUID.to_vec(),
+            server_timestamp: 1_700_000_005,
+            settings: vec![
+                sequencer::LeverageSettingRow {
+                    symbol_id: 42,
+                    leverage: 5,
+                },
+                sequencer::LeverageSettingRow {
+                    symbol_id: 7,
+                    leverage: 10,
+                },
+            ],
+            margin_mode_settings: vec![],
+        };
+        let msg = sequencer::SequencerToEdgeMessage {
+            inner: Some(sequencer::sequencer_to_edge_message::Inner::LeverageSettings(ls)),
+        };
+        match parse_sequencer_to_edge_message(&msg.encode_to_vec()).expect("parse") {
+            EdgeMessage::LeverageSettings(settings) => {
+                assert_eq!(settings.settings.len(), 2);
+                assert_eq!(settings.settings[0].symbol_id, 42);
+                assert_eq!(settings.settings[0].leverage, 5);
+                assert_eq!(settings.settings[1].symbol_id, 7);
+                assert_eq!(settings.server_timestamp, Some(1_700_000_005));
+                assert_eq!(settings.user_uuid, Some(Uuid::from_bytes(TEST_UUID)));
+            }
+            other => panic!("expected LeverageSettings, got {other:?}"),
         }
     }
 
