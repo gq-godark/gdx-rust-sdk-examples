@@ -68,6 +68,22 @@ Use `.env.example` as the template for your local `.env`. The shared helper
 `examples/dotenv.rs` (`load_dotenv` + `print_order_error`) is reused by both
 example binaries.
 
+### WebSocket transport defaults
+
+Pass custom values via `.transport(TransportConfig { ... })` on
+`GodarkClient::builder()`. Defaults:
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `heartbeat_interval` | `30s` | Ping interval |
+| `stale_timeout` | `120s` | Absolute cap with no inbound traffic |
+| `missed_heartbeat_limit` | `2` | Consecutive missed ping intervals before stale close |
+| `auto_reconnect` | `true` | Reconnect after unexpected disconnect; manual `disconnect()` does not |
+
+On stale disconnect the SDK emits a non-fatal `GodarkError::Connection` on
+`take_error_receiver()` (message contains `stale heartbeat`), then
+`take_reconnect_receiver()` events (`Disconnected`, `Attempting`, `Reconnected`).
+
 ## Installing the SDK
 
 In this repository, the example binaries depend on the vendored crate via a
@@ -149,7 +165,8 @@ will fill the buffer and back-pressure the dispatcher.
 | `take_margin_alert_receiver()` | `Receiver<MarginAlert>` | Margin tier transition / recovery |
 | `take_funding_rate_receiver()` | `Receiver<FundingRateUpdate>` | Per-symbol funding ticks |
 | `take_settlement_receiver()` | `Receiver<SettlementUpdate>` | Settlement batch lifecycle |
-| `take_error_receiver()` | `Receiver<GodarkError>` | Non-fatal SDK errors |
+| `take_error_receiver()` | `Receiver<GodarkError>` | Non-fatal SDK errors (stale heartbeat, decrypt failures, …) |
+| `take_reconnect_receiver()` | `Receiver<ReconnectEvent>` | Disconnect / backoff / reconnected lifecycle |
 
 ### Push-payload reference
 

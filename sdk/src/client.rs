@@ -1454,6 +1454,40 @@ impl GodarkClient {
                             }
                         }
                     }
+                    TransportEvent::StaleDisconnect { reason } => {
+                        tracing::warn!("{reason}");
+                        let _ = error_tx.try_send(GodarkError::Connection(reason));
+                        connected.store(false, Ordering::SeqCst);
+                        if let Ok(mut guard) = session.lock() {
+                            guard.reset();
+                        }
+                        fail_place_outcome_waiters(
+                            &place_outcomes,
+                            "connection lost while waiting for order confirmation",
+                        );
+                        fail_encrypted_ack_waiters(
+                            &encrypted_ack_waiters,
+                            "connection lost while waiting for encrypted command ack",
+                        );
+                        let _ = reconnect_tx.send(ReconnectEvent::Disconnected).await;
+                        if let Some(next_rx) = reconnect_transport(
+                            &config,
+                            &transport,
+                            &session,
+                            &user_uuid,
+                            &desired_channels,
+                            &connected,
+                            &reconnect_attempts,
+                            &intentional_close,
+                            &reconnect_tx,
+                        )
+                        .await
+                        {
+                            rx = next_rx;
+                            continue;
+                        }
+                        break;
+                    }
                     TransportEvent::Disconnected => {
                         connected.store(false, Ordering::SeqCst);
                         if let Ok(mut guard) = session.lock() {
@@ -2497,5 +2531,82 @@ mod tests {
             .expect("timeout")
             .expect("event");
         assert_eq!(ev, ReconnectEvent::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn test_stale_disconnect_reports_error_before_reconnect() {
+        let config = GodarkClient::builder()
+            .api_key("test")
+            .auto_reconnect(false)
+            .build()
+            .unwrap();
+        let mut client = GodarkClient::new(config);
+        let mut error_rx = client.take_error_receiver().expect("error receiver");
+        let mut reconnect_rx = client
+            .take_reconnect_receiver()
+            .expect("reconnect receiver");
+        let (event_tx, event_rx) = mpsc::channel(8);
+        client.connected.store(true, Ordering::SeqCst);
+        client.start_event_loop(event_rx);
+
+        let reason = "stale heartbeat: missed 2 heartbeat responses (limit 2)".to_string();
+        event_tx
+            .send(TransportEvent::StaleDisconnect {
+                reason: reason.clone(),
+            })
+            .await
+            .expect("send stale");
+        event_tx
+            .send(TransportEvent::Disconnected)
+            .await
+            .expect("send disconnected");
+
+        let err = tokio::time::timeout(Duration::from_millis(200), error_rx.recv())
+            .await
+            .expect("error timeout")
+            .expect("error event");
+        match err {
+            GodarkError::Connection(msg) => assert!(msg.contains("stale heartbeat")),
+            other => panic!("expected Connection stale error, got {other:?}"),
+        }
+
+        let ev = tokio::time::timeout(Duration::from_millis(200), reconnect_rx.recv())
+            .await
+            .expect("reconnect timeout")
+            .expect("reconnect event");
+        assert_eq!(ev, ReconnectEvent::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn test_manual_disconnect_does_not_reconnect() {
+        let config = GodarkClient::builder()
+            .api_key("test")
+            .auto_reconnect(true)
+            .build()
+            .unwrap();
+        let mut client = GodarkClient::new(config);
+        let mut reconnect_rx = client
+            .take_reconnect_receiver()
+            .expect("reconnect receiver");
+        client.connected.store(true, Ordering::SeqCst);
+        client.intentional_close.store(true, Ordering::SeqCst);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        client.start_event_loop(event_rx);
+        event_tx
+            .send(TransportEvent::Disconnected)
+            .await
+            .expect("send event");
+
+        let ev = tokio::time::timeout(Duration::from_millis(200), reconnect_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        assert_eq!(ev, ReconnectEvent::Disconnected);
+
+        let second = tokio::time::timeout(Duration::from_millis(100), reconnect_rx.recv()).await;
+        assert!(
+            second.is_err(),
+            "manual disconnect must not emit Attempting"
+        );
     }
 }

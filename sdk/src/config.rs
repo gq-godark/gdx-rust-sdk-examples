@@ -92,6 +92,8 @@ pub struct TransportConfig {
     /// No inbound message for this duration triggers disconnect (see transport heartbeat).
     pub stale_timeout: Duration,
     pub heartbeat_interval: Duration,
+    /// Consecutive heartbeat intervals without inbound traffic before stale disconnect.
+    pub missed_heartbeat_limit: u32,
 }
 
 impl Default for TransportConfig {
@@ -101,8 +103,9 @@ impl Default for TransportConfig {
             extra_headers: HashMap::new(),
             connect_timeout: Duration::from_secs(30),
             command_timeout: Duration::from_secs(30),
-            stale_timeout: Duration::from_secs(60),
+            stale_timeout: Duration::from_secs(120),
             heartbeat_interval: Duration::from_secs(30),
+            missed_heartbeat_limit: 2,
         }
     }
 }
@@ -712,6 +715,18 @@ mod tests {
     fn test_builder_auto_reconnect_default() {
         let cfg = GodarkConfigBuilder::new().api_key("k").build().unwrap();
         assert!(cfg.auto_reconnect);
+    }
+
+    #[test]
+    fn test_transport_config_heartbeat_defaults() {
+        use std::time::Duration;
+
+        use super::TransportConfig;
+
+        let cfg = TransportConfig::default();
+        assert_eq!(cfg.heartbeat_interval, Duration::from_secs(30));
+        assert_eq!(cfg.stale_timeout, Duration::from_secs(120));
+        assert_eq!(cfg.missed_heartbeat_limit, 2);
     }
 
     #[test]

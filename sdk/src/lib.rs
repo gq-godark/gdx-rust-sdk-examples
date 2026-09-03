@@ -9,6 +9,7 @@ mod config;
 mod enums;
 mod error;
 mod generated;
+mod heartbeat;
 mod hpke;
 mod instruments;
 mod order_error_code;

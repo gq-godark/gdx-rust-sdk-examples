@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::config::TransportConfig;
 use crate::error::GodarkError;
+use crate::heartbeat::HeartbeatTracker;
 use crate::wire::{self, DecodedBinary};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -172,7 +173,14 @@ pub enum TransportEvent {
     OrderUpdate(Value),
     EncryptedPush(Value),
     PublicMessage(Value),
-    HpkeSetupReply { conn_id: u64, established: bool },
+    HpkeSetupReply {
+        conn_id: u64,
+        established: bool,
+    },
+    /// Stale heartbeat detected; reason is surfaced on the client error channel before close.
+    StaleDisconnect {
+        reason: String,
+    },
     Disconnected,
 }
 
@@ -247,9 +255,9 @@ impl EdgeTransport {
         let (cmd_tx, cmd_rx) = mpsc::channel::<PendingCommand>(8);
         let (session_tx, session_rx) = mpsc::channel::<PendingSession>(4);
 
-        let last_inbound = Arc::new(Mutex::new(Some(Instant::now())));
+        let heartbeat_tracker = Arc::new(Mutex::new(HeartbeatTracker::new(Instant::now())));
         let write_handle = tokio::spawn(Self::write_loop(ws_write, write_rx));
-        let recv_last = Arc::clone(&last_inbound);
+        let recv_tracker = Arc::clone(&heartbeat_tracker);
         let recv_pending_sub = Arc::clone(&self.pending_sub);
         let recv_handle = tokio::spawn(Self::recv_loop(
             ws_read,
@@ -257,19 +265,21 @@ impl EdgeTransport {
             cmd_rx,
             session_rx,
             recv_pending_sub,
-            recv_last,
+            recv_tracker,
         ));
 
         let hb_write_tx = write_tx.clone();
         let hb_event_tx = event_tx;
         let heartbeat_interval = self.transport.heartbeat_interval;
         let stale_timeout = self.transport.stale_timeout;
+        let missed_heartbeat_limit = self.transport.missed_heartbeat_limit;
         let heartbeat_handle = tokio::spawn(Self::heartbeat_loop(
             hb_write_tx,
             hb_event_tx,
-            last_inbound,
+            heartbeat_tracker,
             heartbeat_interval,
             stale_timeout,
+            missed_heartbeat_limit,
         ));
 
         self.write_tx = Some(write_tx);
@@ -473,7 +483,7 @@ impl EdgeTransport {
         mut cmd_rx: mpsc::Receiver<PendingCommand>,
         mut session_rx: mpsc::Receiver<PendingSession>,
         pending_sub: Arc<Mutex<Option<PendingSubscription>>>,
-        last_inbound: Arc<Mutex<Option<Instant>>>,
+        heartbeat_tracker: Arc<Mutex<HeartbeatTracker>>,
     ) {
         let mut pending_cmd: Option<PendingCommand> = None;
         let mut pending_session: Option<PendingSession> = None;
@@ -493,8 +503,8 @@ impl EdgeTransport {
                         Ok(m) => m,
                         Err(_) => break,
                     };
-                    if let Ok(mut g) = last_inbound.lock() {
-                        *g = Some(Instant::now());
+                    if let Ok(mut tracker) = heartbeat_tracker.lock() {
+                        tracker.record_inbound(Instant::now());
                     }
                     match msg {
                         Message::Binary(bytes) => {
@@ -665,21 +675,25 @@ impl EdgeTransport {
     async fn heartbeat_loop(
         write_tx: mpsc::Sender<Message>,
         event_tx: mpsc::Sender<TransportEvent>,
-        last_inbound: Arc<Mutex<Option<Instant>>>,
+        heartbeat_tracker: Arc<Mutex<HeartbeatTracker>>,
         heartbeat_interval: Duration,
         stale_timeout: Duration,
+        missed_heartbeat_limit: u32,
     ) {
         loop {
             tokio::time::sleep(heartbeat_interval).await;
-            let stale = {
-                let guard = last_inbound.lock().ok();
-                guard
-                    .and_then(|g| *g)
-                    .map(|t| t.elapsed() > stale_timeout)
-                    .unwrap_or(true)
-            };
-            if stale {
-                tracing::warn!("Stale connection (no inbound within {stale_timeout:?}), closing");
+            let stale_reason = heartbeat_tracker.lock().ok().and_then(|mut tracker| {
+                tracker
+                    .on_tick(Instant::now(), stale_timeout, missed_heartbeat_limit)
+                    .err()
+            });
+            if let Some(reason) = stale_reason {
+                tracing::warn!("{reason}");
+                let _ = event_tx
+                    .send(TransportEvent::StaleDisconnect {
+                        reason: reason.clone(),
+                    })
+                    .await;
                 let _ = event_tx.send(TransportEvent::Disconnected).await;
                 break;
             }
@@ -1086,5 +1100,58 @@ mod tests {
             .expect("oneshot must not be dropped");
         assert!(result.is_ok());
         assert!(pending_sub.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_heartbeat_tracker_single_miss_keeps_connection() {
+        use std::time::Instant;
+
+        use crate::heartbeat::HeartbeatTracker;
+
+        let t0 = Instant::now();
+        let mut tracker = HeartbeatTracker::new(t0);
+        tracker.on_tick(t0, Duration::from_millis(120), 2).unwrap();
+        let t1 = t0 + Duration::from_millis(30);
+        assert!(tracker.on_tick(t1, Duration::from_millis(120), 2).is_ok());
+    }
+
+    #[test]
+    fn test_heartbeat_tracker_second_miss_is_stale() {
+        use std::time::Instant;
+
+        use crate::heartbeat::HeartbeatTracker;
+
+        let t0 = Instant::now();
+        let mut tracker = HeartbeatTracker::new(t0);
+        tracker.on_tick(t0, Duration::from_millis(120), 2).unwrap();
+        let t1 = t0 + Duration::from_millis(30);
+        tracker.on_tick(t1, Duration::from_millis(120), 2).unwrap();
+        let t2 = t0 + Duration::from_millis(60);
+        let err = tracker
+            .on_tick(t2, Duration::from_millis(120), 2)
+            .unwrap_err();
+        assert!(err.contains("missed 2 heartbeat responses"));
+    }
+
+    #[tokio::test]
+    async fn test_stale_disconnect_event_ordering() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        let reason = "stale heartbeat: missed 2 heartbeat responses (limit 2)".to_string();
+        event_tx
+            .send(TransportEvent::StaleDisconnect {
+                reason: reason.clone(),
+            })
+            .await
+            .unwrap();
+        event_tx.send(TransportEvent::Disconnected).await.unwrap();
+
+        match event_rx.recv().await {
+            Some(TransportEvent::StaleDisconnect { reason: r }) => assert_eq!(r, reason),
+            other => panic!("expected StaleDisconnect first, got {other:?}"),
+        }
+        match event_rx.recv().await {
+            Some(TransportEvent::Disconnected) => {}
+            other => panic!("expected Disconnected second, got {other:?}"),
+        }
     }
 }
