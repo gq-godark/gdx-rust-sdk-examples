@@ -2604,6 +2604,9 @@ mod tests {
         assert_eq!(ev, ReconnectEvent::Disconnected);
 
         let second = tokio::time::timeout(Duration::from_millis(100), reconnect_rx.recv()).await;
-        assert!(second.is_err(), "manual disconnect must not emit Attempting");
+        assert!(
+            second.is_err(),
+            "manual disconnect must not emit Attempting"
+        );
     }
 }

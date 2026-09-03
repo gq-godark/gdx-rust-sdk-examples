@@ -173,9 +173,14 @@ pub enum TransportEvent {
     OrderUpdate(Value),
     EncryptedPush(Value),
     PublicMessage(Value),
-    HpkeSetupReply { conn_id: u64, established: bool },
+    HpkeSetupReply {
+        conn_id: u64,
+        established: bool,
+    },
     /// Stale heartbeat detected; reason is surfaced on the client error channel before close.
-    StaleDisconnect { reason: String },
+    StaleDisconnect {
+        reason: String,
+    },
     Disconnected,
 }
 
@@ -677,14 +682,11 @@ impl EdgeTransport {
     ) {
         loop {
             tokio::time::sleep(heartbeat_interval).await;
-            let stale_reason = heartbeat_tracker
-                .lock()
-                .ok()
-                .and_then(|mut tracker| {
-                    tracker
-                        .on_tick(Instant::now(), stale_timeout, missed_heartbeat_limit)
-                        .err()
-                });
+            let stale_reason = heartbeat_tracker.lock().ok().and_then(|mut tracker| {
+                tracker
+                    .on_tick(Instant::now(), stale_timeout, missed_heartbeat_limit)
+                    .err()
+            });
             if let Some(reason) = stale_reason {
                 tracing::warn!("{reason}");
                 let _ = event_tx

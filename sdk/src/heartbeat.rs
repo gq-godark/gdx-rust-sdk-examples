@@ -64,9 +64,13 @@ mod tests {
     fn test_single_missed_interval_does_not_disconnect() {
         let t0 = Instant::now();
         let mut tracker = HeartbeatTracker::new(t0);
-        tracker.on_tick(t0, Duration::from_secs(120), 2).expect("first tick");
+        tracker
+            .on_tick(t0, Duration::from_secs(120), 2)
+            .expect("first tick");
         let t1 = t0 + Duration::from_secs(30);
-        tracker.on_tick(t1, Duration::from_secs(120), 2).expect("one miss");
+        tracker
+            .on_tick(t1, Duration::from_secs(120), 2)
+            .expect("one miss");
         assert_eq!(tracker.missed_count, 1);
     }
 
@@ -74,9 +78,13 @@ mod tests {
     fn test_two_missed_intervals_disconnect() {
         let t0 = Instant::now();
         let mut tracker = HeartbeatTracker::new(t0);
-        tracker.on_tick(t0, Duration::from_secs(120), 2).expect("first tick");
+        tracker
+            .on_tick(t0, Duration::from_secs(120), 2)
+            .expect("first tick");
         let t1 = t0 + Duration::from_secs(30);
-        tracker.on_tick(t1, Duration::from_secs(120), 2).expect("one miss");
+        tracker
+            .on_tick(t1, Duration::from_secs(120), 2)
+            .expect("one miss");
         let t2 = t0 + Duration::from_secs(60);
         let err = tracker
             .on_tick(t2, Duration::from_secs(120), 2)
@@ -88,12 +96,18 @@ mod tests {
     fn test_inbound_resets_missed_counter() {
         let t0 = Instant::now();
         let mut tracker = HeartbeatTracker::new(t0);
-        tracker.on_tick(t0, Duration::from_secs(120), 2).expect("first tick");
+        tracker
+            .on_tick(t0, Duration::from_secs(120), 2)
+            .expect("first tick");
         let t1 = t0 + Duration::from_secs(30);
-        tracker.on_tick(t1, Duration::from_secs(120), 2).expect("one miss");
+        tracker
+            .on_tick(t1, Duration::from_secs(120), 2)
+            .expect("one miss");
         tracker.record_inbound(t1 + Duration::from_secs(5));
         let t2 = t0 + Duration::from_secs(60);
-        tracker.on_tick(t2, Duration::from_secs(120), 2).expect("reset");
+        tracker
+            .on_tick(t2, Duration::from_secs(120), 2)
+            .expect("reset");
         assert_eq!(tracker.missed_count, 0);
     }
 
@@ -101,7 +115,9 @@ mod tests {
     fn test_absolute_stale_timeout_wins() {
         let t0 = Instant::now();
         let mut tracker = HeartbeatTracker::new(t0);
-        tracker.on_tick(t0, Duration::from_secs(120), 2).expect("first tick");
+        tracker
+            .on_tick(t0, Duration::from_secs(120), 2)
+            .expect("first tick");
         let stale = t0 + Duration::from_secs(121);
         let err = tracker
             .on_tick(stale, Duration::from_secs(120), 2)
