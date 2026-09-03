@@ -75,8 +75,9 @@ mod tests {
         assert!(d.extra_headers.is_empty());
         assert_eq!(d.connect_timeout, Duration::from_secs(30));
         assert_eq!(d.command_timeout, Duration::from_secs(30));
-        assert_eq!(d.stale_timeout, Duration::from_secs(60));
+        assert_eq!(d.stale_timeout, Duration::from_secs(120));
         assert_eq!(d.heartbeat_interval, Duration::from_secs(30));
+        assert_eq!(d.missed_heartbeat_limit, 2);
     }
 
     #[test]
