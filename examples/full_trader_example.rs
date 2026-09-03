@@ -62,7 +62,8 @@ async fn main() {
         connect_timeout: Duration::from_secs(10),
         command_timeout: Duration::from_secs(10),
         heartbeat_interval: Duration::from_secs(30),
-        stale_timeout: Duration::from_secs(60),
+        stale_timeout: Duration::from_secs(120),
+        missed_heartbeat_limit: 2,
         ..TransportConfig::default()
     };
 

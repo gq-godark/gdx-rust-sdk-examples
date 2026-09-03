@@ -58,6 +58,13 @@ The MM examples expect:
 
 Use `.env.example` as the template for your local `.env`.
 
+### WebSocket transport defaults
+
+`TransportConfig` defaults: ping every `30s`, stale after `120s` with no inbound
+traffic or `2` consecutive missed heartbeat intervals. Stale disconnects emit a
+non-fatal error on `take_error_receiver()` before reconnect events. Manual
+`disconnect()` does not auto-reconnect.
+
 ## GodarkClient API
 
 **Crate:** `godark` (statically linked into each example binary in this
