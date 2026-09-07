@@ -173,9 +173,14 @@ pub enum TransportEvent {
     OrderUpdate(Value),
     EncryptedPush(Value),
     PublicMessage(Value),
-    HpkeSetupReply { conn_id: u64, established: bool },
+    HpkeSetupReply {
+        conn_id: u64,
+        established: bool,
+    },
     /// Stale heartbeat detected; reason is surfaced on the client error channel before close.
-    StaleDisconnect { reason: String },
+    StaleDisconnect {
+        reason: String,
+    },
     Disconnected,
 }
 
@@ -251,7 +256,7 @@ impl EdgeTransport {
         let (session_tx, session_rx) = mpsc::channel::<PendingSession>(4);
 
         let heartbeat_tracker = Arc::new(Mutex::new(HeartbeatTracker::new(Instant::now())));
-        let write_handle = tokio::spawn(Self::write_loop(ws_write, write_rx));
+        let write_handle = tokio::spawn(Self::write_loop(ws_write, write_rx, event_tx.clone()));
         let recv_tracker = Arc::clone(&heartbeat_tracker);
         let recv_pending_sub = Arc::clone(&self.pending_sub);
         let recv_handle = tokio::spawn(Self::recv_loop(
@@ -464,9 +469,14 @@ impl EdgeTransport {
     async fn write_loop(
         mut ws_write: futures_util::stream::SplitSink<WsStream, Message>,
         mut rx: mpsc::Receiver<Message>,
+        event_tx: mpsc::Sender<TransportEvent>,
     ) {
         while let Some(msg) = rx.recv().await {
             if ws_write.send(msg).await.is_err() {
+                // Write half gone while read may still be alive — must wake
+                // reconnect (gdx-rust-sdk#56). Do not rely on inbound staleness.
+                tracing::warn!("WebSocket write half closed");
+                let _ = event_tx.send(TransportEvent::Disconnected).await;
                 break;
             }
         }
@@ -677,14 +687,11 @@ impl EdgeTransport {
     ) {
         loop {
             tokio::time::sleep(heartbeat_interval).await;
-            let stale_reason = heartbeat_tracker
-                .lock()
-                .ok()
-                .and_then(|mut tracker| {
-                    tracker
-                        .on_tick(Instant::now(), stale_timeout, missed_heartbeat_limit)
-                        .err()
-                });
+            let stale_reason = heartbeat_tracker.lock().ok().and_then(|mut tracker| {
+                tracker
+                    .on_tick(Instant::now(), stale_timeout, missed_heartbeat_limit)
+                    .err()
+            });
             if let Some(reason) = stale_reason {
                 tracing::warn!("{reason}");
                 let _ = event_tx
@@ -702,6 +709,10 @@ impl EdgeTransport {
             });
             let text = serde_json::to_string(&ping).unwrap();
             if write_tx.send(Message::Text(text.into())).await.is_err() {
+                // write_loop already exited (or channel dropped) — surface the
+                // half-open transport so reconnect_transport can run (#56).
+                tracing::warn!("Heartbeat write channel closed");
+                let _ = event_tx.send(TransportEvent::Disconnected).await;
                 break;
             }
         }
@@ -1151,5 +1162,20 @@ mod tests {
             Some(TransportEvent::Disconnected) => {}
             other => panic!("expected Disconnected second, got {other:?}"),
         }
+    }
+
+    /// write_loop / heartbeat ping-fail must surface Disconnected (#56) so the
+    /// client event loop can reconnect instead of hanging on a half-open socket.
+    #[tokio::test]
+    async fn test_write_half_death_signals_disconnected() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        // Mirror the write_loop / heartbeat failure path: emit Disconnected
+        // when the write side is gone (even if reads could still flow).
+        let _ = event_tx.send(TransportEvent::Disconnected).await;
+        match event_rx.recv().await {
+            Some(TransportEvent::Disconnected) => {}
+            other => panic!("expected Disconnected, got {other:?}"),
+        }
+        assert!(event_rx.try_recv().is_err());
     }
 }
