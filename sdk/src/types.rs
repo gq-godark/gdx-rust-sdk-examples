@@ -52,6 +52,8 @@ pub struct PlaceOrderOptions {
     pub trigger_price: Option<f64>,
     pub take_profit_price: Option<f64>,
     pub stop_loss_price: Option<f64>,
+    /// Max walk vs mark for market / stop-market (basis points). `None` → venue max.
+    pub slippage_bps: Option<u32>,
 }
 
 /// RPC reply for amend / cancel TP-SL (`NodeResponse::tpsl_ack`).

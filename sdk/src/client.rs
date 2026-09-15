@@ -934,6 +934,7 @@ impl GodarkClient {
                 Err(GodarkError::Order {
                     message: message.to_string(),
                     error_code: None,
+                    user_message: None,
                 })
             }
             "ack" => {
@@ -969,6 +970,7 @@ impl GodarkClient {
             _ => Err(GodarkError::Order {
                 message: format!("Unexpected response type: {msg_type}"),
                 error_code: None,
+                user_message: None,
             }),
         }
     }
@@ -1050,6 +1052,7 @@ impl GodarkClient {
             _ => Err(GodarkError::Order {
                 message: "Expected ack response".to_string(),
                 error_code: None,
+                user_message: None,
             }),
         }
     }
@@ -1070,12 +1073,14 @@ impl GodarkClient {
             return Err(GodarkError::Order {
                 message: message.to_string(),
                 error_code: None,
+                user_message: None,
             });
         }
         if msg_type != "encrypted_push" {
             return Err(GodarkError::Order {
                 message: format!("Unexpected response type: {msg_type}"),
                 error_code: None,
+                user_message: None,
             });
         }
         if let Some(err) = msg.get("_decrypt_error").and_then(|v| v.as_str()) {

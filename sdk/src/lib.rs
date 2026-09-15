@@ -12,7 +12,9 @@ mod generated;
 mod heartbeat;
 mod hpke;
 mod instruments;
+mod order_error_catalog;
 mod order_error_code;
+mod order_error_reasons;
 mod proto_bridge;
 mod rest_client;
 mod rest_transport;
@@ -20,6 +22,9 @@ mod session;
 mod transport;
 mod types;
 mod wire;
+mod ws_admit_error_catalog;
+mod ws_admit_error_code;
+mod ws_admit_error_reasons;
 mod ws_connect;
 
 /// Raw protobuf types (`gdx.sequencer.v1`, `gdx.edge.v1`).
@@ -70,4 +75,7 @@ pub use types::{
     MassQuoteLegResult, MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck, OrderUpdate,
     PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
     SystemHealthUpdate, TpslAck,
+};
+pub use ws_admit_error_code::{
+    find as find_ws_admit_error, WsAdmitErrorEntry, WS_ADMIT_ERROR_CODES,
 };
