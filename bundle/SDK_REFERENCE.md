@@ -153,6 +153,11 @@ Important enums used in MM examples (all implement `Debug`):
 Note: the SDK enum includes additional order types for compatibility, but this
 MM distribution supports placing only `Market` and `Limit` orders.
 
+`PlaceOrderOptions` on `place_order_with_options` includes `reduce_only`,
+`post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`,
+`stop_loss_price`, and `slippage_bps`. Omit `slippage_bps` to use the venue max
+walk cap (localnet 5%); typical explicit values are 50–500 bps (0.5%–5%).
+
 ## Errors
 
 `GodarkError` is the single error type returned from every fallible SDK call:

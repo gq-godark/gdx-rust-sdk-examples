@@ -242,6 +242,35 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     drain_orders(&mut order_rx, "after MODIFY");
 
+    // Market IOC with explicit walk cap: 50 bps = 0.5% of mark (UI default).
+    // Omit slippage_bps → venue max (localnet 5%).
+    println!("Placing market IOC BUY qty=0.01 with slippage_bps=50 (0.5% walk)...");
+    match client
+        .place_order_with_options(
+            SYMBOL,
+            Side::Buy,
+            OrderType::Market,
+            0.01,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            Confirmation::Book,
+            PlaceOrderOptions {
+                slippage_bps: Some(50),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(ack) => println!("MARKET BUY placed: order_id={}", ack.order_id),
+        Err(e) => dotenv::print_order_error("Market BUY rejected (continuing)", &e),
+    }
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    drain_orders(&mut order_rx, "after MARKET BUY");
+
     let sell_px = (mark * 1.03 * 10.0).round() / 10.0;
     println!("Placing limit SELL @ {sell_px}...");
     match client
