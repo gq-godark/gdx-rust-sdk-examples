@@ -217,30 +217,30 @@ async fn main() {
                 "BUY placed: order_id={}  sequence={}",
                 ack.order_id, ack.sequence
             );
-            ack
+            Some(ack)
         }
         Err(e) => {
-            dotenv::print_order_error("BUY rejected", &e);
-            client.disconnect().await;
-            std::process::exit(1);
+            dotenv::print_order_error("BUY rejected (continuing to market Place)", &e);
+            None
         }
     };
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     drain_orders(&mut order_rx, "after BUY");
 
-    let modify_px = (mark * 0.996 * 10.0).round() / 10.0;
-    println!("Modifying order price to {modify_px}...");
-    match client
-        .modify_order(&buy_ack.order_id, SYMBOL, Some(modify_px), None, None)
-        .await
-    {
-        Ok(ack) => println!("Modified: order_id={}", ack.order_id),
-        Err(e) => dotenv::print_order_error("Modify rejected", &e),
+    if let Some(ref buy_ack) = buy_ack {
+        let modify_px = (mark * 0.996 * 10.0).round() / 10.0;
+        println!("Modifying order price to {modify_px}...");
+        match client
+            .modify_order(&buy_ack.order_id, SYMBOL, Some(modify_px), None, None)
+            .await
+        {
+            Ok(ack) => println!("Modified: order_id={}", ack.order_id),
+            Err(e) => dotenv::print_order_error("Modify rejected", &e),
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        drain_orders(&mut order_rx, "after MODIFY");
     }
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    drain_orders(&mut order_rx, "after MODIFY");
 
     // Market IOC with explicit walk cap: 50 bps = 0.5% of mark (UI default).
     // Omit slippage_bps → venue max (localnet 5%).
@@ -443,10 +443,12 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     drain_orders(&mut order_rx, "after post_only=false");
 
-    println!("Cancelling original BUY (cleanup)...");
-    match client.cancel_order(&buy_ack.order_id, SYMBOL).await {
-        Ok(_) => println!("Original BUY cancelled"),
-        Err(_) => println!("Original BUY already filled or cancelled"),
+    if let Some(ref buy_ack) = buy_ack {
+        println!("Cancelling original BUY (cleanup)...");
+        match client.cancel_order(&buy_ack.order_id, SYMBOL).await {
+            Ok(_) => println!("Original BUY cancelled"),
+            Err(_) => println!("Original BUY already filled or cancelled"),
+        }
     }
 
     // Drain any sequencer pushes that arrived during the session.
