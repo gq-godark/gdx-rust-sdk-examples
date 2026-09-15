@@ -99,6 +99,7 @@ pub fn build_place_order_proto(
         take_profit_price: options.take_profit_price,
         peg_offset_bps: options.peg_offset_bps,
         trigger_price: options.trigger_price,
+        slippage_bps: options.slippage_bps,
     };
     let req = sequencer::EdgeSequencerRequest {
         inner: Some(sequencer::edge_sequencer_request::Inner::Place(place)),
@@ -459,6 +460,7 @@ pub fn parse_mass_quote_ack(data: &[u8]) -> Result<crate::types::MassQuoteAck, G
         return Err(GodarkError::Order {
             message: format!("Expected mass_quote_ack, got {variant}"),
             error_code: None,
+            user_message: None,
         });
     }
     let ack = sequencer::MassQuoteAck::decode(payload.as_slice())
@@ -491,6 +493,7 @@ pub fn parse_batch_cancel_ack(data: &[u8]) -> Result<crate::types::BatchCancelAc
         return Err(GodarkError::Order {
             message: format!("Expected batch_cancel_ack, got {variant}"),
             error_code: None,
+            user_message: None,
         });
     }
     let ack = sequencer::BatchCancelAck::decode(payload.as_slice())
@@ -519,6 +522,7 @@ pub fn parse_batch_modify_ack(data: &[u8]) -> Result<crate::types::BatchModifyAc
         return Err(GodarkError::Order {
             message: format!("Expected batch_modify_ack, got {variant}"),
             error_code: None,
+            user_message: None,
         });
     }
     let ack = sequencer::BatchModifyAck::decode(payload.as_slice())
@@ -887,6 +891,7 @@ pub fn parse_tpsl_ack(data: &[u8]) -> Result<TpslAck, GodarkError> {
         other => Err(GodarkError::Order {
             message: format!("Expected tpsl_ack, got {other:?}"),
             error_code: None,
+            user_message: None,
         }),
     }
 }
@@ -949,6 +954,7 @@ pub fn parse_count_ack(data: &[u8], expected: &str) -> Result<CountAck, GodarkEr
         other => Err(GodarkError::Order {
             message: format!("Expected count ack, got {other:?}"),
             error_code: None,
+            user_message: None,
         }),
     }
 }
@@ -1272,6 +1278,7 @@ mod tests {
             trigger_price: None,
             take_profit_price: None,
             stop_loss_price: None,
+            slippage_bps: None,
         };
         let bytes = build_place_order_proto(
             42,
@@ -1311,6 +1318,7 @@ mod tests {
             trigger_price: Some(95.5),
             take_profit_price: Some(110.0),
             stop_loss_price: Some(90.0),
+            slippage_bps: None,
         };
         let bytes = build_place_order_proto(
             42,
@@ -1336,6 +1344,57 @@ mod tests {
         assert_eq!(place.trigger_price, Some(95.5));
         assert_eq!(place.take_profit_price, Some(110.0));
         assert_eq!(place.stop_loss_price, Some(90.0));
+    }
+
+    #[test]
+    fn test_build_place_order_slippage_bps() {
+        let omit = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            1.0,
+            &TEST_UUID,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_UUID,
+            PlaceOrderOptions::default(),
+            0,
+        );
+        let decoded = sequencer::EdgeSequencerRequest::decode(omit.as_slice()).expect("decode");
+        let place = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::Place(p)) => p,
+            other => panic!("expected Place, got {:?}", other),
+        };
+        assert_eq!(place.slippage_bps, None);
+
+        let options = PlaceOrderOptions {
+            slippage_bps: Some(200),
+            ..Default::default()
+        };
+        let bytes = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            1.0,
+            &TEST_UUID,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_UUID,
+            options,
+            0,
+        );
+        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
+        let place = match decoded.inner {
+            Some(sequencer::edge_sequencer_request::Inner::Place(p)) => p,
+            other => panic!("expected Place, got {:?}", other),
+        };
+        assert_eq!(place.slippage_bps, Some(200));
     }
 
     #[test]
@@ -1392,6 +1451,7 @@ mod tests {
             correlation_id: vec![9u8; 16],
             pool_ack: None,
             reject_text: Some("no open orders".into()),
+            rest_error_code: None,
             ack_outcome: Some(sequencer::AckOutcomeWire {
                 kind: sequencer::AckOutcomeKind::SystemFailed as i32,
                 business_error_code: Some(1234),

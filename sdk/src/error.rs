@@ -13,6 +13,8 @@ pub enum GodarkError {
     Order {
         message: String,
         error_code: Option<String>,
+        /// Catalog default English when `find(code)` hits; distinct from log `message`.
+        user_message: Option<String>,
     },
 
     #[error("connection error: {0}")]
@@ -65,6 +67,7 @@ mod tests {
         let err = GodarkError::Order {
             message: "insufficient balance".into(),
             error_code: Some("E001".into()),
+            user_message: None,
         };
         let s = err.to_string();
         assert!(s.contains("order rejected"), "unexpected display: {s}");
@@ -78,6 +81,7 @@ mod tests {
     fn test_order_error_without_code() {
         let err = GodarkError::Order {
             message: "no liquidity".into(),
+            user_message: None,
             error_code: None,
         };
         let s = err.to_string();

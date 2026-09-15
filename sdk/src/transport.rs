@@ -36,6 +36,13 @@ fn normalize_inbound_value(val: &Value) -> Value {
     let op = val.get("op").and_then(|v| v.as_str()).unwrap_or("");
     let data = val.get("data");
     let msg_str = val.get("message").and_then(|v| v.as_str());
+    let admit_code = val
+        .get("error_code")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u16::try_from(n).ok());
+    let resolved_err = |fallback: &str| {
+        crate::ws_admit_error_code::resolve_message(admit_code, msg_str.unwrap_or(fallback))
+    };
 
     match op {
         "pong" if code == 0 => serde_json::json!({ "type": "pong" }),
@@ -44,7 +51,8 @@ fn normalize_inbound_value(val: &Value) -> Value {
                 serde_json::json!({
                     "type": "auth_result",
                     "success": false,
-                    "error": msg_str.unwrap_or("authentication failed")
+                    "error": resolved_err("authentication failed"),
+                    "error_code": admit_code
                 })
             } else if let Some(d) = data.and_then(|v| v.as_object()) {
                 serde_json::json!({
@@ -77,8 +85,9 @@ fn normalize_inbound_value(val: &Value) -> Value {
                     .unwrap_or("");
                 serde_json::json!({
                     "event": "error",
-                    "message": msg_str.unwrap_or("channel error"),
-                    "channel": ch
+                    "message": resolved_err("channel error"),
+                    "channel": ch,
+                    "error_code": admit_code
                 })
             } else if let Some(d) = data.and_then(|v| v.as_object()) {
                 if d.contains_key("channel") {
@@ -92,7 +101,11 @@ fn normalize_inbound_value(val: &Value) -> Value {
         }
         "logout" => {
             if code != 0 {
-                serde_json::json!({ "type": "error", "message": msg_str.unwrap_or("logout failed") })
+                serde_json::json!({
+                    "type": "error",
+                    "message": resolved_err("logout failed"),
+                    "error_code": admit_code
+                })
             } else {
                 serde_json::json!({ "type": "ack", "success": true })
             }
@@ -100,7 +113,11 @@ fn normalize_inbound_value(val: &Value) -> Value {
         "order.place" | "order.cancel" | "order.modify" | "order.mass_quote"
         | "order.batch_cancel" | "order.batch_modify" => {
             if code != 0 {
-                serde_json::json!({ "type": "error", "message": msg_str.unwrap_or("order error") })
+                serde_json::json!({
+                    "type": "error",
+                    "message": resolved_err("order error"),
+                    "error_code": admit_code
+                })
             } else if let Some(d) = data.and_then(|v| v.as_object()) {
                 if d.get("message_type").is_some()
                     && (d.contains_key("ciphertext") || d.contains_key("encrypted_body"))

@@ -566,6 +566,7 @@ impl GodarkRestClient {
         let oid = resolve_order_id_from_lookup(&row).ok_or_else(|| GodarkError::Order {
             message: "unknown client_order_id".into(),
             error_code: None,
+            user_message: None,
         })?;
         self.local_coid_index
             .insert(client_order_id.to_string(), oid.clone());
@@ -986,6 +987,7 @@ impl GodarkRestClient {
             _ => Err(GodarkError::Order {
                 message: "Expected ack response".to_string(),
                 error_code: None,
+                user_message: None,
             }),
         }
     }
@@ -1094,6 +1096,7 @@ fn snapshot_rpc_error(kind: proto_bridge::NodeResponseKind, expected: &str) -> G
         other => GodarkError::Order {
             message: format!("expected {expected}, got {other:?}"),
             error_code: None,
+            user_message: None,
         },
     }
 }
@@ -1284,6 +1287,7 @@ mod tests {
             GodarkError::Order {
                 message,
                 error_code,
+                ..
             } => {
                 assert_eq!(message, "rate limit");
                 assert_eq!(error_code.as_deref(), Some("RL"));
