@@ -934,6 +934,7 @@ impl GodarkClient {
                 Err(GodarkError::Order {
                     message: message.to_string(),
                     error_code: None,
+                    user_message: None,
                 })
             }
             "ack" => {
@@ -969,6 +970,7 @@ impl GodarkClient {
             _ => Err(GodarkError::Order {
                 message: format!("Unexpected response type: {msg_type}"),
                 error_code: None,
+                user_message: None,
             }),
         }
     }
@@ -1050,6 +1052,7 @@ impl GodarkClient {
             _ => Err(GodarkError::Order {
                 message: "Expected ack response".to_string(),
                 error_code: None,
+                user_message: None,
             }),
         }
     }
@@ -1070,12 +1073,14 @@ impl GodarkClient {
             return Err(GodarkError::Order {
                 message: message.to_string(),
                 error_code: None,
+                user_message: None,
             });
         }
         if msg_type != "encrypted_push" {
             return Err(GodarkError::Order {
                 message: format!("Unexpected response type: {msg_type}"),
                 error_code: None,
+                user_message: None,
             });
         }
         if let Some(err) = msg.get("_decrypt_error").and_then(|v| v.as_str()) {
@@ -1323,7 +1328,10 @@ impl GodarkClient {
                                     let wire_corr =
                                         json_u128(&val, "correlation_id").filter(|c| *c != 0);
                                     let plaintext_corr =
-                                        match proto_bridge::parse_node_response(&plaintext) {
+                                        match proto_bridge::parse_node_response_with_expected(
+                                            &plaintext,
+                                            Some(message_type),
+                                        ) {
                                             Ok(proto_bridge::NodeResponseKind::Ack {
                                                 correlation_id: raw,
                                                 ..
@@ -1902,13 +1910,13 @@ fn decode_decrypted_push(message_type: &str, plaintext: &[u8]) -> Result<Decoded
 
     if message_type == "open_orders_snapshot" {
         if let Ok(proto_bridge::NodeResponseKind::OpenOrdersSnapshot(_)) =
-            proto_bridge::parse_node_response(plaintext)
+            proto_bridge::parse_node_response_with_expected(plaintext, Some("open_orders_snapshot"))
         {
             return Ok(DecodedPush::Ignored);
         }
     }
 
-    match proto_bridge::parse_sequencer_to_edge_message(plaintext)? {
+    match proto_bridge::parse_sequencer_to_edge_message(plaintext, message_type)? {
         EdgeMessage::OrderUpdate(update) => Ok(DecodedPush::Order(update)),
         EdgeMessage::PositionsSnapshot(snap) => Ok(DecodedPush::PositionsSnapshot(snap)),
         EdgeMessage::SystemHealth(h) => Ok(DecodedPush::SystemHealth(h)),

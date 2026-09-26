@@ -408,6 +408,9 @@ pub struct PlaceOrderInput {
     pub peg_offset_bps: ::core::option::Option<i32>,
     #[prost(double, optional, tag = "20")]
     pub trigger_price: ::core::option::Option<f64>,
+    /// Max walk vs mark for market / stop-market (basis points). Omitted → venue max.
+    #[prost(uint32, optional, tag = "21")]
+    pub slippage_bps: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ModifyOrderInput {
@@ -892,6 +895,9 @@ pub struct AckMessage {
     pub reject_text: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "6")]
     pub ack_outcome: ::core::option::Option<AckOutcomeWire>,
+    /// REST product code (5xxx / 6101+ / 8xxx) for pool / settings failures.
+    #[prost(uint32, optional, tag = "7")]
+    pub rest_error_code: ::core::option::Option<u32>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct MassQuoteLegResult {

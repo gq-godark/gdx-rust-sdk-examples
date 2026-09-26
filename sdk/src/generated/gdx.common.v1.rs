@@ -709,3 +709,488 @@ impl CloseReason {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum OrderErrorCode {
+    Unspecified = 0,
+    RiskCheckFailed = 2001,
+    InsufficientCollateral = 2002,
+    OrderNotFound = 2003,
+    DuplicateOrderId = 2004,
+    InsufficientLiquidity = 2005,
+    PositionUnderLiquidation = 2006,
+    PriceDeviationTooLarge = 2007,
+    LeverageExceedsMax = 2008,
+    InstrumentHalted = 2009,
+    BelowMinNotional = 2013,
+    OrderExceedsCollateral = 2014,
+    MarginInsufficient = 2015,
+    CancelTooSoon = 2016,
+    StpAggressorHalted = 2017,
+    PostOnlyWouldCross = 2018,
+    ReduceOnlyRejected = 2019,
+    LeverageUpdateMarginInsufficient = 2020,
+    AdjustMarginNoPosition = 2021,
+    AdjustMarginInsufficientFree = 2022,
+    AdjustMarginInsufficientExtra = 2023,
+    AdjustMarginBreachesWarning = 2024,
+    FokNotFilled = 2025,
+    GtdExpired = 2026,
+    PegLimitExceeded = 2029,
+    OpenOrderLimitExceeded = 2030,
+    PegPriceModifyNotAllowed = 2031,
+    AdjustMarginInvalidMode = 2032,
+    MarginModeSwitchDenied = 2033,
+    InvalidOrderAttributes = 2034,
+    PositionLimitExceeded = 2035,
+    OracleUnavailable = 2036,
+    ReverseNoPosition = 2037,
+    SessionExpired = 3008,
+    E2eDecryptionFailed = 3009,
+    SequencerBusy = 3011,
+    SequenceGap = 3012,
+    RequestTypeMismatch = 3015,
+    EpochStale = 4001,
+    InternalError = 9999,
+}
+impl OrderErrorCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ORDER_ERROR_CODE_UNSPECIFIED",
+            Self::RiskCheckFailed => "ORDER_ERROR_CODE_RISK_CHECK_FAILED",
+            Self::InsufficientCollateral => "ORDER_ERROR_CODE_INSUFFICIENT_COLLATERAL",
+            Self::OrderNotFound => "ORDER_ERROR_CODE_ORDER_NOT_FOUND",
+            Self::DuplicateOrderId => "ORDER_ERROR_CODE_DUPLICATE_ORDER_ID",
+            Self::InsufficientLiquidity => "ORDER_ERROR_CODE_INSUFFICIENT_LIQUIDITY",
+            Self::PositionUnderLiquidation => {
+                "ORDER_ERROR_CODE_POSITION_UNDER_LIQUIDATION"
+            }
+            Self::PriceDeviationTooLarge => "ORDER_ERROR_CODE_PRICE_DEVIATION_TOO_LARGE",
+            Self::LeverageExceedsMax => "ORDER_ERROR_CODE_LEVERAGE_EXCEEDS_MAX",
+            Self::InstrumentHalted => "ORDER_ERROR_CODE_INSTRUMENT_HALTED",
+            Self::BelowMinNotional => "ORDER_ERROR_CODE_BELOW_MIN_NOTIONAL",
+            Self::OrderExceedsCollateral => "ORDER_ERROR_CODE_ORDER_EXCEEDS_COLLATERAL",
+            Self::MarginInsufficient => "ORDER_ERROR_CODE_MARGIN_INSUFFICIENT",
+            Self::CancelTooSoon => "ORDER_ERROR_CODE_CANCEL_TOO_SOON",
+            Self::StpAggressorHalted => "ORDER_ERROR_CODE_STP_AGGRESSOR_HALTED",
+            Self::PostOnlyWouldCross => "ORDER_ERROR_CODE_POST_ONLY_WOULD_CROSS",
+            Self::ReduceOnlyRejected => "ORDER_ERROR_CODE_REDUCE_ONLY_REJECTED",
+            Self::LeverageUpdateMarginInsufficient => {
+                "ORDER_ERROR_CODE_LEVERAGE_UPDATE_MARGIN_INSUFFICIENT"
+            }
+            Self::AdjustMarginNoPosition => "ORDER_ERROR_CODE_ADJUST_MARGIN_NO_POSITION",
+            Self::AdjustMarginInsufficientFree => {
+                "ORDER_ERROR_CODE_ADJUST_MARGIN_INSUFFICIENT_FREE"
+            }
+            Self::AdjustMarginInsufficientExtra => {
+                "ORDER_ERROR_CODE_ADJUST_MARGIN_INSUFFICIENT_EXTRA"
+            }
+            Self::AdjustMarginBreachesWarning => {
+                "ORDER_ERROR_CODE_ADJUST_MARGIN_BREACHES_WARNING"
+            }
+            Self::FokNotFilled => "ORDER_ERROR_CODE_FOK_NOT_FILLED",
+            Self::GtdExpired => "ORDER_ERROR_CODE_GTD_EXPIRED",
+            Self::PegLimitExceeded => "ORDER_ERROR_CODE_PEG_LIMIT_EXCEEDED",
+            Self::OpenOrderLimitExceeded => "ORDER_ERROR_CODE_OPEN_ORDER_LIMIT_EXCEEDED",
+            Self::PegPriceModifyNotAllowed => {
+                "ORDER_ERROR_CODE_PEG_PRICE_MODIFY_NOT_ALLOWED"
+            }
+            Self::AdjustMarginInvalidMode => {
+                "ORDER_ERROR_CODE_ADJUST_MARGIN_INVALID_MODE"
+            }
+            Self::MarginModeSwitchDenied => "ORDER_ERROR_CODE_MARGIN_MODE_SWITCH_DENIED",
+            Self::InvalidOrderAttributes => "ORDER_ERROR_CODE_INVALID_ORDER_ATTRIBUTES",
+            Self::PositionLimitExceeded => "ORDER_ERROR_CODE_POSITION_LIMIT_EXCEEDED",
+            Self::OracleUnavailable => "ORDER_ERROR_CODE_ORACLE_UNAVAILABLE",
+            Self::ReverseNoPosition => "ORDER_ERROR_CODE_REVERSE_NO_POSITION",
+            Self::SessionExpired => "ORDER_ERROR_CODE_SESSION_EXPIRED",
+            Self::E2eDecryptionFailed => "ORDER_ERROR_CODE_E2E_DECRYPTION_FAILED",
+            Self::SequencerBusy => "ORDER_ERROR_CODE_SEQUENCER_BUSY",
+            Self::SequenceGap => "ORDER_ERROR_CODE_SEQUENCE_GAP",
+            Self::RequestTypeMismatch => "ORDER_ERROR_CODE_REQUEST_TYPE_MISMATCH",
+            Self::EpochStale => "ORDER_ERROR_CODE_EPOCH_STALE",
+            Self::InternalError => "ORDER_ERROR_CODE_INTERNAL_ERROR",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ORDER_ERROR_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "ORDER_ERROR_CODE_RISK_CHECK_FAILED" => Some(Self::RiskCheckFailed),
+            "ORDER_ERROR_CODE_INSUFFICIENT_COLLATERAL" => {
+                Some(Self::InsufficientCollateral)
+            }
+            "ORDER_ERROR_CODE_ORDER_NOT_FOUND" => Some(Self::OrderNotFound),
+            "ORDER_ERROR_CODE_DUPLICATE_ORDER_ID" => Some(Self::DuplicateOrderId),
+            "ORDER_ERROR_CODE_INSUFFICIENT_LIQUIDITY" => {
+                Some(Self::InsufficientLiquidity)
+            }
+            "ORDER_ERROR_CODE_POSITION_UNDER_LIQUIDATION" => {
+                Some(Self::PositionUnderLiquidation)
+            }
+            "ORDER_ERROR_CODE_PRICE_DEVIATION_TOO_LARGE" => {
+                Some(Self::PriceDeviationTooLarge)
+            }
+            "ORDER_ERROR_CODE_LEVERAGE_EXCEEDS_MAX" => Some(Self::LeverageExceedsMax),
+            "ORDER_ERROR_CODE_INSTRUMENT_HALTED" => Some(Self::InstrumentHalted),
+            "ORDER_ERROR_CODE_BELOW_MIN_NOTIONAL" => Some(Self::BelowMinNotional),
+            "ORDER_ERROR_CODE_ORDER_EXCEEDS_COLLATERAL" => {
+                Some(Self::OrderExceedsCollateral)
+            }
+            "ORDER_ERROR_CODE_MARGIN_INSUFFICIENT" => Some(Self::MarginInsufficient),
+            "ORDER_ERROR_CODE_CANCEL_TOO_SOON" => Some(Self::CancelTooSoon),
+            "ORDER_ERROR_CODE_STP_AGGRESSOR_HALTED" => Some(Self::StpAggressorHalted),
+            "ORDER_ERROR_CODE_POST_ONLY_WOULD_CROSS" => Some(Self::PostOnlyWouldCross),
+            "ORDER_ERROR_CODE_REDUCE_ONLY_REJECTED" => Some(Self::ReduceOnlyRejected),
+            "ORDER_ERROR_CODE_LEVERAGE_UPDATE_MARGIN_INSUFFICIENT" => {
+                Some(Self::LeverageUpdateMarginInsufficient)
+            }
+            "ORDER_ERROR_CODE_ADJUST_MARGIN_NO_POSITION" => {
+                Some(Self::AdjustMarginNoPosition)
+            }
+            "ORDER_ERROR_CODE_ADJUST_MARGIN_INSUFFICIENT_FREE" => {
+                Some(Self::AdjustMarginInsufficientFree)
+            }
+            "ORDER_ERROR_CODE_ADJUST_MARGIN_INSUFFICIENT_EXTRA" => {
+                Some(Self::AdjustMarginInsufficientExtra)
+            }
+            "ORDER_ERROR_CODE_ADJUST_MARGIN_BREACHES_WARNING" => {
+                Some(Self::AdjustMarginBreachesWarning)
+            }
+            "ORDER_ERROR_CODE_FOK_NOT_FILLED" => Some(Self::FokNotFilled),
+            "ORDER_ERROR_CODE_GTD_EXPIRED" => Some(Self::GtdExpired),
+            "ORDER_ERROR_CODE_PEG_LIMIT_EXCEEDED" => Some(Self::PegLimitExceeded),
+            "ORDER_ERROR_CODE_OPEN_ORDER_LIMIT_EXCEEDED" => {
+                Some(Self::OpenOrderLimitExceeded)
+            }
+            "ORDER_ERROR_CODE_PEG_PRICE_MODIFY_NOT_ALLOWED" => {
+                Some(Self::PegPriceModifyNotAllowed)
+            }
+            "ORDER_ERROR_CODE_ADJUST_MARGIN_INVALID_MODE" => {
+                Some(Self::AdjustMarginInvalidMode)
+            }
+            "ORDER_ERROR_CODE_MARGIN_MODE_SWITCH_DENIED" => {
+                Some(Self::MarginModeSwitchDenied)
+            }
+            "ORDER_ERROR_CODE_INVALID_ORDER_ATTRIBUTES" => {
+                Some(Self::InvalidOrderAttributes)
+            }
+            "ORDER_ERROR_CODE_POSITION_LIMIT_EXCEEDED" => {
+                Some(Self::PositionLimitExceeded)
+            }
+            "ORDER_ERROR_CODE_ORACLE_UNAVAILABLE" => Some(Self::OracleUnavailable),
+            "ORDER_ERROR_CODE_REVERSE_NO_POSITION" => Some(Self::ReverseNoPosition),
+            "ORDER_ERROR_CODE_SESSION_EXPIRED" => Some(Self::SessionExpired),
+            "ORDER_ERROR_CODE_E2E_DECRYPTION_FAILED" => Some(Self::E2eDecryptionFailed),
+            "ORDER_ERROR_CODE_SEQUENCER_BUSY" => Some(Self::SequencerBusy),
+            "ORDER_ERROR_CODE_SEQUENCE_GAP" => Some(Self::SequenceGap),
+            "ORDER_ERROR_CODE_REQUEST_TYPE_MISMATCH" => Some(Self::RequestTypeMismatch),
+            "ORDER_ERROR_CODE_EPOCH_STALE" => Some(Self::EpochStale),
+            "ORDER_ERROR_CODE_INTERNAL_ERROR" => Some(Self::InternalError),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MpcEraErrorCode {
+    Unspecified = 0,
+    TripleExhausted = 1001,
+    RandomBitExhausted = 1002,
+    MpcProtocolError = 1003,
+    MpcTimeout = 1004,
+    MpcConfigError = 1005,
+    MpcOpsLimitExceeded = 1006,
+    AckTimeout = 3001,
+    AckThresholdNotMet = 3002,
+    SequencerNotPrimary = 3003,
+    InsufficientMasks = 3004,
+    FanoutFailed = 3005,
+    DeserializationFailed = 3006,
+    AllNodesExhausted = 3007,
+    MpcUnavailable = 3013,
+}
+impl MpcEraErrorCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "MPC_ERA_ERROR_CODE_UNSPECIFIED",
+            Self::TripleExhausted => "MPC_ERA_ERROR_CODE_TRIPLE_EXHAUSTED",
+            Self::RandomBitExhausted => "MPC_ERA_ERROR_CODE_RANDOM_BIT_EXHAUSTED",
+            Self::MpcProtocolError => "MPC_ERA_ERROR_CODE_MPC_PROTOCOL_ERROR",
+            Self::MpcTimeout => "MPC_ERA_ERROR_CODE_MPC_TIMEOUT",
+            Self::MpcConfigError => "MPC_ERA_ERROR_CODE_MPC_CONFIG_ERROR",
+            Self::MpcOpsLimitExceeded => "MPC_ERA_ERROR_CODE_MPC_OPS_LIMIT_EXCEEDED",
+            Self::AckTimeout => "MPC_ERA_ERROR_CODE_ACK_TIMEOUT",
+            Self::AckThresholdNotMet => "MPC_ERA_ERROR_CODE_ACK_THRESHOLD_NOT_MET",
+            Self::SequencerNotPrimary => "MPC_ERA_ERROR_CODE_SEQUENCER_NOT_PRIMARY",
+            Self::InsufficientMasks => "MPC_ERA_ERROR_CODE_INSUFFICIENT_MASKS",
+            Self::FanoutFailed => "MPC_ERA_ERROR_CODE_FANOUT_FAILED",
+            Self::DeserializationFailed => "MPC_ERA_ERROR_CODE_DESERIALIZATION_FAILED",
+            Self::AllNodesExhausted => "MPC_ERA_ERROR_CODE_ALL_NODES_EXHAUSTED",
+            Self::MpcUnavailable => "MPC_ERA_ERROR_CODE_MPC_UNAVAILABLE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MPC_ERA_ERROR_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "MPC_ERA_ERROR_CODE_TRIPLE_EXHAUSTED" => Some(Self::TripleExhausted),
+            "MPC_ERA_ERROR_CODE_RANDOM_BIT_EXHAUSTED" => Some(Self::RandomBitExhausted),
+            "MPC_ERA_ERROR_CODE_MPC_PROTOCOL_ERROR" => Some(Self::MpcProtocolError),
+            "MPC_ERA_ERROR_CODE_MPC_TIMEOUT" => Some(Self::MpcTimeout),
+            "MPC_ERA_ERROR_CODE_MPC_CONFIG_ERROR" => Some(Self::MpcConfigError),
+            "MPC_ERA_ERROR_CODE_MPC_OPS_LIMIT_EXCEEDED" => {
+                Some(Self::MpcOpsLimitExceeded)
+            }
+            "MPC_ERA_ERROR_CODE_ACK_TIMEOUT" => Some(Self::AckTimeout),
+            "MPC_ERA_ERROR_CODE_ACK_THRESHOLD_NOT_MET" => Some(Self::AckThresholdNotMet),
+            "MPC_ERA_ERROR_CODE_SEQUENCER_NOT_PRIMARY" => Some(Self::SequencerNotPrimary),
+            "MPC_ERA_ERROR_CODE_INSUFFICIENT_MASKS" => Some(Self::InsufficientMasks),
+            "MPC_ERA_ERROR_CODE_FANOUT_FAILED" => Some(Self::FanoutFailed),
+            "MPC_ERA_ERROR_CODE_DESERIALIZATION_FAILED" => {
+                Some(Self::DeserializationFailed)
+            }
+            "MPC_ERA_ERROR_CODE_ALL_NODES_EXHAUSTED" => Some(Self::AllNodesExhausted),
+            "MPC_ERA_ERROR_CODE_MPC_UNAVAILABLE" => Some(Self::MpcUnavailable),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CustodyErrorCode {
+    Unspecified = 0,
+    InsufficientFreeCollateral = 5001,
+    InsufficientVaultLiquidity = 5002,
+    BlockhashExpired = 5003,
+    InvalidAmount = 5004,
+    DestinationMismatch = 5005,
+    MfaRequired = 5006,
+    PendingWithdrawal = 5007,
+    WithdrawUnavailable = 5008,
+    PerTxCapExceeded = 5009,
+    DailyCapExceeded = 5010,
+    InsufficientWalletBalance = 5011,
+    ZeroWalletBalance = 5012,
+    WalletNotLinked = 5013,
+    SignedTxInvalid = 5014,
+    CustodyGeneric = 5099,
+}
+impl CustodyErrorCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CUSTODY_ERROR_CODE_UNSPECIFIED",
+            Self::InsufficientFreeCollateral => {
+                "CUSTODY_ERROR_CODE_INSUFFICIENT_FREE_COLLATERAL"
+            }
+            Self::InsufficientVaultLiquidity => {
+                "CUSTODY_ERROR_CODE_INSUFFICIENT_VAULT_LIQUIDITY"
+            }
+            Self::BlockhashExpired => "CUSTODY_ERROR_CODE_BLOCKHASH_EXPIRED",
+            Self::InvalidAmount => "CUSTODY_ERROR_CODE_INVALID_AMOUNT",
+            Self::DestinationMismatch => "CUSTODY_ERROR_CODE_DESTINATION_MISMATCH",
+            Self::MfaRequired => "CUSTODY_ERROR_CODE_MFA_REQUIRED",
+            Self::PendingWithdrawal => "CUSTODY_ERROR_CODE_PENDING_WITHDRAWAL",
+            Self::WithdrawUnavailable => "CUSTODY_ERROR_CODE_WITHDRAW_UNAVAILABLE",
+            Self::PerTxCapExceeded => "CUSTODY_ERROR_CODE_PER_TX_CAP_EXCEEDED",
+            Self::DailyCapExceeded => "CUSTODY_ERROR_CODE_DAILY_CAP_EXCEEDED",
+            Self::InsufficientWalletBalance => {
+                "CUSTODY_ERROR_CODE_INSUFFICIENT_WALLET_BALANCE"
+            }
+            Self::ZeroWalletBalance => "CUSTODY_ERROR_CODE_ZERO_WALLET_BALANCE",
+            Self::WalletNotLinked => "CUSTODY_ERROR_CODE_WALLET_NOT_LINKED",
+            Self::SignedTxInvalid => "CUSTODY_ERROR_CODE_SIGNED_TX_INVALID",
+            Self::CustodyGeneric => "CUSTODY_ERROR_CODE_CUSTODY_GENERIC",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CUSTODY_ERROR_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "CUSTODY_ERROR_CODE_INSUFFICIENT_FREE_COLLATERAL" => {
+                Some(Self::InsufficientFreeCollateral)
+            }
+            "CUSTODY_ERROR_CODE_INSUFFICIENT_VAULT_LIQUIDITY" => {
+                Some(Self::InsufficientVaultLiquidity)
+            }
+            "CUSTODY_ERROR_CODE_BLOCKHASH_EXPIRED" => Some(Self::BlockhashExpired),
+            "CUSTODY_ERROR_CODE_INVALID_AMOUNT" => Some(Self::InvalidAmount),
+            "CUSTODY_ERROR_CODE_DESTINATION_MISMATCH" => Some(Self::DestinationMismatch),
+            "CUSTODY_ERROR_CODE_MFA_REQUIRED" => Some(Self::MfaRequired),
+            "CUSTODY_ERROR_CODE_PENDING_WITHDRAWAL" => Some(Self::PendingWithdrawal),
+            "CUSTODY_ERROR_CODE_WITHDRAW_UNAVAILABLE" => Some(Self::WithdrawUnavailable),
+            "CUSTODY_ERROR_CODE_PER_TX_CAP_EXCEEDED" => Some(Self::PerTxCapExceeded),
+            "CUSTODY_ERROR_CODE_DAILY_CAP_EXCEEDED" => Some(Self::DailyCapExceeded),
+            "CUSTODY_ERROR_CODE_INSUFFICIENT_WALLET_BALANCE" => {
+                Some(Self::InsufficientWalletBalance)
+            }
+            "CUSTODY_ERROR_CODE_ZERO_WALLET_BALANCE" => Some(Self::ZeroWalletBalance),
+            "CUSTODY_ERROR_CODE_WALLET_NOT_LINKED" => Some(Self::WalletNotLinked),
+            "CUSTODY_ERROR_CODE_SIGNED_TX_INVALID" => Some(Self::SignedTxInvalid),
+            "CUSTODY_ERROR_CODE_CUSTODY_GENERIC" => Some(Self::CustodyGeneric),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AccountErrorCode {
+    Unspecified = 0,
+    ApiKeys = 6101,
+    AddressWhitelist = 6102,
+    WalletExport = 6103,
+    GatewayLogin = 6104,
+    AccountExport = 6105,
+}
+impl AccountErrorCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ACCOUNT_ERROR_CODE_UNSPECIFIED",
+            Self::ApiKeys => "ACCOUNT_ERROR_CODE_API_KEYS",
+            Self::AddressWhitelist => "ACCOUNT_ERROR_CODE_ADDRESS_WHITELIST",
+            Self::WalletExport => "ACCOUNT_ERROR_CODE_WALLET_EXPORT",
+            Self::GatewayLogin => "ACCOUNT_ERROR_CODE_GATEWAY_LOGIN",
+            Self::AccountExport => "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ACCOUNT_ERROR_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "ACCOUNT_ERROR_CODE_API_KEYS" => Some(Self::ApiKeys),
+            "ACCOUNT_ERROR_CODE_ADDRESS_WHITELIST" => Some(Self::AddressWhitelist),
+            "ACCOUNT_ERROR_CODE_WALLET_EXPORT" => Some(Self::WalletExport),
+            "ACCOUNT_ERROR_CODE_GATEWAY_LOGIN" => Some(Self::GatewayLogin),
+            "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT" => Some(Self::AccountExport),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum WsAdmitErrorCode {
+    Unspecified = 0,
+    NotAuthenticated = 7001,
+    UnknownApiKey = 7002,
+    AuthTimeout = 7003,
+    TooManySessions = 7004,
+    MarketTifInvalid = 7101,
+    QuantityMustBeNonzero = 7102,
+    BelowMinNotional = 7103,
+    AlreadySubscribed = 7201,
+    InvalidPositionsInterval = 7202,
+    InvalidJson = 7301,
+    MessageTooLarge = 7302,
+}
+impl WsAdmitErrorCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "WS_ADMIT_ERROR_CODE_UNSPECIFIED",
+            Self::NotAuthenticated => "WS_ADMIT_ERROR_CODE_NOT_AUTHENTICATED",
+            Self::UnknownApiKey => "WS_ADMIT_ERROR_CODE_UNKNOWN_API_KEY",
+            Self::AuthTimeout => "WS_ADMIT_ERROR_CODE_AUTH_TIMEOUT",
+            Self::TooManySessions => "WS_ADMIT_ERROR_CODE_TOO_MANY_SESSIONS",
+            Self::MarketTifInvalid => "WS_ADMIT_ERROR_CODE_MARKET_TIF_INVALID",
+            Self::QuantityMustBeNonzero => "WS_ADMIT_ERROR_CODE_QUANTITY_MUST_BE_NONZERO",
+            Self::BelowMinNotional => "WS_ADMIT_ERROR_CODE_BELOW_MIN_NOTIONAL",
+            Self::AlreadySubscribed => "WS_ADMIT_ERROR_CODE_ALREADY_SUBSCRIBED",
+            Self::InvalidPositionsInterval => {
+                "WS_ADMIT_ERROR_CODE_INVALID_POSITIONS_INTERVAL"
+            }
+            Self::InvalidJson => "WS_ADMIT_ERROR_CODE_INVALID_JSON",
+            Self::MessageTooLarge => "WS_ADMIT_ERROR_CODE_MESSAGE_TOO_LARGE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "WS_ADMIT_ERROR_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "WS_ADMIT_ERROR_CODE_NOT_AUTHENTICATED" => Some(Self::NotAuthenticated),
+            "WS_ADMIT_ERROR_CODE_UNKNOWN_API_KEY" => Some(Self::UnknownApiKey),
+            "WS_ADMIT_ERROR_CODE_AUTH_TIMEOUT" => Some(Self::AuthTimeout),
+            "WS_ADMIT_ERROR_CODE_TOO_MANY_SESSIONS" => Some(Self::TooManySessions),
+            "WS_ADMIT_ERROR_CODE_MARKET_TIF_INVALID" => Some(Self::MarketTifInvalid),
+            "WS_ADMIT_ERROR_CODE_QUANTITY_MUST_BE_NONZERO" => {
+                Some(Self::QuantityMustBeNonzero)
+            }
+            "WS_ADMIT_ERROR_CODE_BELOW_MIN_NOTIONAL" => Some(Self::BelowMinNotional),
+            "WS_ADMIT_ERROR_CODE_ALREADY_SUBSCRIBED" => Some(Self::AlreadySubscribed),
+            "WS_ADMIT_ERROR_CODE_INVALID_POSITIONS_INTERVAL" => {
+                Some(Self::InvalidPositionsInterval)
+            }
+            "WS_ADMIT_ERROR_CODE_INVALID_JSON" => Some(Self::InvalidJson),
+            "WS_ADMIT_ERROR_CODE_MESSAGE_TOO_LARGE" => Some(Self::MessageTooLarge),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EarnErrorCode {
+    Unspecified = 0,
+    EarnWithdrawCooldown = 8001,
+    EarnPoolPaused = 8002,
+    EarnPoolIlliquid = 8003,
+    EarnInsufficientShares = 8004,
+    EarnInsufficientCollateral = 8005,
+    EarnInvalidAmount = 8006,
+    EarnGeneric = 8099,
+}
+impl EarnErrorCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EARN_ERROR_CODE_UNSPECIFIED",
+            Self::EarnWithdrawCooldown => "EARN_ERROR_CODE_EARN_WITHDRAW_COOLDOWN",
+            Self::EarnPoolPaused => "EARN_ERROR_CODE_EARN_POOL_PAUSED",
+            Self::EarnPoolIlliquid => "EARN_ERROR_CODE_EARN_POOL_ILLIQUID",
+            Self::EarnInsufficientShares => "EARN_ERROR_CODE_EARN_INSUFFICIENT_SHARES",
+            Self::EarnInsufficientCollateral => {
+                "EARN_ERROR_CODE_EARN_INSUFFICIENT_COLLATERAL"
+            }
+            Self::EarnInvalidAmount => "EARN_ERROR_CODE_EARN_INVALID_AMOUNT",
+            Self::EarnGeneric => "EARN_ERROR_CODE_EARN_GENERIC",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EARN_ERROR_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "EARN_ERROR_CODE_EARN_WITHDRAW_COOLDOWN" => Some(Self::EarnWithdrawCooldown),
+            "EARN_ERROR_CODE_EARN_POOL_PAUSED" => Some(Self::EarnPoolPaused),
+            "EARN_ERROR_CODE_EARN_POOL_ILLIQUID" => Some(Self::EarnPoolIlliquid),
+            "EARN_ERROR_CODE_EARN_INSUFFICIENT_SHARES" => {
+                Some(Self::EarnInsufficientShares)
+            }
+            "EARN_ERROR_CODE_EARN_INSUFFICIENT_COLLATERAL" => {
+                Some(Self::EarnInsufficientCollateral)
+            }
+            "EARN_ERROR_CODE_EARN_INVALID_AMOUNT" => Some(Self::EarnInvalidAmount),
+            "EARN_ERROR_CODE_EARN_GENERIC" => Some(Self::EarnGeneric),
+            _ => None,
+        }
+    }
+}

@@ -61,10 +61,15 @@ pub struct EncryptedEdgeResponse {
     pub encrypted_body: ::prost::alloc::vec::Vec<u8>,
 }
 /// Stage 15d: edge reconnect resume — replay acks with session_seq > last_applied_seq.
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SessionControl {
     #[prost(uint64, tag = "1")]
     pub last_applied_seq: u64,
+    /// Edge-stamped on edge→sequencer forward; client WS frames may omit (zero).
+    #[prost(bytes = "vec", tag = "2")]
+    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "3")]
+    pub conn_id: u64,
 }
 /// HPKE Base setup relay (edge stamps user_uuid + conn_id).
 /// `encapped_key` is the 32-byte DHKEM(X25519) encapsulation.
