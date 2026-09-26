@@ -22,8 +22,8 @@ use crate::proto_bridge::{self, EdgeMessage};
 use crate::session::CryptoSession;
 use crate::transport::{EdgeTransport, TransportEvent};
 use crate::types::{
-    AccountMarginUpdate, BalanceUpdate, Confirmation, FundingRateUpdate, LeverageSettings,
-    OrderAck, OrderUpdate, PositionsSnapshot, ReconnectEvent, SystemHealthUpdate,
+    AccountId, AccountMarginUpdate, BalanceUpdate, Confirmation, FundingRateUpdate,
+    LeverageSettings, OrderAck, OrderUpdate, PositionsSnapshot, ReconnectEvent, SystemHealthUpdate,
 };
 use crate::wire;
 
@@ -46,7 +46,7 @@ pub struct GodarkClient {
     config: GodarkConfig,
     transport: Arc<AsyncMutex<EdgeTransport>>,
     session: Arc<Mutex<CryptoSession>>,
-    user_uuid: Arc<Mutex<Option<Uuid>>>,
+    account: Arc<Mutex<Option<AccountId>>>,
     connected: Arc<AtomicBool>,
     desired_channels: Arc<Mutex<HashSet<String>>>,
     order_tx: mpsc::Sender<OrderUpdate>,
@@ -100,7 +100,7 @@ impl GodarkClient {
                 config.transport.clone(),
             ))),
             session: Arc::new(Mutex::new(CryptoSession::new())),
-            user_uuid: Arc::new(Mutex::new(None)),
+            account: Arc::new(Mutex::new(None)),
             connected: Arc::new(AtomicBool::new(false)),
             desired_channels: Arc::new(Mutex::new(HashSet::new())),
             order_tx,
@@ -131,8 +131,8 @@ impl GodarkClient {
         }
     }
 
-    pub fn user_uuid(&self) -> Option<Uuid> {
-        self.user_uuid.lock().ok().and_then(|guard| *guard)
+    pub fn account(&self) -> Option<AccountId> {
+        self.account.lock().ok().and_then(|guard| *guard)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -205,7 +205,7 @@ impl GodarkClient {
             &self.config,
             &self.transport,
             &self.session,
-            &self.user_uuid,
+            &self.account,
         )
         .await?;
         self.connected.store(true, Ordering::SeqCst);
@@ -235,7 +235,7 @@ impl GodarkClient {
         if let Ok(mut session) = self.session.lock() {
             session.reset();
         }
-        if let Ok(mut guard) = self.user_uuid.lock() {
+        if let Ok(mut guard) = self.account.lock() {
             *guard = None;
         }
     }
@@ -383,7 +383,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let plaintext = proto_bridge::build_place_order_proto(
             symbol_id,
@@ -448,7 +448,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let oid: u64 = order_id
             .parse()
@@ -472,7 +472,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let oid: u64 = order_id
             .parse()
@@ -500,7 +500,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let plaintext = proto_bridge::build_update_leverage_proto(
             uuid.as_bytes(),
             symbol_id,
@@ -524,7 +524,7 @@ impl GodarkClient {
         };
         let body_symbol_id = symbol.map(|sym| self.resolve_symbol(sym)).transpose()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let plaintext =
             proto_bridge::build_cancel_all_proto(body_symbol_id, uuid.as_bytes(), &corr_id);
         let response = self
@@ -546,7 +546,7 @@ impl GodarkClient {
         };
         let body_symbol_id = symbol.map(|sym| self.resolve_symbol(sym)).transpose()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let plaintext =
             proto_bridge::build_close_all_proto(body_symbol_id, uuid.as_bytes(), &corr_id);
         let response = self
@@ -563,7 +563,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let plaintext = proto_bridge::build_reverse_proto(symbol_id, uuid.as_bytes(), &corr_id);
         let response = self
             .send_encrypted_command("reverse", symbol_id, &plaintext, &corr_id)
@@ -595,7 +595,7 @@ impl GodarkClient {
             ));
         }
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let body_symbol_id = if oid == 0 { Some(symbol_id) } else { None };
         let plaintext = proto_bridge::build_amend_tpsl_proto(
             uuid.as_bytes(),
@@ -630,7 +630,7 @@ impl GodarkClient {
             ));
         }
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let body_symbol_id = if oid == 0 { Some(symbol_id) } else { None };
         let plaintext = proto_bridge::build_cancel_tpsl_proto(
             uuid.as_bytes(),
@@ -687,7 +687,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let plaintext = proto_bridge::build_mass_quote_proto(
             symbol_id,
@@ -715,7 +715,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let plaintext =
             proto_bridge::build_batch_cancel_proto(symbol_id, uuid.as_bytes(), order_ids, &corr_id);
@@ -748,7 +748,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let plaintext =
             proto_bridge::build_batch_modify_proto(symbol_id, uuid.as_bytes(), legs, &corr_id);
@@ -827,7 +827,7 @@ impl GodarkClient {
         correlation_id: &[u8],
     ) -> Result<Value, GodarkError> {
         let body_length = CryptoSession::body_length_for_plaintext(plaintext.len())?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_u128 = if correlation_id.len() == 16 {
             let arr: [u8; 16] = correlation_id.try_into().unwrap();
             let v = u128::from_be_bytes(arr);
@@ -875,7 +875,7 @@ impl GodarkClient {
             };
 
             let header = edge::OrderHeader {
-                user_uuid: uuid.as_bytes().to_vec(),
+                account: uuid.as_bytes().to_vec(),
                 symbol_id,
                 request_type: crate::enums::request_type_to_proto(request_type),
                 nonce: actual_nonce,
@@ -993,7 +993,7 @@ impl GodarkClient {
                 .decode(ct_b64)
                 .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
             let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
-            let user_uuid_bytes = self.current_user_uuid_bytes();
+            let account_bytes = self.current_account_bytes();
             let message_type = msg
                 .get("message_type")
                 .and_then(|v| v.as_str())
@@ -1004,7 +1004,7 @@ impl GodarkClient {
                 .unwrap_or(0);
 
             let aad = proto_bridge::build_response_header_aad(
-                &user_uuid_bytes,
+                &account_bytes,
                 message_type,
                 ct.len() as u32,
                 nonce,
@@ -1100,7 +1100,7 @@ impl GodarkClient {
             .decode(ct_b64)
             .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
         let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
-        let user_uuid_bytes = self.current_user_uuid_bytes();
+        let account_bytes = self.current_account_bytes();
         let message_type = msg
             .get("message_type")
             .and_then(|v| v.as_str())
@@ -1111,7 +1111,7 @@ impl GodarkClient {
             .unwrap_or(0);
 
         let aad = proto_bridge::build_response_header_aad(
-            &user_uuid_bytes,
+            &account_bytes,
             message_type,
             ct.len() as u32,
             nonce,
@@ -1284,7 +1284,7 @@ impl GodarkClient {
         let leverage_settings_tx = self.leverage_settings_tx.clone();
         let error_tx = self.error_tx.clone();
         let session = Arc::clone(&self.session);
-        let user_uuid = Arc::clone(&self.user_uuid);
+        let account = Arc::clone(&self.account);
         let connected = Arc::clone(&self.connected);
         let desired_channels = Arc::clone(&self.desired_channels);
         let reconnect_attempts = Arc::clone(&self.reconnect_attempts);
@@ -1311,7 +1311,7 @@ impl GodarkClient {
                         }
                     }
                     TransportEvent::EncryptedPush(val) => {
-                        match decrypt_push_plaintext(&session, &user_uuid, &val) {
+                        match decrypt_push_plaintext(&session, &account, &val) {
                             Ok(plaintext) => {
                                 let message_type = val
                                     .get("message_type")
@@ -1440,7 +1440,7 @@ impl GodarkClient {
                             &encrypted_ack_waiters,
                             "session rekey in progress",
                         );
-                        let current_uuid = user_uuid.lock().ok().and_then(|guard| *guard);
+                        let current_uuid = account.lock().ok().and_then(|guard| *guard);
                         if let Some(uid) = current_uuid {
                             if let Err(err) = {
                                 let transport = transport.lock().await;
@@ -1482,7 +1482,7 @@ impl GodarkClient {
                             &config,
                             &transport,
                             &session,
-                            &user_uuid,
+                            &account,
                             &desired_channels,
                             &connected,
                             &reconnect_attempts,
@@ -1514,7 +1514,7 @@ impl GodarkClient {
                             &config,
                             &transport,
                             &session,
-                            &user_uuid,
+                            &account,
                             &desired_channels,
                             &connected,
                             &reconnect_attempts,
@@ -1550,13 +1550,7 @@ impl GodarkClient {
         if !self.connected.load(Ordering::SeqCst) {
             return Err(GodarkError::Connection("Not connected".into()));
         }
-        if self
-            .user_uuid
-            .lock()
-            .ok()
-            .and_then(|guard| *guard)
-            .is_none()
-        {
+        if self.account.lock().ok().and_then(|guard| *guard).is_none() {
             return Err(GodarkError::Connection("Not authenticated".into()));
         }
         let session = self
@@ -1569,15 +1563,15 @@ impl GodarkClient {
         Ok(())
     }
 
-    fn current_user_uuid(&self) -> Result<Uuid, GodarkError> {
-        self.user_uuid
+    fn current_account(&self) -> Result<AccountId, GodarkError> {
+        self.account
             .lock()
             .map_err(|_| GodarkError::Connection("User id mutex poisoned".into()))?
             .ok_or_else(|| GodarkError::Connection("Not authenticated".into()))
     }
 
-    fn current_user_uuid_bytes(&self) -> Vec<u8> {
-        self.user_uuid
+    fn current_account_bytes(&self) -> Vec<u8> {
+        self.account
             .lock()
             .ok()
             .and_then(|g| *g)
@@ -1606,7 +1600,7 @@ async fn establish_transport_connection(
     config: &GodarkConfig,
     transport: &Arc<AsyncMutex<EdgeTransport>>,
     session: &Arc<Mutex<CryptoSession>>,
-    user_uuid_slot: &Arc<Mutex<Option<Uuid>>>,
+    account_slot: &Arc<Mutex<Option<AccountId>>>,
 ) -> Result<mpsc::Receiver<TransportEvent>, GodarkError> {
     let mut transport = transport.lock().await;
     transport.connect().await?;
@@ -1621,18 +1615,18 @@ async fn establish_transport_connection(
         return Err(GodarkError::Authentication(err.to_string()));
     }
 
-    let uid = parse_user_uuid_from_auth(&auth_result).or_else(|_| {
-        config.user_uuid.ok_or_else(|| {
+    let uid = parse_account_from_auth(&auth_result).or_else(|_| {
+        config.account.ok_or_else(|| {
             GodarkError::Authentication(
-                "auth response has no user_uuid and none configured \
-                     (set GODARK_USER_UUID or pass .user_uuid() to the builder)"
+                "auth response has no account and none configured \
+                     (set GODARK_ACCOUNT or pass .account() to the builder)"
                     .into(),
             )
         })
     })?;
 
     {
-        let mut guard = user_uuid_slot
+        let mut guard = account_slot
             .lock()
             .map_err(|_| GodarkError::Connection("User id mutex poisoned".into()))?;
         *guard = Some(uid);
@@ -1648,7 +1642,7 @@ async fn establish_transport_connection(
     .await
     {
         transport.disconnect().await;
-        if let Ok(mut guard) = user_uuid_slot.lock() {
+        if let Ok(mut guard) = account_slot.lock() {
             *guard = None;
         }
         return Err(err);
@@ -1660,7 +1654,7 @@ async fn establish_transport_connection(
 }
 
 async fn setup_hpke_session_with_transport(
-    user_uuid: &Uuid,
+    account: &AccountId,
     conn_id: u64,
     config: &GodarkConfig,
     transport: &EdgeTransport,
@@ -1676,9 +1670,9 @@ async fn setup_hpke_session_with_transport(
         let mut sess = session
             .lock()
             .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?;
-        sess.setup(&remote_static, *user_uuid, conn_id)?
+        sess.setup(&remote_static, *account, conn_id)?
     };
-    let frame = wire::encode_hpke_setup(user_uuid.as_bytes(), conn_id, &encapped);
+    let frame = wire::encode_hpke_setup(account.as_bytes(), conn_id, &encapped);
     let reply =
         match tokio::time::timeout(HPKE_SETUP_TIMEOUT, transport.send_hpke_setup(frame)).await {
             Ok(Ok(reply)) => reply,
@@ -1767,7 +1761,7 @@ async fn reconnect_transport(
     config: &GodarkConfig,
     transport: &Arc<AsyncMutex<EdgeTransport>>,
     session: &Arc<Mutex<CryptoSession>>,
-    user_uuid_slot: &Arc<Mutex<Option<Uuid>>>,
+    account_slot: &Arc<Mutex<Option<AccountId>>>,
     desired_channels: &Arc<Mutex<HashSet<String>>>,
     connected: &Arc<AtomicBool>,
     reconnect_attempts: &Arc<AtomicU32>,
@@ -1804,7 +1798,7 @@ async fn reconnect_transport(
                 EdgeTransport::new(&config::ws_url(&config.base_url), config.transport.clone());
         }
 
-        match establish_transport_connection(config, transport, session, user_uuid_slot).await {
+        match establish_transport_connection(config, transport, session, account_slot).await {
             Ok(rx) => {
                 if let Err(err) = resubscribe_desired_channels(transport, desired_channels).await {
                     connected.store(false, Ordering::SeqCst);
@@ -1852,7 +1846,7 @@ enum DecodedPush {
 
 fn decrypt_push_plaintext(
     session: &Arc<Mutex<CryptoSession>>,
-    user_uuid_slot: &Arc<Mutex<Option<Uuid>>>,
+    account_slot: &Arc<Mutex<Option<AccountId>>>,
     msg: &Value,
 ) -> Result<Vec<u8>, GodarkError> {
     let ct_b64 = msg
@@ -1864,7 +1858,7 @@ fn decrypt_push_plaintext(
         .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
     let nonce =
         json_u64(msg, "nonce").ok_or_else(|| GodarkError::Encryption("missing nonce".into()))?;
-    let user_uuid_bytes = user_uuid_slot
+    let account_bytes = account_slot
         .lock()
         .ok()
         .and_then(|g| *g)
@@ -1886,7 +1880,7 @@ fn decrypt_push_plaintext(
     let corr_bytes = response_correlation_id_bytes(msg);
     let session_seq = json_u64(msg, "session_seq").unwrap_or_default();
     let aad = proto_bridge::build_response_header_aad(
-        &user_uuid_bytes,
+        &account_bytes,
         message_type,
         ct.len() as u32,
         nonce,
@@ -1996,7 +1990,7 @@ fn observe_place_order_update(state: &Arc<Mutex<PlaceOutcomeState>>, update: &Or
 fn parse_cleartext_order_update(msg: &Value) -> Option<OrderUpdate> {
     Some(OrderUpdate {
         order_id: json_string(msg, "order_id", ""),
-        user_uuid: json_uuid(msg),
+        account: json_account(msg),
         symbol_id: json_u64(msg, "symbol_id").unwrap_or_default(),
         side: parse_side(msg.get("side").and_then(Value::as_str).unwrap_or("BUY")),
         status: parse_order_status(
@@ -2043,35 +2037,23 @@ fn parse_cleartext_order_update(msg: &Value) -> Option<OrderUpdate> {
     })
 }
 
-/// Parse UUID from auth_result JSON — tries `user_uuid` (string) first, falls back to `user_id`.
-fn parse_user_uuid_from_auth(msg: &Value) -> Result<Uuid, GodarkError> {
-    if let Some(s) = msg.get("user_uuid").and_then(|v| v.as_str()) {
-        return Uuid::parse_str(s).map_err(|e| {
-            GodarkError::Authentication(format!("invalid user_uuid in auth_result: {e}"))
-        });
-    }
-    if let Some(s) = msg.get("user_id").and_then(|v| v.as_str()) {
-        return Uuid::parse_str(s).map_err(|e| {
-            GodarkError::Authentication(format!("invalid user_id UUID in auth_result: {e}"))
+/// Parse the base58 account from an authenticated login result.
+fn parse_account_from_auth(msg: &Value) -> Result<AccountId, GodarkError> {
+    if let Some(s) = msg.get("account").and_then(|v| v.as_str()) {
+        return s.parse().map_err(|e| {
+            GodarkError::Authentication(format!("invalid account in auth_result: {e}"))
         });
     }
     Err(GodarkError::Authentication(
-        "authentication succeeded but user_uuid missing".into(),
+        "authentication succeeded but account missing".into(),
     ))
 }
 
-/// Parse a UUID from the `user_uuid` or `user_id` JSON field.
-fn json_uuid(msg: &Value) -> Uuid {
-    if let Some(s) = msg
-        .get("user_uuid")
-        .or_else(|| msg.get("user_id"))
-        .and_then(|v| v.as_str())
-    {
-        if let Ok(u) = Uuid::parse_str(s) {
-            return u;
-        }
-    }
-    Uuid::nil()
+fn json_account(msg: &Value) -> AccountId {
+    msg.get("account")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default()
 }
 
 fn json_string(msg: &Value, key: &str, default: &str) -> String {
@@ -2185,7 +2167,7 @@ mod tests {
     fn test_new_client_not_connected() {
         let client = GodarkClient::new(test_config());
         assert!(!client.is_connected());
-        assert!(client.user_uuid().is_none());
+        assert!(client.account().is_none());
     }
 
     #[tokio::test]
@@ -2194,7 +2176,7 @@ mod tests {
         let (token, receiver) = client.register_place_outcome_waiter().unwrap();
         let update = OrderUpdate {
             order_id: "42".into(),
-            user_uuid: Uuid::nil(),
+            account: AccountId::default(),
             symbol_id: 1,
             side: Side::Buy,
             status: OrderStatus::New,
@@ -2234,7 +2216,7 @@ mod tests {
                 .order_id = Some("99".into());
             state.recent.push_back(OrderUpdate {
                 order_id: "99".into(),
-                user_uuid: Uuid::nil(),
+                account: AccountId::default(),
                 symbol_id: 1,
                 side: Side::Buy,
                 status: OrderStatus::New,
@@ -2289,7 +2271,7 @@ mod tests {
     fn test_is_terminal_place_update_covers_fill_states() {
         let base = OrderUpdate {
             order_id: "1".into(),
-            user_uuid: Uuid::nil(),
+            account: AccountId::default(),
             symbol_id: 1,
             side: Side::Buy,
             status: OrderStatus::New,
@@ -2335,7 +2317,7 @@ mod tests {
     fn test_parse_cleartext_order_update_reject_text() {
         let msg = json!({
             "order_id": "7",
-            "user_uuid": "00000000-0000-0000-0000-000000000001",
+            "account": "11111111111111111111111111111111",
             "symbol_id": 1,
             "side": "BUY",
             "status": "REJECTED",
@@ -2463,7 +2445,7 @@ mod tests {
             .send(TransportEvent::OrderUpdate(json!({
                 "type": "order_update",
                 "order_id": "42",
-                "user_uuid": "00000000-0000-0000-0000-000000000007",
+                "account": "11111111111111111111111111111111",
                 "symbol_id": 1,
                 "side": "SELL",
                 "order_status": "PARTIALLY_FILLED",
@@ -2486,10 +2468,7 @@ mod tests {
             .expect("order update");
 
         assert_eq!(update.order_id, "42");
-        assert_eq!(
-            update.user_uuid,
-            Uuid::parse_str("00000000-0000-0000-0000-000000000007").unwrap()
-        );
+        assert_eq!(update.account, AccountId::default());
         assert_eq!(update.symbol_id, 1);
         assert_eq!(update.side, Side::Sell);
         assert_eq!(update.status, OrderStatus::PartiallyFilled);

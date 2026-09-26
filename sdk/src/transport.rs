@@ -58,7 +58,7 @@ fn normalize_inbound_value(val: &Value) -> Value {
                 serde_json::json!({
                     "type": "auth_result",
                     "success": true,
-                    "user_uuid": d.get("user_uuid"),
+                    "account": d.get("account"),
                     "account_id": d.get("account_id"),
                     "session_id": d.get("session_id"),
                     "token_expires_at": d.get("token_expires_at"),

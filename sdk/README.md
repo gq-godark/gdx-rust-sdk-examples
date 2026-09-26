@@ -44,9 +44,14 @@ JSON text frames are control only: `login`, `subscribe`/`unsubscribe`, `ping`,
 `TradingWsBinaryFrame` (`HpkeSetup` → `HpkeSetupReply` → `EncryptedOrder` /
 `EncryptedPush`).
 
-Login returns `conn_id`. HPKE info is `gdx-hpke/v1\0 ‖ user_uuid ‖ conn_id_be`.
+Login returns `conn_id`. HPKE info is `gdx-hpke/v1\0 ‖ account ‖ conn_id_be`.
 Send nonces start at **0** (sequencer `last_recv_nonce` is unset until the first
 request). Wire `version = 2`.
+
+Authenticated identity is a 32-byte [`AccountId`](src/types.rs), encoded as a
+Solana-style base58 string in JSON and as raw bytes in protobuf. The edge
+normally returns `account` during authentication (and in JWT `sub`). Local
+static-key setups can provide `.account(...)` or `GODARK_ACCOUNT`.
 
 Pin the sequencer static public key (64 hex):
 
@@ -82,7 +87,7 @@ leave it as `None` to use the venue limit.
 
 `POST /api/v1/auth/token`, then encrypted `POST/PATCH/DELETE /api/v1/orders`
 with JSON `{ header, encrypted_body, encapped_key, request_id }`. Each call is
-a fresh HPKE setup (`info = gdx-hpke/v1/rest\0 ‖ user_uuid ‖ request_id_be`,
+a fresh HPKE setup (`info = gdx-hpke/v1/rest\0 ‖ account ‖ request_id_be`,
 `conn_id = 0`).
 
 Live snapshot reads (same envelope, `request_type` snake_case in the header):

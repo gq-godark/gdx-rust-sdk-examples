@@ -69,12 +69,12 @@ pub use error::GodarkError;
 pub use order_error_code::{find as find_order_error, OrderErrorEntry, ORDER_ERROR_CODES};
 pub use rest_client::{GodarkRestClient, GodarkRestClientBuilder};
 pub use types::{
-    AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, BatchCancelAck, BatchCancelLegResult,
-    BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation, CountAck,
-    FundingRateUpdate, LeverageSetting, LeverageSettings, MassQuoteAck, MassQuoteLegInput,
-    MassQuoteLegResult, MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck, OrderUpdate,
-    PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
-    SystemHealthUpdate, TpslAck,
+    AccountId, AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, BatchCancelAck,
+    BatchCancelLegResult, BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation,
+    CountAck, FundingRateUpdate, LeverageSetting, LeverageSettings, MassQuoteAck,
+    MassQuoteLegInput, MassQuoteLegResult, MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck,
+    OrderUpdate, PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource,
+    ReconnectEvent, SystemHealthUpdate, TpslAck,
 };
 pub use ws_admit_error_code::{
     find as find_ws_admit_error, WsAdmitErrorEntry, WS_ADMIT_ERROR_CODES,

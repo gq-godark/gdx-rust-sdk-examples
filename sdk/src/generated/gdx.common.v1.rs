@@ -383,7 +383,7 @@ pub enum PositionStatus {
     /// for shipped consumers (gdx-web, generated types_pb.ts).
     /// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
     Normal = 0,
-    /// Position is being liquidated (margin-tranche execution).
+    /// Position is being liquidated.
     Liq = 1,
     /// Position is being auto-deleveraged.
     Adl = 2,
@@ -441,6 +441,8 @@ impl MarginMode {
         }
     }
 }
+/// Cleartext header discriminant for an encrypted request body. The AEAD
+/// plaintext is the matching inner sequencer message (not EdgeSequencerRequest).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum RequestType {
@@ -471,6 +473,8 @@ pub enum RequestType {
     CloseAll = 17,
     /// Close the live position at market, then open the opposite side.
     Reverse = 18,
+    /// Control-plane get-by-id. Same hop as GetAccount.
+    GetOrder = 19,
 }
 impl RequestType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -498,6 +502,7 @@ impl RequestType {
             Self::CancelAll => "REQUEST_TYPE_CANCEL_ALL",
             Self::CloseAll => "REQUEST_TYPE_CLOSE_ALL",
             Self::Reverse => "REQUEST_TYPE_REVERSE",
+            Self::GetOrder => "REQUEST_TYPE_GET_ORDER",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -522,6 +527,7 @@ impl RequestType {
             "REQUEST_TYPE_CANCEL_ALL" => Some(Self::CancelAll),
             "REQUEST_TYPE_CLOSE_ALL" => Some(Self::CloseAll),
             "REQUEST_TYPE_REVERSE" => Some(Self::Reverse),
+            "REQUEST_TYPE_GET_ORDER" => Some(Self::GetOrder),
             _ => None,
         }
     }
@@ -551,6 +557,7 @@ pub enum ResponseMessageType {
     CloseAllAck = 14,
     ReverseAck = 15,
     TpslAck = 16,
+    GetOrder = 17,
 }
 impl ResponseMessageType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -576,6 +583,7 @@ impl ResponseMessageType {
             Self::CloseAllAck => "RESPONSE_MESSAGE_TYPE_CLOSE_ALL_ACK",
             Self::ReverseAck => "RESPONSE_MESSAGE_TYPE_REVERSE_ACK",
             Self::TpslAck => "RESPONSE_MESSAGE_TYPE_TPSL_ACK",
+            Self::GetOrder => "RESPONSE_MESSAGE_TYPE_GET_ORDER",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -604,6 +612,7 @@ impl ResponseMessageType {
             "RESPONSE_MESSAGE_TYPE_CLOSE_ALL_ACK" => Some(Self::CloseAllAck),
             "RESPONSE_MESSAGE_TYPE_REVERSE_ACK" => Some(Self::ReverseAck),
             "RESPONSE_MESSAGE_TYPE_TPSL_ACK" => Some(Self::TpslAck),
+            "RESPONSE_MESSAGE_TYPE_GET_ORDER" => Some(Self::GetOrder),
             _ => None,
         }
     }
@@ -745,6 +754,8 @@ pub enum OrderErrorCode {
     PositionLimitExceeded = 2035,
     OracleUnavailable = 2036,
     ReverseNoPosition = 2037,
+    /// Isolated/cross margin call: only position-reducing orders.
+    ReduceOnlyMode = 2038,
     SessionExpired = 3008,
     E2eDecryptionFailed = 3009,
     SequencerBusy = 3011,
@@ -807,6 +818,7 @@ impl OrderErrorCode {
             Self::PositionLimitExceeded => "ORDER_ERROR_CODE_POSITION_LIMIT_EXCEEDED",
             Self::OracleUnavailable => "ORDER_ERROR_CODE_ORACLE_UNAVAILABLE",
             Self::ReverseNoPosition => "ORDER_ERROR_CODE_REVERSE_NO_POSITION",
+            Self::ReduceOnlyMode => "ORDER_ERROR_CODE_REDUCE_ONLY_MODE",
             Self::SessionExpired => "ORDER_ERROR_CODE_SESSION_EXPIRED",
             Self::E2eDecryptionFailed => "ORDER_ERROR_CODE_E2E_DECRYPTION_FAILED",
             Self::SequencerBusy => "ORDER_ERROR_CODE_SEQUENCER_BUSY",
@@ -884,6 +896,7 @@ impl OrderErrorCode {
             }
             "ORDER_ERROR_CODE_ORACLE_UNAVAILABLE" => Some(Self::OracleUnavailable),
             "ORDER_ERROR_CODE_REVERSE_NO_POSITION" => Some(Self::ReverseNoPosition),
+            "ORDER_ERROR_CODE_REDUCE_ONLY_MODE" => Some(Self::ReduceOnlyMode),
             "ORDER_ERROR_CODE_SESSION_EXPIRED" => Some(Self::SessionExpired),
             "ORDER_ERROR_CODE_E2E_DECRYPTION_FAILED" => Some(Self::E2eDecryptionFailed),
             "ORDER_ERROR_CODE_SEQUENCER_BUSY" => Some(Self::SequencerBusy),
@@ -974,7 +987,6 @@ pub enum CustodyErrorCode {
     InvalidAmount = 5004,
     DestinationMismatch = 5005,
     MfaRequired = 5006,
-    PendingWithdrawal = 5007,
     WithdrawUnavailable = 5008,
     PerTxCapExceeded = 5009,
     DailyCapExceeded = 5010,
@@ -1002,7 +1014,6 @@ impl CustodyErrorCode {
             Self::InvalidAmount => "CUSTODY_ERROR_CODE_INVALID_AMOUNT",
             Self::DestinationMismatch => "CUSTODY_ERROR_CODE_DESTINATION_MISMATCH",
             Self::MfaRequired => "CUSTODY_ERROR_CODE_MFA_REQUIRED",
-            Self::PendingWithdrawal => "CUSTODY_ERROR_CODE_PENDING_WITHDRAWAL",
             Self::WithdrawUnavailable => "CUSTODY_ERROR_CODE_WITHDRAW_UNAVAILABLE",
             Self::PerTxCapExceeded => "CUSTODY_ERROR_CODE_PER_TX_CAP_EXCEEDED",
             Self::DailyCapExceeded => "CUSTODY_ERROR_CODE_DAILY_CAP_EXCEEDED",
@@ -1029,7 +1040,6 @@ impl CustodyErrorCode {
             "CUSTODY_ERROR_CODE_INVALID_AMOUNT" => Some(Self::InvalidAmount),
             "CUSTODY_ERROR_CODE_DESTINATION_MISMATCH" => Some(Self::DestinationMismatch),
             "CUSTODY_ERROR_CODE_MFA_REQUIRED" => Some(Self::MfaRequired),
-            "CUSTODY_ERROR_CODE_PENDING_WITHDRAWAL" => Some(Self::PendingWithdrawal),
             "CUSTODY_ERROR_CODE_WITHDRAW_UNAVAILABLE" => Some(Self::WithdrawUnavailable),
             "CUSTODY_ERROR_CODE_PER_TX_CAP_EXCEEDED" => Some(Self::PerTxCapExceeded),
             "CUSTODY_ERROR_CODE_DAILY_CAP_EXCEEDED" => Some(Self::DailyCapExceeded),
@@ -1048,11 +1058,29 @@ impl CustodyErrorCode {
 #[repr(i32)]
 pub enum AccountErrorCode {
     Unspecified = 0,
+    /// Generic surface fallbacks when a failure is unclassified.
     ApiKeys = 6101,
     AddressWhitelist = 6102,
     WalletExport = 6103,
     GatewayLogin = 6104,
     AccountExport = 6105,
+    ApiKeyNotFound = 6111,
+    ApiKeyLimitReached = 6112,
+    ApiKeyLabelInvalid = 6113,
+    ApiKeyPassphrasePolicy = 6114,
+    ApiKeyPermissionsInvalid = 6115,
+    ApiKeyIpWhitelistInvalid = 6116,
+    ApiKeyUpdateEmpty = 6117,
+    WhitelistLabelInvalid = 6121,
+    WhitelistAddressInvalid = 6122,
+    WhitelistDuplicate = 6123,
+    WhitelistNotFound = 6124,
+    AccountExportFormatInvalid = 6131,
+    AccountExportRangeInvalid = 6132,
+    AccountExportLimitReached = 6133,
+    AccountExportNotFound = 6134,
+    AccountExportNotReady = 6135,
+    AccountExportExpired = 6136,
 }
 impl AccountErrorCode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1067,6 +1095,37 @@ impl AccountErrorCode {
             Self::WalletExport => "ACCOUNT_ERROR_CODE_WALLET_EXPORT",
             Self::GatewayLogin => "ACCOUNT_ERROR_CODE_GATEWAY_LOGIN",
             Self::AccountExport => "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT",
+            Self::ApiKeyNotFound => "ACCOUNT_ERROR_CODE_API_KEY_NOT_FOUND",
+            Self::ApiKeyLimitReached => "ACCOUNT_ERROR_CODE_API_KEY_LIMIT_REACHED",
+            Self::ApiKeyLabelInvalid => "ACCOUNT_ERROR_CODE_API_KEY_LABEL_INVALID",
+            Self::ApiKeyPassphrasePolicy => {
+                "ACCOUNT_ERROR_CODE_API_KEY_PASSPHRASE_POLICY"
+            }
+            Self::ApiKeyPermissionsInvalid => {
+                "ACCOUNT_ERROR_CODE_API_KEY_PERMISSIONS_INVALID"
+            }
+            Self::ApiKeyIpWhitelistInvalid => {
+                "ACCOUNT_ERROR_CODE_API_KEY_IP_WHITELIST_INVALID"
+            }
+            Self::ApiKeyUpdateEmpty => "ACCOUNT_ERROR_CODE_API_KEY_UPDATE_EMPTY",
+            Self::WhitelistLabelInvalid => "ACCOUNT_ERROR_CODE_WHITELIST_LABEL_INVALID",
+            Self::WhitelistAddressInvalid => {
+                "ACCOUNT_ERROR_CODE_WHITELIST_ADDRESS_INVALID"
+            }
+            Self::WhitelistDuplicate => "ACCOUNT_ERROR_CODE_WHITELIST_DUPLICATE",
+            Self::WhitelistNotFound => "ACCOUNT_ERROR_CODE_WHITELIST_NOT_FOUND",
+            Self::AccountExportFormatInvalid => {
+                "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_FORMAT_INVALID"
+            }
+            Self::AccountExportRangeInvalid => {
+                "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_RANGE_INVALID"
+            }
+            Self::AccountExportLimitReached => {
+                "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_LIMIT_REACHED"
+            }
+            Self::AccountExportNotFound => "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_NOT_FOUND",
+            Self::AccountExportNotReady => "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_NOT_READY",
+            Self::AccountExportExpired => "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_EXPIRED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1078,6 +1137,45 @@ impl AccountErrorCode {
             "ACCOUNT_ERROR_CODE_WALLET_EXPORT" => Some(Self::WalletExport),
             "ACCOUNT_ERROR_CODE_GATEWAY_LOGIN" => Some(Self::GatewayLogin),
             "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT" => Some(Self::AccountExport),
+            "ACCOUNT_ERROR_CODE_API_KEY_NOT_FOUND" => Some(Self::ApiKeyNotFound),
+            "ACCOUNT_ERROR_CODE_API_KEY_LIMIT_REACHED" => Some(Self::ApiKeyLimitReached),
+            "ACCOUNT_ERROR_CODE_API_KEY_LABEL_INVALID" => Some(Self::ApiKeyLabelInvalid),
+            "ACCOUNT_ERROR_CODE_API_KEY_PASSPHRASE_POLICY" => {
+                Some(Self::ApiKeyPassphrasePolicy)
+            }
+            "ACCOUNT_ERROR_CODE_API_KEY_PERMISSIONS_INVALID" => {
+                Some(Self::ApiKeyPermissionsInvalid)
+            }
+            "ACCOUNT_ERROR_CODE_API_KEY_IP_WHITELIST_INVALID" => {
+                Some(Self::ApiKeyIpWhitelistInvalid)
+            }
+            "ACCOUNT_ERROR_CODE_API_KEY_UPDATE_EMPTY" => Some(Self::ApiKeyUpdateEmpty),
+            "ACCOUNT_ERROR_CODE_WHITELIST_LABEL_INVALID" => {
+                Some(Self::WhitelistLabelInvalid)
+            }
+            "ACCOUNT_ERROR_CODE_WHITELIST_ADDRESS_INVALID" => {
+                Some(Self::WhitelistAddressInvalid)
+            }
+            "ACCOUNT_ERROR_CODE_WHITELIST_DUPLICATE" => Some(Self::WhitelistDuplicate),
+            "ACCOUNT_ERROR_CODE_WHITELIST_NOT_FOUND" => Some(Self::WhitelistNotFound),
+            "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_FORMAT_INVALID" => {
+                Some(Self::AccountExportFormatInvalid)
+            }
+            "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_RANGE_INVALID" => {
+                Some(Self::AccountExportRangeInvalid)
+            }
+            "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_LIMIT_REACHED" => {
+                Some(Self::AccountExportLimitReached)
+            }
+            "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_NOT_FOUND" => {
+                Some(Self::AccountExportNotFound)
+            }
+            "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_NOT_READY" => {
+                Some(Self::AccountExportNotReady)
+            }
+            "ACCOUNT_ERROR_CODE_ACCOUNT_EXPORT_EXPIRED" => {
+                Some(Self::AccountExportExpired)
+            }
             _ => None,
         }
     }
@@ -1148,13 +1246,13 @@ impl WsAdmitErrorCode {
 #[repr(i32)]
 pub enum EarnErrorCode {
     Unspecified = 0,
-    EarnWithdrawCooldown = 8001,
-    EarnPoolPaused = 8002,
-    EarnPoolIlliquid = 8003,
-    EarnInsufficientShares = 8004,
-    EarnInsufficientCollateral = 8005,
-    EarnInvalidAmount = 8006,
-    EarnGeneric = 8099,
+    WithdrawCooldown = 8001,
+    PoolPaused = 8002,
+    PoolIlliquid = 8003,
+    InsufficientShares = 8004,
+    InsufficientCollateral = 8005,
+    InvalidAmount = 8006,
+    Generic = 8099,
 }
 impl EarnErrorCode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1164,32 +1262,28 @@ impl EarnErrorCode {
     pub fn as_str_name(&self) -> &'static str {
         match self {
             Self::Unspecified => "EARN_ERROR_CODE_UNSPECIFIED",
-            Self::EarnWithdrawCooldown => "EARN_ERROR_CODE_EARN_WITHDRAW_COOLDOWN",
-            Self::EarnPoolPaused => "EARN_ERROR_CODE_EARN_POOL_PAUSED",
-            Self::EarnPoolIlliquid => "EARN_ERROR_CODE_EARN_POOL_ILLIQUID",
-            Self::EarnInsufficientShares => "EARN_ERROR_CODE_EARN_INSUFFICIENT_SHARES",
-            Self::EarnInsufficientCollateral => {
-                "EARN_ERROR_CODE_EARN_INSUFFICIENT_COLLATERAL"
-            }
-            Self::EarnInvalidAmount => "EARN_ERROR_CODE_EARN_INVALID_AMOUNT",
-            Self::EarnGeneric => "EARN_ERROR_CODE_EARN_GENERIC",
+            Self::WithdrawCooldown => "EARN_ERROR_CODE_WITHDRAW_COOLDOWN",
+            Self::PoolPaused => "EARN_ERROR_CODE_POOL_PAUSED",
+            Self::PoolIlliquid => "EARN_ERROR_CODE_POOL_ILLIQUID",
+            Self::InsufficientShares => "EARN_ERROR_CODE_INSUFFICIENT_SHARES",
+            Self::InsufficientCollateral => "EARN_ERROR_CODE_INSUFFICIENT_COLLATERAL",
+            Self::InvalidAmount => "EARN_ERROR_CODE_INVALID_AMOUNT",
+            Self::Generic => "EARN_ERROR_CODE_GENERIC",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
             "EARN_ERROR_CODE_UNSPECIFIED" => Some(Self::Unspecified),
-            "EARN_ERROR_CODE_EARN_WITHDRAW_COOLDOWN" => Some(Self::EarnWithdrawCooldown),
-            "EARN_ERROR_CODE_EARN_POOL_PAUSED" => Some(Self::EarnPoolPaused),
-            "EARN_ERROR_CODE_EARN_POOL_ILLIQUID" => Some(Self::EarnPoolIlliquid),
-            "EARN_ERROR_CODE_EARN_INSUFFICIENT_SHARES" => {
-                Some(Self::EarnInsufficientShares)
+            "EARN_ERROR_CODE_WITHDRAW_COOLDOWN" => Some(Self::WithdrawCooldown),
+            "EARN_ERROR_CODE_POOL_PAUSED" => Some(Self::PoolPaused),
+            "EARN_ERROR_CODE_POOL_ILLIQUID" => Some(Self::PoolIlliquid),
+            "EARN_ERROR_CODE_INSUFFICIENT_SHARES" => Some(Self::InsufficientShares),
+            "EARN_ERROR_CODE_INSUFFICIENT_COLLATERAL" => {
+                Some(Self::InsufficientCollateral)
             }
-            "EARN_ERROR_CODE_EARN_INSUFFICIENT_COLLATERAL" => {
-                Some(Self::EarnInsufficientCollateral)
-            }
-            "EARN_ERROR_CODE_EARN_INVALID_AMOUNT" => Some(Self::EarnInvalidAmount),
-            "EARN_ERROR_CODE_EARN_GENERIC" => Some(Self::EarnGeneric),
+            "EARN_ERROR_CODE_INVALID_AMOUNT" => Some(Self::InvalidAmount),
+            "EARN_ERROR_CODE_GENERIC" => Some(Self::Generic),
             _ => None,
         }
     }

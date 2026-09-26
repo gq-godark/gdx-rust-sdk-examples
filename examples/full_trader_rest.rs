@@ -45,17 +45,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = builder.build()?;
 
     client.connect().await?;
-    let uid = client
-        .user_uuid()
-        .ok_or("user_uuid missing after connect")?;
-    println!("identity: user_uuid={uid} scope={:?}", client.token_scope());
+    let account_id = client.account().ok_or("account missing after connect")?;
+    println!(
+        "identity: account={account_id} scope={:?}",
+        client.token_scope()
+    );
 
     let orders = client.get_open_orders().await?;
     println!("open orders: {} row(s)", orders.rows.len());
     let positions = client.get_positions().await?;
     println!("positions: {} row(s)", positions.rows.len());
     let account = client.get_account().await?;
-    if let Some(s) = account.account {
+    if let Some(s) = account.summary {
         println!(
             "account free_collateral={} total_collateral={}",
             s.free_collateral, s.total_collateral

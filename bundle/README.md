@@ -48,6 +48,8 @@ Optional override:
 - `GDX_HPKE_STATIC_PUBLIC_KEY` — sequencer HPKE static public key (64 hex).
   Required for localnet/devnet. Aliases: `GDX_HPKE_STATIC_PUBKEY`,
   `GODARK_HPKE_STATIC_PUBLIC_KEY`, `VITE_GDX_HPKE_STATIC_PUBKEY`.
+- `GODARK_ACCOUNT` — 32-byte account encoded as base58; only needed for local
+  static-key authentication when the login response omits `account`.
 
 The OS environment always wins over `.env`.
 

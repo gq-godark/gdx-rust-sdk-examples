@@ -152,8 +152,8 @@ pub async fn local_trading_config(transport: TransportConfig) -> Result<GodarkCo
     // Legacy static key (localnet test-key-1) wins when set — matches examples repos
     // and avoids devnet id+secret in the shell overriding a local .env api_key.
     if let Some(legacy) = env_first_many(&["GODARK_API_KEY", "GDX_API_KEY"]) {
-        if let Some(uid) = env_first_many(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
-            builder = builder.user_uuid(uid);
+        if let Some(account) = env_first_many(&["GODARK_ACCOUNT", "GDX_ACCOUNT"]) {
+            builder = builder.account(account);
         }
         return builder.api_key(legacy).build();
     }

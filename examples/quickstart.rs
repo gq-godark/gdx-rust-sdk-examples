@@ -39,8 +39,8 @@ async fn main() -> Result<(), GodarkError> {
     }
     if let Some(legacy) = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]) {
         builder = builder.api_key(legacy);
-        if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
-            builder = builder.user_uuid(uid);
+        if let Some(account) = dotenv::env_first(&["GODARK_ACCOUNT", "GDX_ACCOUNT"]) {
+            builder = builder.account(account);
         }
     } else {
         let api_key_id =
@@ -65,11 +65,11 @@ async fn main() -> Result<(), GodarkError> {
     let mut client = GodarkClient::new(config);
     client.connect().await?;
 
-    let user = client
-        .user_uuid()
-        .map(|u| u.to_string())
+    let account = client
+        .account()
+        .map(|id| id.to_string())
         .unwrap_or_default();
-    println!("Connected as user {user}");
+    println!("Connected as account {account}");
 
     // Book confirmation waits on private order updates; subscribe first.
     client.subscribe(&["orders"]).await?;

@@ -108,7 +108,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ---- verify upstream is at the pinned ref ---------------------------------
-if [[ ! -d "$UPSTREAM_SRC/.git" ]]; then
+if [[ ! -e "$UPSTREAM_SRC/.git" ]]; then
   echo "error: '$UPSTREAM_SRC' is not a git checkout - cannot verify pin" >&2
   exit 1
 fi

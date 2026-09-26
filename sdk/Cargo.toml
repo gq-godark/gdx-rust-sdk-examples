@@ -43,3 +43,4 @@ hex = "0.4"
 # Observability + errors
 tracing = "0.1"
 thiserror = "2"
+bs58 = "0.5.1"

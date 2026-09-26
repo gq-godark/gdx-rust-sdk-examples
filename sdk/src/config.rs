@@ -4,9 +4,8 @@ use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
 
-use uuid::Uuid;
-
 use crate::error::GodarkError;
+use crate::types::AccountId;
 
 /// Default edge base URL (host only). The transport appends `/ws/v1` at
 /// connect time.
@@ -122,10 +121,10 @@ pub struct GodarkConfig {
     pub auto_reconnect: bool,
     pub symbol_map: HashMap<String, u64>,
     pub transport: TransportConfig,
-    /// Pre-configured user UUID. When the edge auth response does not include
-    /// `user_uuid`, the SDK falls back to this value.  Resolved from
-    /// `.user_uuid()` builder call or `GODARK_USER_UUID` / `GDX_USER_UUID`.
-    pub user_uuid: Option<Uuid>,
+    /// Pre-configured account. When the edge auth response does not include
+    /// `account`, the SDK falls back to this value.  Resolved from
+    /// `.account()` builder call or `GODARK_ACCOUNT` / `GDX_ACCOUNT`.
+    pub account: Option<AccountId>,
     /// Pinned sequencer HPKE static X25519 public key (64 hex).
     /// From `.hpke_static_public_key_hex()`, `GDX_HPKE_STATIC_PUBLIC_KEY`, or Environment preset.
     pub hpke_static_public_key_hex: Option<String>,
@@ -158,7 +157,7 @@ pub struct GodarkConfigBuilder {
     auto_reconnect: bool,
     symbol_map: HashMap<String, u64>,
     transport: TransportConfig,
-    user_uuid: Option<Uuid>,
+    account: Option<AccountId>,
     hpke_static_public_key_hex: Option<String>,
     place_order_terminal_timeout: Option<Duration>,
     explicit_symbol_map: bool,
@@ -179,7 +178,7 @@ impl GodarkConfigBuilder {
             auto_reconnect: true,
             symbol_map: symbols,
             transport: TransportConfig::default(),
-            user_uuid: None,
+            account: None,
             hpke_static_public_key_hex: None,
             place_order_terminal_timeout: None,
             explicit_symbol_map: false,
@@ -236,11 +235,11 @@ impl GodarkConfigBuilder {
         self
     }
 
-    /// Set the user UUID explicitly. Required when the edge auth response does
-    /// not return `user_uuid` (e.g. localnet / static-key auth). Falls back to
-    /// `GODARK_USER_UUID` / `GDX_USER_UUID` environment variables at build time.
-    pub fn user_uuid(mut self, uuid: impl Into<String>) -> Self {
-        self.user_uuid = Uuid::parse_str(&uuid.into()).ok();
+    /// Set the account explicitly. Required when the edge auth response does
+    /// not return `account` (e.g. localnet / static-key auth). Falls back to
+    /// `GODARK_ACCOUNT` / `GDX_ACCOUNT` environment variables at build time.
+    pub fn account(mut self, account: impl Into<String>) -> Self {
+        self.account = account.into().parse().ok();
         self
     }
 
@@ -300,7 +299,7 @@ impl GodarkConfigBuilder {
             self.environment.edge_base_url(),
         );
 
-        let user_uuid = self.user_uuid.or_else(resolve_user_uuid_env);
+        let account = self.account.or_else(resolve_account_env);
         let environment = self.environment;
         let pin_env = if self
             .base_url
@@ -332,7 +331,7 @@ impl GodarkConfigBuilder {
             auto_reconnect: self.auto_reconnect,
             symbol_map: self.symbol_map,
             transport: self.transport,
-            user_uuid,
+            account,
             hpke_static_public_key_hex,
             place_order_terminal_timeout,
             explicit_symbol_map: self.explicit_symbol_map,
@@ -391,12 +390,12 @@ pub fn resolve_passphrase(explicit: Option<&str>) -> Option<String> {
     None
 }
 
-/// Resolve user UUID from `GODARK_USER_UUID` or `GDX_USER_UUID` environment variables.
-fn resolve_user_uuid_env() -> Option<Uuid> {
-    for key in &["GODARK_USER_UUID", "GDX_USER_UUID"] {
+/// Resolve account from `GODARK_ACCOUNT` or `GDX_ACCOUNT` environment variables.
+fn resolve_account_env() -> Option<AccountId> {
+    for key in &["GODARK_ACCOUNT", "GDX_ACCOUNT"] {
         if let Ok(v) = env::var(key) {
-            if let Ok(u) = Uuid::parse_str(v.trim()) {
-                return Some(u);
+            if let Ok(account) = v.trim().parse() {
+                return Some(account);
             }
         }
     }

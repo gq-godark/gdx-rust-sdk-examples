@@ -71,7 +71,7 @@ pub struct CancelOrderInput {
     #[prost(bytes = "vec", tag = "4")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "5")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(enumeration = "super::super::common::v1::CancelReason", optional, tag = "6")]
     pub cancel_reason: ::core::option::Option<i32>,
 }
@@ -151,18 +151,18 @@ pub struct BatchModifyMessage {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SubscribePositions {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     /// Sweep cadence in seconds. Allowed: {2, 5, 10}. Absent = 5.
     #[prost(uint32, optional, tag = "2")]
     pub interval_seconds: ::core::option::Option<u32>,
 }
 /// Internal edge -> sequencer message: drop a previously registered positions
-/// subscription when the last WebSocket session for `user_uuid` disconnects.
+/// subscription when the last WebSocket session for `account` disconnects.
 /// Not client-facing; clients don't send this themselves.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UnsubscribePositions {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
 }
 /// Request for a synchronous snapshot of the caller's current open orders.
 /// Dispatched directly in the sequencer (no MPC fanout) and replied with
@@ -170,7 +170,7 @@ pub struct UnsubscribePositions {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetOpenOrdersRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
@@ -179,7 +179,7 @@ pub struct GetOpenOrdersRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetPositionsRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
@@ -188,8 +188,25 @@ pub struct GetPositionsRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetAccountRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+}
+/// Control-plane get-by-id. No MPC. Same hop as GetAccount.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetOrderRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub account: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub order_id: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub correlation_id: ::prost::alloc::vec::Vec<u8>,
+}
+/// v1: present only when the caller owns a working / parked ticket.
+/// Same miss as cancel: UnknownOrder → OrderNotFound. No OpenOrderRow.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetOrderReply {
+    #[prost(bytes = "vec", tag = "1")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
 /// One row of the open-orders snapshot. Mirrors the key fields the UI needs
@@ -338,7 +355,7 @@ pub struct KillRestart {
 pub struct SequencerMessage {
     #[prost(
         oneof = "sequencer_message::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13"
     )]
     pub inner: ::core::option::Option<sequencer_message::Inner>,
 }
@@ -370,6 +387,8 @@ pub mod sequencer_message {
         GetPositions(super::GetPositionsRequest),
         #[prost(message, tag = "12")]
         GetAccount(super::GetAccountRequest),
+        #[prost(message, tag = "13")]
+        GetOrder(super::GetOrderRequest),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -382,10 +401,12 @@ pub struct PlaceOrderInput {
     pub order_type: i32,
     #[prost(double, optional, tag = "4")]
     pub price: ::core::option::Option<f64>,
-    #[prost(double, tag = "5")]
-    pub quantity: f64,
+    /// Exclusive with quote_notional.
+    #[prost(double, optional, tag = "5")]
+    pub quantity: ::core::option::Option<f64>,
     #[prost(enumeration = "super::super::common::v1::TimeInForce", tag = "7")]
     pub time_in_force: i32,
+    /// Same unit as the size field that is set.
     #[prost(double, optional, tag = "8")]
     pub min_fill_size: ::core::option::Option<f64>,
     #[prost(uint64, optional, tag = "9")]
@@ -393,7 +414,7 @@ pub struct PlaceOrderInput {
     #[prost(bytes = "vec", tag = "10")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "11")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(enumeration = "super::super::common::v1::StpMode", tag = "12")]
     pub stp_mode: i32,
     #[prost(bool, tag = "13")]
@@ -411,6 +432,9 @@ pub struct PlaceOrderInput {
     /// Max walk vs mark for market / stop-market (basis points). Omitted → venue max.
     #[prost(uint32, optional, tag = "21")]
     pub slippage_bps: ::core::option::Option<u32>,
+    /// Exclusive with quantity. Sequencer: qty = notional / price.
+    #[prost(double, optional, tag = "22")]
+    pub quote_notional: ::core::option::Option<f64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ModifyOrderInput {
@@ -425,7 +449,7 @@ pub struct ModifyOrderInput {
     #[prost(bytes = "vec", tag = "6")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "7")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(double, optional, tag = "8")]
     pub new_trigger_price: ::core::option::Option<f64>,
 }
@@ -455,7 +479,7 @@ pub struct MassQuoteInput {
     #[prost(bytes = "vec", tag = "4")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "5")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(enumeration = "super::super::common::v1::StpMode", tag = "6")]
     pub stp_mode: i32,
     #[prost(bool, optional, tag = "7")]
@@ -470,7 +494,7 @@ pub struct BatchCancelInput {
     #[prost(bytes = "vec", tag = "4")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "5")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
 }
 /// Venue Cancel All: sequencer walks the open-orders index. No client id list.
 /// Absent symbol_id = every market for user_uuid.
@@ -479,7 +503,7 @@ pub struct CancelAllInput {
     #[prost(uint64, optional, tag = "1")]
     pub symbol_id: ::core::option::Option<u64>,
     #[prost(bytes = "vec", tag = "2")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
@@ -490,7 +514,7 @@ pub struct CloseAllInput {
     #[prost(uint64, optional, tag = "1")]
     pub symbol_id: ::core::option::Option<u64>,
     #[prost(bytes = "vec", tag = "2")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
@@ -500,7 +524,7 @@ pub struct ReverseInput {
     #[prost(uint64, tag = "1")]
     pub symbol_id: u64,
     #[prost(bytes = "vec", tag = "2")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
@@ -524,13 +548,13 @@ pub struct BatchModifyInput {
     #[prost(bytes = "vec", tag = "4")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "5")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
 }
 /// Edge → sequencer: trading-collateral balance change (deposit / withdraw / settlement PnL).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BalanceChangeMessage {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(sint64, tag = "2")]
     pub delta_raw: i64,
     #[prost(string, tag = "3")]
@@ -543,6 +567,15 @@ pub struct BalanceChangeMessage {
     /// Solana slot for custody provenance when known (0 = unset).
     #[prost(uint64, tag = "6")]
     pub external_slot: u64,
+    /// Wallet-chosen withdrawal nonce, unix ms (vault withdraw only; 0 = unset).
+    #[prost(uint64, tag = "7")]
+    pub withdraw_nonce: u64,
+    /// Base58 wallet signature over the GoDark withdrawal message (vault withdraw only).
+    #[prost(string, tag = "8")]
+    pub withdraw_signature: ::prost::alloc::string::String,
+    /// Linked Solana signer pubkey (32 bytes; vault withdraw only).
+    #[prost(bytes = "vec", tag = "9")]
+    pub withdraw_signer: ::prost::alloc::vec::Vec<u8>,
 }
 /// Edge → sequencer: deposit receipt ready for ingest (sequencer verifies on-chain).
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -572,20 +605,20 @@ pub struct PoolDepositRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LiquidityPoolStatusRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct QueryBalanceRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
 }
 /// Update the per-user-per-symbol leverage setting (industry-standard model).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateLeverageRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub symbol_id: u64,
     #[prost(uint32, tag = "3")]
@@ -597,7 +630,7 @@ pub struct UpdateLeverageRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AdjustMarginRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub symbol_id: u64,
     /// Signed delta: positive = add margin, negative = remove margin.
@@ -612,7 +645,7 @@ pub struct AdjustMarginRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateMarginModeRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub symbol_id: u64,
     #[prost(enumeration = "super::super::common::v1::MarginMode", tag = "3")]
@@ -625,7 +658,7 @@ pub struct UpdateMarginModeRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CancelTpslRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub order_id: u64,
     #[prost(bytes = "vec", tag = "3")]
@@ -643,7 +676,7 @@ pub struct CancelTpslRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AmendTpslRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub order_id: u64,
     #[prost(bytes = "vec", tag = "3")]
@@ -683,7 +716,7 @@ pub struct TpslUpdate {
     #[prost(uint64, tag = "1")]
     pub parent_order_id: u64,
     #[prost(bytes = "vec", tag = "2")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "3")]
     pub symbol_id: u64,
     #[prost(enumeration = "super::super::common::v1::Side", tag = "4")]
@@ -701,11 +734,13 @@ pub struct TpslUpdate {
     #[prost(enumeration = "super::super::common::v1::TpslKind", tag = "11")]
     pub kind: i32,
 }
+/// Cleartext TradeQuery / Admin frame body. Encrypted HPKE plaintext is the
+/// selected inner message, not this wrapper — see file header.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EdgeSequencerRequest {
     #[prost(
         oneof = "edge_sequencer_request::Inner",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 28"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 28, 29"
     )]
     pub inner: ::core::option::Option<edge_sequencer_request::Inner>,
 }
@@ -767,6 +802,8 @@ pub mod edge_sequencer_request {
         CloseAll(super::CloseAllInput),
         #[prost(message, tag = "28")]
         Reverse(super::ReverseInput),
+        #[prost(message, tag = "29")]
+        GetOrder(super::GetOrderRequest),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1131,7 +1168,7 @@ pub struct OrderUpdateMessage {
     #[prost(enumeration = "super::super::common::v1::OrderUpdateType", tag = "16")]
     pub message_type: i32,
     #[prost(bytes = "vec", tag = "17")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(string, tag = "18")]
     pub cum_fill: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "19")]
@@ -1163,6 +1200,9 @@ pub struct OrderUpdateMessage {
     pub reduce_only: bool,
     #[prost(bool, tag = "29")]
     pub post_only: bool,
+    /// Close attribution on a terminal fill. Mirrors OrderHistoryRow.close_reason.
+    #[prost(enumeration = "super::super::common::v1::CloseReason", optional, tag = "30")]
+    pub close_reason: ::core::option::Option<i32>,
 }
 /// One position inside a `PositionsSnapshot` batch. All decimal fields
 /// are rendered at the sequencer's configured `decimal_places`; PnL /
@@ -1297,12 +1337,12 @@ pub struct AccountMarginSummary {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AccountMarginUpdate {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     /// Sequencer wall-clock timestamp when the summary was computed, ns.
     #[prost(uint64, tag = "2")]
     pub server_timestamp: u64,
     #[prost(message, optional, tag = "3")]
-    pub account: ::core::option::Option<AccountMarginSummary>,
+    pub summary: ::core::option::Option<AccountMarginSummary>,
     /// Echoed on GetAccount RPC replies; absent on unsolicited pushes.
     #[prost(bytes = "vec", optional, tag = "4")]
     pub correlation_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
@@ -1320,7 +1360,7 @@ pub struct LeverageSettingRow {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LeverageSettings {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub server_timestamp: u64,
     #[prost(message, repeated, tag = "3")]
@@ -1340,7 +1380,7 @@ pub struct MarginModeSettingRow {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PositionsSnapshot {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(message, repeated, tag = "2")]
     pub rows: ::prost::alloc::vec::Vec<PositionRow>,
     /// Sequencer wall-clock timestamp when the batch was assembled, ns.
@@ -1379,7 +1419,7 @@ pub struct FundingRateUpdateMessage {
 pub struct FundingPaymentMessage {
     /// User the funding payment applies to.
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     /// Instrument the position belongs to.
     #[prost(uint64, tag = "2")]
     pub symbol_id: u64,
@@ -1421,7 +1461,7 @@ pub struct OpenInterestUpdateMessage {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BalanceUpdateMessage {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     /// Collateral in SPL raw token units (6 dp).
     #[prost(uint64, tag = "2")]
     pub balance_raw: u64,
@@ -1446,7 +1486,7 @@ pub struct BalanceUpdateMessage {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BalanceAndPosition {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     /// Why the push was emitted: "filled", "settlement", "liquidation".
     #[prost(string, tag = "2")]
     pub event_type: ::prost::alloc::string::String,
@@ -1467,7 +1507,7 @@ pub struct BalanceAndPosition {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OrderHistoryInsertMessage {
     #[prost(bytes = "vec", tag = "1")]
-    pub user_uuid: ::prost::alloc::vec::Vec<u8>,
+    pub account: ::prost::alloc::vec::Vec<u8>,
     #[prost(message, optional, tag = "2")]
     pub row: ::core::option::Option<OrderHistoryRow>,
     #[prost(uint64, tag = "3")]

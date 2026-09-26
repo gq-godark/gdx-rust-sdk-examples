@@ -128,7 +128,12 @@ To consume `godark` from your own project outside this repo, either:
 | `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish HPKE WebSocket session |
 | `disconnect` | `async fn disconnect(&mut self)` | Graceful disconnect |
 | `is_connected` | `fn is_connected(&self) -> bool` | Connection state |
-| `user_uuid` | `fn user_uuid(&self) -> Option<&Uuid>` | Authenticated user id |
+| `account` | `fn account(&self) -> Option<AccountId>` | Authenticated 32-byte account id |
+
+`AccountId` parses and displays as a Solana-style base58 string and serializes
+to that string in JSON. Its protobuf and HPKE representation is exactly 32 raw
+bytes. The edge normally supplies it in auth `account` / JWT `sub`; use
+`.account(...)` or `GODARK_ACCOUNT` only for local static-key fallback.
 
 ### Trading commands
 
@@ -158,13 +163,12 @@ will fill the buffer and back-pressure the dispatcher.
 | Method | Receiver type | Stream |
 |--------|---------------|--------|
 | `take_order_receiver()` | `Receiver<OrderUpdate>` | Order lifecycle |
-| `take_position_receiver()` | `Receiver<PositionUpdate>` | Per-fill position deltas |
 | `take_positions_snapshot_receiver()` | `Receiver<PositionsSnapshot>` | Initial / periodic / event-triggered snapshots |
 | `take_system_health_receiver()` | `Receiver<SystemHealthUpdate>` | Sequencer / MPC node cluster pulses |
-| `take_balance_receiver()` | `Receiver<BalanceUpdate>` | Updated shielded balance |
-| `take_margin_alert_receiver()` | `Receiver<MarginAlert>` | Margin tier transition / recovery |
+| `take_balance_receiver()` | `Receiver<BalanceUpdate>` | Trading-collateral balance |
+| `take_account_margin_receiver()` | `Receiver<AccountMarginUpdate>` | Account margin summary |
+| `take_leverage_settings_receiver()` | `Receiver<LeverageSettings>` | Per-symbol leverage settings |
 | `take_funding_rate_receiver()` | `Receiver<FundingRateUpdate>` | Per-symbol funding ticks |
-| `take_settlement_receiver()` | `Receiver<SettlementUpdate>` | Settlement batch lifecycle |
 | `take_error_receiver()` | `Receiver<GodarkError>` | Non-fatal SDK errors (stale heartbeat, decrypt failures, …) |
 | `take_reconnect_receiver()` | `Receiver<ReconnectEvent>` | Disconnect / backoff / reconnected lifecycle |
 
@@ -173,11 +177,10 @@ will fill the buffer and back-pressure the dispatcher.
 | Push                  | Field highlights                                                                                | Typical use                                                                          |
 |-----------------------|-------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------|
 | `PositionsSnapshot`   | `rows[]` (`PositionRow{symbol_id, side, size, entry_price, mark_price, unrealized_pnl, ...}`), `source` (Initial / Periodic / Event) | Hydrate the open-positions table on connect; refresh every ~5s.                      |
-| `SystemHealthUpdate`  | `total_nodes`, `ready`, `degraded`, `accepting_orders`                                          | Display node-cluster status; pause submissions if `accepting_orders == false`.       |
-| `BalanceUpdate`       | `shielded_balance_raw` (raw lamports-style integer)                                             | Refresh the wallet/equity widget after each fill or settlement.                      |
-| `MarginAlert`         | `owner`, `symbol_id`, `tier`, `margin_ratio_bps`, `liquidation_price_bps`, `recovered`          | Show / clear the margin-tier banner per `(owner, symbol_id)`.                        |
-| `FundingRateUpdate`   | `symbol_id`, `current_rate`, `predicted_rate`, `next_funding_time`                              | Update funding ticker / book metadata.                                               |
-| `SettlementUpdate`    | `batch_id`, `status` (Submitted / Confirmed / Failed), `tx_signature`, `affected_user_uuids[]`  | Reconcile settled batches, surface Solana tx links.                                  |
+| `SystemHealthUpdate`  | `component_id`, `state`, `serving`, `cause`, `sequence`                                         | Display component health.                                                            |
+| `BalanceUpdate`       | `account`, `balance_raw`, `balance`, `signed_balance_8dp`, `free_collateral_8dp`               | Refresh the collateral/equity widget.                                                |
+| `AccountMarginUpdate` | `account`, `summary`, `server_timestamp`                                                        | Render authoritative available margin.                                               |
+| `FundingRateUpdate`   | `symbol_id`, `funding_rate`, `last_funding_rate`, `timestamp`                                  | Update funding ticker / book metadata.                                               |
 
 ### Concurrency rule
 
@@ -202,7 +205,7 @@ pattern in `full_trader_example.rs`.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `order_id`, `user_uuid`, `symbol_id` | identifiers | — |
+| `order_id`, `account`, `symbol_id` | identifiers | — |
 | `side` | `Side` | `Buy` / `Sell` |
 | `status`, `update_type` | `OrderStatus`, `OrderUpdateType` | Final state vs. lifecycle event |
 | `price`, `quantity`, `filled_qty`, `remaining_qty`, `cum_fill` | `String` (decimal) | Stringly-typed decimals to preserve precision |
@@ -210,18 +213,6 @@ pattern in `full_trader_example.rs`.
 | `reject_reason` | `Option<String>` | Set on `Rejected` updates |
 | `correlation_id` | `u128` | Echoes the client-side request id |
 | `timestamp` | `u64` | Server-side event time (epoch nanos) |
-
-### PositionUpdate
-
-Per-fill delta. Use this stream to drive incremental P&L / position
-accounting between snapshot refreshes.
-
-| Field | Type |
-|-------|------|
-| `user_uuid`, `symbol_id`, `side` | identifiers |
-| `update_type` | `PositionUpdateType` |
-| `size`, `entry_price`, `previous_size`, `fill_price`, `fill_qty` | `String` (decimal) |
-| `correlation_id`, `timestamp` | `u128`, `u64` |
 
 ### PositionRow / PositionsSnapshot
 
@@ -242,11 +233,10 @@ all open positions for the authenticated user. `rows` holds one
 
 | Type | Notable fields |
 |------|----------------|
-| `SystemHealthUpdate` | `total_nodes`, `accepting_orders`, `ready`, `degraded`, `exhausted`, `warming`, `draining`, `waiting` |
-| `BalanceUpdate` | `user_uuid`, `shielded_balance_raw`, `timestamp` |
-| `MarginAlert` | `owner`, `symbol_id`, `tier`, `margin_ratio_bps`, `mark_price_bps`, `liquidation_price_bps`, `state_version`, `recovered`, `ts` |
-| `FundingRateUpdate` | `symbol_id`, `current_rate`, `predicted_rate`, `next_funding_time`, `timestamp` |
-| `SettlementUpdate` | `batch_id`, `status: SettlementBatchStatus`, `tx_signature`, `timestamp`, `affected_user_uuids` |
+| `SystemHealthUpdate` | `component_id`, `state`, `serving`, `cause`, `updated_at_nanos`, `sequence`, `schema_version` |
+| `BalanceUpdate` | `account`, `balance_raw`, `balance`, `signed_balance_8dp`, `free_collateral_8dp`, `timestamp` |
+| `AccountMarginUpdate` | `account`, `summary: Option<AccountMarginSummary>`, `server_timestamp` |
+| `FundingRateUpdate` | `symbol_id`, `funding_rate`, `last_funding_rate`, `timestamp` |
 
 ## Enums
 
@@ -254,16 +244,14 @@ All enums in the public API derive `Debug`, `Clone`, `Copy`,
 `PartialEq`/`Eq` (with `Hash` where useful):
 
 - `Side`: `Buy`, `Sell`
-- `OrderType`: `Market`, `Limit`, `PegToMid`, `PegToBid`, `PegToAsk`
+- `OrderType`: `Market`, `Limit`, `Peg`, `StopMarket`, `StopLimit`
 - `TimeInForce`: `Gtc`, `Ioc`, `Fok`, `Gtd`
 - `OrderStatus`: `New`, `PartiallyFilled`, `Filled`, `Cancelled`, `Rejected`
 - `OrderUpdateType`: `Open`, `Filled`, `PartiallyFilled`, `Cancelled`, `Rejected`, `Modified`, `CancelRejected`, `ModifyRejected`
-- `PositionUpdateType`: `Snapshot`, `Open`, `Increase`, `Decrease`, `Close`
-- `CancelReason`: `UserRequested`, `IocRemainder`, `FokNotFilled`, `Expired`, `System`
+- `CancelReason`: `UserRequested`, `IocRemainder`, `FokNotFilled`, `Expired`, `System`, `Adl`, `LiquidatedCanceled`, `MarginCanceled`, `ReduceOnly`, `StpExpireTaker`, `StpCancelResting`
 - `PositionsSnapshotSource`: `Unspecified`, `Initial`, `Periodic`, `Event`
-- `SettlementBatchStatus`: `Unspecified`, `Submitted`, `Confirmed`, `Failed`
 
-`OrderType` includes the `PegTo*` variants for API completeness, but this MM
+`OrderType` includes peg and stop variants for API completeness, but this MM
 distribution only exercises `Market` and `Limit` from the examples.
 
 `PlaceOrderOptions` on `place_order_with_options` includes `reduce_only`,

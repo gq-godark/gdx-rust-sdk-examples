@@ -1,11 +1,84 @@
 // Domain types for the public SDK surface.
 
+use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::enums::{CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce};
+
+/// GoDark L2 account identifier (32 bytes, displayed as a Solana-style base58 address).
+///
+/// The authenticated edge returns this value in the `account` field and in the
+/// access JWT `sub` claim. It is also bound into every HPKE info string and
+/// encrypted command body.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct AccountId([u8; 32]);
+
+impl AccountId {
+    pub const LEN: usize = 32;
+
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; Self::LEN]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; Self::LEN] {
+        &self.0
+    }
+
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, String> {
+        let bytes: [u8; Self::LEN] = bytes
+            .try_into()
+            .map_err(|_| format!("account must be {} bytes, got {}", Self::LEN, bytes.len()))?;
+        Ok(Self(bytes))
+    }
+}
+
+impl fmt::Debug for AccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Display for AccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&bs58::encode(self.0).into_string())
+    }
+}
+
+impl FromStr for AccountId {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let bytes = bs58::decode(value.trim())
+            .into_vec()
+            .map_err(|error| format!("invalid base58 account: {error}"))?;
+        Self::try_from_slice(&bytes)
+    }
+}
+
+impl Serialize for AccountId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for AccountId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// Lifecycle notifications for trading client reconnect (and market data reconnect).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +110,7 @@ pub struct LeverageSettings {
     #[serde(default)]
     pub settings: Vec<LeverageSetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_uuid: Option<Uuid>,
+    pub account: Option<AccountId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_timestamp: Option<u64>,
 }
@@ -189,7 +262,7 @@ pub struct BatchModifyAck {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderUpdate {
     pub order_id: String,
-    pub user_uuid: Uuid,
+    pub account: AccountId,
     pub symbol_id: u64,
     pub side: Side,
     pub status: OrderStatus,
@@ -235,7 +308,7 @@ where
 /// Sequencer trading-collateral snapshot (`BalanceUpdateMessage`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BalanceUpdate {
-    pub user_uuid: Uuid,
+    pub account: AccountId,
     /// Collateral in SPL raw token units (6 dp).
     pub balance_raw: u64,
     pub timestamp: u64,
@@ -284,7 +357,7 @@ pub struct PositionRow {
 /// periodic / event-triggered).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PositionsSnapshot {
-    pub user_uuid: Uuid,
+    pub account: AccountId,
     pub rows: Vec<PositionRow>,
     /// Sequencer wall-clock (ns) when the batch was assembled.
     pub server_timestamp: u64,
@@ -371,16 +444,27 @@ pub struct AccountMarginSummary {
 /// positions, or resting-order holds change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountMarginUpdate {
-    pub user_uuid: Uuid,
+    pub account: AccountId,
     /// Sequencer wall-clock timestamp when the summary was computed, ns.
     pub server_timestamp: u64,
     /// Absent if the sequencer did not include a summary.
-    pub account: Option<AccountMarginSummary>,
+    pub summary: Option<AccountMarginSummary>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_id_base58_and_serde_roundtrip() {
+        let account: AccountId = "11111111111111111111111111111111".parse().unwrap();
+        assert_eq!(account, AccountId::default());
+        assert_eq!(account.to_string(), "11111111111111111111111111111111");
+        let json = serde_json::to_string(&account).unwrap();
+        assert_eq!(serde_json::from_str::<AccountId>(&json).unwrap(), account);
+        assert!("not-an-account".parse::<AccountId>().is_err());
+        assert!(AccountId::try_from_slice(&[0; 16]).is_err());
+    }
 
     #[test]
     fn test_order_ack_construction() {
@@ -402,7 +486,7 @@ mod tests {
     fn test_order_update_all_fields() {
         let u = OrderUpdate {
             order_id: "o1".to_string(),
-            user_uuid: Uuid::nil(),
+            account: AccountId::default(),
             symbol_id: 200,
             side: Side::Sell,
             status: OrderStatus::PartiallyFilled,
@@ -421,7 +505,7 @@ mod tests {
             timestamp: 1_700_000_000,
         };
         assert_eq!(u.order_id, "o1");
-        assert_eq!(u.user_uuid, Uuid::nil());
+        assert_eq!(u.account, AccountId::default());
         assert_eq!(u.symbol_id, 200);
         assert_eq!(u.side, Side::Sell);
         assert_eq!(u.status, OrderStatus::PartiallyFilled);
@@ -451,7 +535,7 @@ mod tests {
 
         let ou = OrderUpdate {
             order_id: "o".into(),
-            user_uuid: Uuid::nil(),
+            account: AccountId::default(),
             symbol_id: 0,
             side: Side::Buy,
             status: OrderStatus::New,

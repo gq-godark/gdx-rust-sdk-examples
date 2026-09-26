@@ -6,13 +6,13 @@ use crate::error::GodarkError;
 use crate::generated::edge::v1 as edge;
 use crate::hpke::WIRE_VERSION;
 
-pub fn encode_hpke_setup(user_uuid: &[u8], conn_id: u64, encapped_key: &[u8]) -> Vec<u8> {
+pub fn encode_hpke_setup(account: &[u8], conn_id: u64, encapped_key: &[u8]) -> Vec<u8> {
     let frame = edge::TradingWsBinaryFrame {
         subscription_epoch: 0,
         stream_seq: 0,
         body: Some(edge::trading_ws_binary_frame::Body::HpkeSetup(
             edge::HpkeSetup {
-                user_uuid: user_uuid.to_vec(),
+                account: account.to_vec(),
                 conn_id,
                 encapped_key: encapped_key.to_vec(),
             },

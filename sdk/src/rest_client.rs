@@ -22,7 +22,7 @@ use crate::proto_bridge;
 use crate::rest_transport::RestTransport;
 use crate::session::CryptoSession;
 use crate::types::{
-    AccountMarginUpdate, LeverageSettings, MeProfile, OpenOrdersSnapshot, OrderAck,
+    AccountId, AccountMarginUpdate, LeverageSettings, MeProfile, OpenOrdersSnapshot, OrderAck,
     PositionsSnapshot,
 };
 
@@ -177,7 +177,7 @@ pub struct GodarkRestClientBuilder {
     rest_base_url: Option<String>,
     /// When unset, inferred from the resolved REST base URL for HPKE pin selection.
     environment: Option<Environment>,
-    user_uuid: Option<Uuid>,
+    account: Option<AccountId>,
     hpke_static_public_key_hex: Option<String>,
     symbol_map: HashMap<String, u64>,
     explicit_symbol_map: bool,
@@ -194,7 +194,7 @@ impl GodarkRestClientBuilder {
             passphrase: None,
             rest_base_url: None,
             environment: None,
-            user_uuid: None,
+            account: None,
             hpke_static_public_key_hex: None,
             symbol_map,
             explicit_symbol_map: false,
@@ -234,9 +234,9 @@ impl GodarkRestClientBuilder {
         self
     }
 
-    /// Fallback user UUID when the edge auth response omits `user_uuid` (e.g. localnet).
-    pub fn user_uuid(mut self, id: impl Into<String>) -> Self {
-        self.user_uuid = Uuid::parse_str(&id.into()).ok();
+    /// Fallback account when the edge auth response omits `account` (e.g. localnet).
+    pub fn account(mut self, id: impl Into<String>) -> Self {
+        self.account = id.into().parse().ok();
         self
     }
 
@@ -298,11 +298,11 @@ impl GodarkRestClientBuilder {
                 .rest_base_url(),
         );
 
-        let user_uuid = self.user_uuid.or_else(|| {
-            for k in &["GODARK_USER_UUID", "GDX_USER_UUID"] {
+        let account = self.account.or_else(|| {
+            for k in &["GODARK_ACCOUNT", "GDX_ACCOUNT"] {
                 if let Ok(v) = std::env::var(k) {
-                    if let Ok(u) = Uuid::parse_str(v.trim()) {
-                        return Some(u);
+                    if let Ok(account) = v.trim().parse() {
+                        return Some(account);
                     }
                 }
             }
@@ -327,7 +327,7 @@ impl GodarkRestClientBuilder {
             symbol_map: self.symbol_map,
             explicit_symbol_map: self.explicit_symbol_map,
             bearer: None,
-            user_uuid,
+            account,
             token_scope: None,
             local_coid_index: HashMap::new(),
         })
@@ -353,7 +353,7 @@ pub struct GodarkRestClient {
     symbol_map: HashMap<String, u64>,
     explicit_symbol_map: bool,
     bearer: Option<String>,
-    user_uuid: Option<Uuid>,
+    account: Option<AccountId>,
     token_scope: Option<String>,
     /// Populated after decrypting successful place ACKs; drives cancel-by-coid without sentinel bodies.
     local_coid_index: HashMap<String, String>,
@@ -364,8 +364,8 @@ impl GodarkRestClient {
         GodarkRestClientBuilder::new()
     }
 
-    pub fn user_uuid(&self) -> Option<Uuid> {
-        self.user_uuid
+    pub fn account(&self) -> Option<AccountId> {
+        self.account
     }
 
     pub fn token_scope(&self) -> Option<&str> {
@@ -381,10 +381,9 @@ impl GodarkRestClient {
         })
     }
 
-    fn current_user_uuid(&self) -> Result<Uuid, GodarkError> {
-        self.user_uuid.ok_or_else(|| {
-            GodarkError::Session("user_uuid missing — set via builder or env".into())
-        })
+    fn current_account(&self) -> Result<AccountId, GodarkError> {
+        self.account
+            .ok_or_else(|| GodarkError::Session("account missing — set via builder or env".into()))
     }
 
     fn current_bearer(&self) -> Result<&str, GodarkError> {
@@ -423,19 +422,19 @@ impl GodarkRestClient {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let mut resolved: Option<Uuid> = auth_data
-            .get("user_uuid")
+        let mut resolved: Option<AccountId> = auth_data
+            .get("account")
             .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok());
+            .and_then(|s| s.parse().ok());
         if resolved.is_none() {
-            resolved = crate::access_token::user_uuid_from_access_token_jwt(&bearer);
+            resolved = crate::access_token::account_from_access_token_jwt(&bearer);
         }
         if resolved.is_none() {
-            resolved = self.user_uuid;
+            resolved = self.account;
         }
-        self.user_uuid = Some(resolved.ok_or_else(|| {
+        self.account = Some(resolved.ok_or_else(|| {
             GodarkError::Session(
-                "REST auth succeeded but user identity missing; JWT sub and fallback UUID both absent"
+                "REST auth succeeded but account missing; JWT sub and fallback account both absent"
                     .into(),
             )
         })?);
@@ -473,7 +472,7 @@ impl GodarkRestClient {
         client_order_id: Option<String>,
     ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
 
         let plaintext = proto_bridge::build_place_order_proto(
@@ -534,7 +533,7 @@ impl GodarkRestClient {
         symbol: &str,
     ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let oid: u64 = order_id
             .parse()
@@ -582,7 +581,7 @@ impl GodarkRestClient {
         new_trigger_price: Option<f64>,
     ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let oid: u64 = order_id
             .parse()
@@ -628,7 +627,7 @@ impl GodarkRestClient {
         leverage: u32,
     ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let lev = leverage.max(1);
         let plaintext =
@@ -699,7 +698,7 @@ impl GodarkRestClient {
             ));
         }
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let plaintext = proto_bridge::build_mass_quote_proto(
             symbol_id,
@@ -732,7 +731,7 @@ impl GodarkRestClient {
             ));
         }
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let plaintext =
             proto_bridge::build_batch_cancel_proto(symbol_id, uuid.as_bytes(), order_ids, &corr_id);
@@ -762,7 +761,7 @@ impl GodarkRestClient {
             ));
         }
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let plaintext =
             proto_bridge::build_batch_modify_proto(symbol_id, uuid.as_bytes(), legs, &corr_id);
@@ -801,7 +800,7 @@ impl GodarkRestClient {
         build: fn(&[u8], &[u8]) -> Vec<u8>,
         path: &'static str,
     ) -> Result<proto_bridge::NodeResponseKind, GodarkError> {
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let plaintext = build(uuid.as_bytes(), &corr_id);
         // Sequencer ingress admission keys off header `symbol_id` gates. Symbol 0
@@ -824,7 +823,7 @@ impl GodarkRestClient {
     /// Fetch browser session profile from `GET /api/v1/auth/me`.
     ///
     /// Requires a **session** JWT (Dynamic login). API-key tokens from
-    /// `auth/token` are rejected; use [`Self::user_uuid()`] after [`Self::connect`]
+    /// `auth/token` are rejected; use [`Self::account()`] after [`Self::connect`]
     /// instead (parsed from the access JWT `sub` claim).
     pub async fn get_me(&mut self) -> Result<MeProfile, GodarkError> {
         let bearer = self.current_bearer()?.to_string();
@@ -887,7 +886,7 @@ impl GodarkRestClient {
             header_leverage,
         } = call;
         let bearer = self.current_bearer()?.to_string();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let pin_hex = self.hpke_static_public_key_hex.as_deref().ok_or_else(|| {
             GodarkError::Config(
                 "HPKE static public key unset; pass .hpke_static_public_key_hex() or set GDX_HPKE_STATIC_PUBLIC_KEY".into(),
@@ -1013,7 +1012,7 @@ impl GodarkRestClient {
             .get("fencing_epoch")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let aad = proto_bridge::build_response_header_aad(
             uuid.as_bytes(),
             message_type,
@@ -1192,15 +1191,15 @@ mod tests {
         let saved = clear_env(&[
             "GODARK_API_KEY",
             "GDX_API_KEY",
-            "GODARK_USER_UUID",
-            "GDX_USER_UUID",
+            "GODARK_ACCOUNT",
+            "GDX_ACCOUNT",
         ]);
         let c = GodarkRestClient::builder()
             .api_key("k")
             .rest_base_url("http://localhost:4000")
             .build()
             .unwrap();
-        assert_eq!(c.user_uuid(), None);
+        assert_eq!(c.account(), None);
         restore_env(saved);
     }
 
@@ -1226,14 +1225,14 @@ mod tests {
     #[test]
     fn builder_accepts_id_secret_with_passphrase() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let saved = clear_env(&["GODARK_USER_UUID", "GDX_USER_UUID"]);
+        let saved = clear_env(&["GODARK_ACCOUNT", "GDX_ACCOUNT"]);
         let c = GodarkRestClient::builder()
             .api_key_id("id")
             .api_secret("sec")
             .passphrase("pp")
             .build()
             .unwrap();
-        assert!(c.user_uuid().is_none());
+        assert!(c.account().is_none());
         restore_env(saved);
     }
 
@@ -1265,14 +1264,14 @@ mod tests {
     }
 
     #[test]
-    fn builder_resolves_user_uuid_explicit() {
-        let id = "00000000-0000-4000-8000-000000000042";
+    fn builder_resolves_account_explicit() {
+        let id = "11111111111111111111111111111111";
         let c = GodarkRestClient::builder()
             .api_key("k")
-            .user_uuid(id)
+            .account(id)
             .build()
             .unwrap();
-        assert_eq!(c.user_uuid().unwrap().to_string(), id);
+        assert_eq!(c.account().unwrap().to_string(), id);
     }
 
     #[test]
@@ -1340,7 +1339,7 @@ mod tests {
     fn update_leverage_rejects_unknown_symbol() {
         let mut client = GodarkRestClient::builder()
             .api_key("k")
-            .user_uuid("00000000-0000-4000-8000-000000000001")
+            .account("11111111111111111111111111111111")
             .rest_base_url("http://localhost:4000")
             .build()
             .unwrap();

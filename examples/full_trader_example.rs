@@ -72,8 +72,8 @@ async fn main() {
         .transport(transport);
     if let Some(legacy) = legacy_key {
         builder = builder.api_key(legacy);
-        if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
-            builder = builder.user_uuid(uid);
+        if let Some(account) = dotenv::env_first(&["GODARK_ACCOUNT", "GDX_ACCOUNT"]) {
+            builder = builder.account(account);
         }
     } else {
         let Some(api_key_id) = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]) else {
@@ -140,11 +140,11 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let user = client
-        .user_uuid()
-        .map(|u| u.to_string())
+    let account = client
+        .account()
+        .map(|id| id.to_string())
         .unwrap_or_default();
-    println!("Authenticated as user_uuid={user}  (HPKE session)");
+    println!("Authenticated as account={account}  (HPKE session)");
 
     if let Err(e) = client
         .subscribe(&["orders", "positions", "funding_rate"])
@@ -488,14 +488,14 @@ async fn main() {
     while let Ok(a) = account_margin_rx.try_recv() {
         margin_count += 1;
         println!(
-            "MARGIN user={}  ts={}  isolated_margin={}  cross_im={}",
-            a.user_uuid,
+            "MARGIN account={}  ts={}  isolated_margin={}  cross_im={}",
+            a.account,
             a.server_timestamp,
-            a.account
+            a.summary
                 .as_ref()
                 .map(|s| s.isolated_margin.as_str())
                 .unwrap_or(""),
-            a.account
+            a.summary
                 .as_ref()
                 .map(|s| s.cross_im.as_str())
                 .unwrap_or("")
