@@ -1232,12 +1232,11 @@ mod tests {
             )),
         }
         .encode_to_vec();
-        match sequencer::PlaceOrderInput::decode(wrapped.as_slice()) {
-            Ok(misread) => assert_ne!(
+        if let Ok(misread) = sequencer::PlaceOrderInput::decode(wrapped.as_slice()) {
+            assert_ne!(
                 misread.symbol_id, 42,
                 "wrapped EdgeSequencerRequest must not look like Place with symbol_id=42"
-            ),
-            Err(_) => {}
+            );
         }
         assert_eq!(place.side, Side::Buy.to_proto());
         assert_eq!(place.order_type, OrderType::Limit.to_proto());

@@ -282,7 +282,7 @@ call:
 |---------|------|
 | `Authentication(String)` | API key rejection at session bring-up |
 | `Session(String)` | HPKE setup handshake or rekey failure |
-| `Order { message, error_code }` | Order rejected by the sequencer; `error_code` carries the symbolic reason (see below) |
+| `Order { message, error_code, user_message }` | Order rejected by the sequencer; `message` preserves the wire/log text, while `user_message` contains catalog English when the code is known |
 | `Connection(String)` | Transport-level failure |
 | `Encryption(String)` | Cipher / nonce failure on encrypted payloads |
 | `Timeout(String)` | Per-command response timeout |
@@ -296,8 +296,15 @@ The `Order` variant is the one application code typically branches on:
 match client.place_order(...).await {
     Ok(ack) if ack.success => { /* placed */ }
     Ok(ack) => print_order_error(ack.error_code.as_deref(), ack.error.as_deref()),
-    Err(godark::GodarkError::Order { error_code, message }) => {
-        eprintln!("rejected: {message} (code={error_code:?})");
+    Err(godark::GodarkError::Order {
+        error_code,
+        message,
+        user_message,
+    }) => {
+        eprintln!(
+            "rejected: {} (code={error_code:?}, wire={message})",
+            user_message.as_deref().unwrap_or(&message),
+        );
     }
     Err(e) => return Err(e),
 }

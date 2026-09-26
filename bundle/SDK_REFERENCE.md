@@ -164,10 +164,11 @@ walk cap (localnet 5%); typical explicit values are 50–500 bps (0.5%–5%).
 
 - `Authentication(String)`
 - `Session(String)` — HPKE setup handshake or rekey failure
-- `Order { message: String, error_code: Option<String> }`
-  — also carries the symbolic reason (e.g. `"PRICE_DEVIATION_TOO_LARGE"`,
-  `"MARGIN_INSUFFICIENT"`). See the `quickstart` source for the match-and-print
-  pattern.
+- `Order { message: String, error_code: Option<String>, user_message: Option<String> }`
+  — preserves wire/log text in `message` and provides catalog English in
+  `user_message` when the symbolic code is known (e.g.
+  `"PRICE_DEVIATION_TOO_LARGE"`). See the `quickstart` source for the
+  match-and-print pattern.
 - `Connection(String)`
 - `Encryption(String)`
 - `Timeout(String)`

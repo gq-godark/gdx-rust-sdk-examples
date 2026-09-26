@@ -74,6 +74,10 @@ or `GDX_HPKE_STATIC_PUBLIC_KEY`.
 Balances come from sequencer `BalanceUpdateMessage` / encrypted
 `balance_and_position` (trading collateral `balance_raw`).
 
+`place_order_with_options` accepts `PlaceOrderOptions::slippage_bps` for market
+and stop-market orders. The value is the maximum walk from mark in basis points;
+leave it as `None` to use the venue limit.
+
 ## REST
 
 `POST /api/v1/auth/token`, then encrypted `POST/PATCH/DELETE /api/v1/orders`

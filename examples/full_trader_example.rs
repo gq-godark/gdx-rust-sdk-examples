@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use godark::{
-    Confirmation, Environment, GodarkClient, GodarkRestClient, MassQuoteLegInput, OrderType,
-    PlaceOrderOptions, Side, TimeInForce, TransportConfig,
+    Confirmation, Environment, GodarkClient, MassQuoteLegInput, OrderType, PlaceOrderOptions, Side,
+    TimeInForce, TransportConfig,
 };
 
 #[path = "dotenv.rs"]
@@ -146,7 +146,10 @@ async fn main() {
         .unwrap_or_default();
     println!("Authenticated as user_uuid={user}  (HPKE session)");
 
-    if let Err(e) = client.subscribe(&["orders", "positions", "funding_rate"]).await {
+    if let Err(e) = client
+        .subscribe(&["orders", "positions", "funding_rate"])
+        .await
+    {
         eprintln!("Subscribe failed: {e}");
         client.disconnect().await;
         std::process::exit(1);
@@ -166,7 +169,11 @@ async fn main() {
         );
         for row in &snap.rows {
             if row.symbol_id == 1 {
-                if let Some(m) = row.mark_price.as_deref().and_then(|s| s.parse::<f64>().ok()) {
+                if let Some(m) = row
+                    .mark_price
+                    .as_deref()
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
                     last_mark_btc = Some(m);
                 }
             }
@@ -356,7 +363,11 @@ async fn main() {
                     r.error_code
                 );
                 if r.status == "open" {
-                    if let Some(id) = r.new_order_id.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(id) = r
+                        .new_order_id
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         resting_ids.push(id);
                     }
                 }
@@ -371,10 +382,7 @@ async fn main() {
     if !resting_ids.is_empty() {
         println!("cancel_all_orders (ladder cleanup)...");
         match client.cancel_all_orders(Some(SYMBOL)).await {
-            Ok(ca) => println!(
-                "  cancel_all: count={}  ids={:?}",
-                ca.count, ca.order_ids
-            ),
+            Ok(ca) => println!("  cancel_all: count={}  ids={:?}", ca.count, ca.order_ids),
             Err(e) => dotenv::print_order_error("cancel_all rejected", &e),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -419,7 +427,11 @@ async fn main() {
                     r.error_code
                 );
                 if r.status == "open" {
-                    if let Some(id) = r.new_order_id.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(id) = r
+                        .new_order_id
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         stray_ids.push(id);
                     }
                 }
@@ -427,10 +439,7 @@ async fn main() {
             if !stray_ids.is_empty() {
                 println!("cancel_all_orders (post_only=false remainder cleanup)...");
                 match client.cancel_all_orders(Some(SYMBOL)).await {
-                    Ok(ca) => println!(
-                        "  cancel_all: count={}  ids={:?}",
-                        ca.count, ca.order_ids
-                    ),
+                    Ok(ca) => println!("  cancel_all: count={}  ids={:?}", ca.count, ca.order_ids),
                     Err(e) => dotenv::print_order_error(
                         "post_only=false remainder cancel_all rejected",
                         &e,

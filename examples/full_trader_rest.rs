@@ -38,7 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if !legacy.is_empty() {
         builder = builder.api_key(legacy);
     } else {
-        return Err("Set GODARK_API_KEY_ID, GODARK_API_SECRET and GODARK_PASSPHRASE in .env".into());
+        return Err(
+            "Set GODARK_API_KEY_ID, GODARK_API_SECRET and GODARK_PASSPHRASE in .env".into(),
+        );
     }
     let mut client = builder.build()?;
 
@@ -46,10 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let uid = client
         .user_uuid()
         .ok_or("user_uuid missing after connect")?;
-    println!(
-        "identity: user_uuid={uid} scope={:?}",
-        client.token_scope()
-    );
+    println!("identity: user_uuid={uid} scope={:?}", client.token_scope());
 
     let orders = client.get_open_orders().await?;
     println!("open orders: {} row(s)", orders.rows.len());

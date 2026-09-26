@@ -43,16 +43,22 @@ async fn main() -> Result<(), GodarkError> {
             builder = builder.user_uuid(uid);
         }
     } else {
-        let api_key_id = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).ok_or_else(|| {
-            GodarkError::Config("Set GODARK_API_KEY_ID or legacy GODARK_API_KEY".into())
-        })?;
-        let api_secret = dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).ok_or_else(|| {
-            GodarkError::Config("Set GODARK_API_SECRET or legacy GODARK_API_KEY".into())
-        })?;
-        let passphrase = dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).ok_or_else(|| {
-            GodarkError::Config("Set GODARK_PASSPHRASE or legacy GODARK_API_KEY".into())
-        })?;
-        builder = builder.api_key_id(api_key_id).api_secret(api_secret).passphrase(passphrase);
+        let api_key_id =
+            dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).ok_or_else(|| {
+                GodarkError::Config("Set GODARK_API_KEY_ID or legacy GODARK_API_KEY".into())
+            })?;
+        let api_secret =
+            dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).ok_or_else(|| {
+                GodarkError::Config("Set GODARK_API_SECRET or legacy GODARK_API_KEY".into())
+            })?;
+        let passphrase =
+            dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).ok_or_else(|| {
+                GodarkError::Config("Set GODARK_PASSPHRASE or legacy GODARK_API_KEY".into())
+            })?;
+        builder = builder
+            .api_key_id(api_key_id)
+            .api_secret(api_secret)
+            .passphrase(passphrase);
     }
     let config = builder.build()?;
 

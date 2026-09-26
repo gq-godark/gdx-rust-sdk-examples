@@ -7,7 +7,8 @@ It includes:
   loop — no private crates registry required, no `protoc` required
   (pre-generated protobuf bindings ship with the SDK under
   `sdk/src/generated/`)
-- **example sources** (`quickstart` + `full_trader_example`) shipped in a
+- **example sources** (`quickstart`, `full_trader_example`, and
+  `rest_client_example`) shipped in a
   `.zip` release — recipients build with `cargo build`
 - a simple **`.env`** workflow (no shell `export` required)
 
@@ -120,6 +121,8 @@ get fast incremental builds and IDE go-to-definition into the SDK source.
 |--------|--------|---------|
 | `quickstart` | `examples/quickstart.rs` | Minimal connect → `subscribe(["orders"])` → LIMIT sell far from touch → cancel (book confirmation needs the private orders channel) |
 | `full_trader_example` | `examples/full_trader_example.rs` | Reference bot flow with all 6 sequencer push callbacks, place / modify / cancel, mass-quote / batch-cancel, and queued-update drain |
+| `full_trader_rest` | `examples/full_trader_rest.rs` | Development-only REST reference flow with account preflight and trading commands |
+| `rest_client_example` | `examples/rest_client_example.rs` | Bundle-safe REST auth, account reads, and public market-data queries |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and
 **`LIMIT`**.
@@ -140,7 +143,8 @@ Output lands in the repo root as
 `godark-rust-sdk-<bundle>.zip`. The zip includes:
 
 - `Cargo.toml` — workspace manifest (`godark = { path = "sdk" }`) for source builds
-- `examples/*.rs` — example source files (`quickstart.rs`, `full_trader_example.rs`, `dotenv.rs`)
+- `examples/*.rs` — bundle source files (`quickstart.rs`,
+  `full_trader_example.rs`, `rest_client_example.rs`, `dotenv.rs`)
 - `sdk/` — bundled `godark` crate source
 - `README.md`, `SDK_REFERENCE.md` — recipient-facing docs from `bundle/`
 - `.env.example` — credential template
@@ -178,7 +182,7 @@ CI publishes a tagged `godark-rust-sdk-*.zip` on every push to
 
 | Path | Purpose |
 |------|---------|
-| `examples/` | Source for runnable MM examples (`quickstart.rs`, `full_trader_example.rs`, `dotenv.rs` helper) |
+| `examples/` | Source for runnable MM examples (including the shared `dotenv.rs` helper) |
 | `Cargo.toml` | Examples crate; depends on the vendored `godark` via `path = "sdk"` |
 | `sdk/` | Vendored `godark` SDK source (with pre-generated protobuf bindings under `sdk/src/generated/`) |
 | `sdk/UPSTREAM_REF` | Pinned upstream `gdx-rust-sdk` commit; CI rebuilds against this exact ref |
