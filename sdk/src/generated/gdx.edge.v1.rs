@@ -60,17 +60,6 @@ pub struct EncryptedEdgeResponse {
     #[prost(bytes = "vec", tag = "3")]
     pub encrypted_body: ::prost::alloc::vec::Vec<u8>,
 }
-/// Stage 15d: edge reconnect resume — replay acks with session_seq > last_applied_seq.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SessionControl {
-    #[prost(uint64, tag = "1")]
-    pub last_applied_seq: u64,
-    /// Edge-stamped on edge→sequencer forward; client WS frames may omit (zero).
-    #[prost(bytes = "vec", tag = "2")]
-    pub account: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag = "3")]
-    pub conn_id: u64,
-}
 /// HPKE Base setup relay (edge stamps account + conn_id).
 /// `encapped_key` is the 32-byte DHKEM(X25519) encapsulation.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -126,7 +115,7 @@ pub struct RestEncryptedEdgeResponse {
     pub encrypted_body: ::prost::alloc::vec::Vec<u8>,
 }
 /// Client↔edge trading WebSocket binary frames (security-critical path).
-/// Encrypted orders/pushes, HPKE setup, and session control MUST use this
+/// Encrypted orders/pushes and HPKE setup MUST use this
 /// frame (WS Message::Binary). Text JSON is only for control/market ops
 /// (login, subscribe, ping, volume/OI/funding, etc.).
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -136,7 +125,7 @@ pub struct TradingWsBinaryFrame {
     pub subscription_epoch: u64,
     #[prost(uint64, tag = "11")]
     pub stream_seq: u64,
-    #[prost(oneof = "trading_ws_binary_frame::Body", tags = "1, 2, 3, 4, 5, 6")]
+    #[prost(oneof = "trading_ws_binary_frame::Body", tags = "1, 2, 3, 4, 5")]
     pub body: ::core::option::Option<trading_ws_binary_frame::Body>,
 }
 /// Nested message and enum types in `TradingWsBinaryFrame`.
@@ -153,15 +142,13 @@ pub mod trading_ws_binary_frame {
         HpkeSetupReply(super::HpkeSetupReply),
         #[prost(message, tag = "5")]
         SessionClose(super::SessionClose),
-        #[prost(message, tag = "6")]
-        SessionControl(super::SessionControl),
     }
 }
 /// Edge ↔ sequencer hop: QUIC stream + u32 BE length + this oneof.
 /// Same shape as lightweight QUIC RPC (qrpc): no HTTP/gRPC on this hop.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EdgeToSequencerFrame {
-    #[prost(oneof = "edge_to_sequencer_frame::Body", tags = "1, 2, 3, 4, 5, 6, 7")]
+    #[prost(oneof = "edge_to_sequencer_frame::Body", tags = "1, 2, 3, 4, 5, 6")]
     pub body: ::core::option::Option<edge_to_sequencer_frame::Body>,
 }
 /// Nested message and enum types in `EdgeToSequencerFrame`.
@@ -180,8 +167,6 @@ pub mod edge_to_sequencer_frame {
         HpkeSetup(super::HpkeSetup),
         #[prost(message, tag = "6")]
         SessionClose(super::SessionClose),
-        #[prost(message, tag = "7")]
-        SessionControl(super::SessionControl),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
