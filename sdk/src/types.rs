@@ -121,6 +121,8 @@ pub struct PlaceOrderOptions {
     pub reduce_only: bool,
     pub post_only: bool,
     pub stp_mode: crate::enums::StpMode,
+    /// Quote-currency notional sizing. Mutually exclusive with base `quantity`.
+    pub quote_notional: Option<f64>,
     pub peg_offset_bps: Option<i32>,
     pub trigger_price: Option<f64>,
     pub take_profit_price: Option<f64>,

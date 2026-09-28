@@ -471,6 +471,42 @@ impl GodarkRestClient {
         expiry_time: Option<u64>,
         client_order_id: Option<String>,
     ) -> Result<OrderAck, GodarkError> {
+        self.place_order_with_options(
+            symbol,
+            side,
+            order_type,
+            quantity,
+            price,
+            time_in_force,
+            aon,
+            min_fill_size,
+            expiry_time,
+            client_order_id,
+            crate::types::PlaceOrderOptions::default(),
+        )
+        .await
+    }
+
+    /// Place an encrypted order with optional flags or quote-notional sizing.
+    ///
+    /// Pass `None` for `quantity` and set
+    /// [`PlaceOrderOptions::quote_notional`](crate::types::PlaceOrderOptions::quote_notional)
+    /// to size in quote currency. Exactly one sizing field must be set.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn place_order_with_options(
+        &mut self,
+        symbol: &str,
+        side: Side,
+        order_type: OrderType,
+        quantity: impl Into<Option<f64>>,
+        price: Option<f64>,
+        time_in_force: TimeInForce,
+        aon: bool,
+        min_fill_size: Option<f64>,
+        expiry_time: Option<u64>,
+        client_order_id: Option<String>,
+        options: crate::types::PlaceOrderOptions,
+    ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
         let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
@@ -487,9 +523,9 @@ impl GodarkRestClient {
             min_fill_size,
             expiry_time,
             &corr_id,
-            crate::types::PlaceOrderOptions::default(),
+            options,
             timestamp_ns(),
-        );
+        )?;
 
         let coid_for_register = client_order_id.clone();
         let ack = self

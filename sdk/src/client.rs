@@ -302,7 +302,7 @@ impl GodarkClient {
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
+        quantity: impl Into<Option<f64>>,
         price: Option<f64>,
         time_in_force: TimeInForce,
         aon: bool,
@@ -371,7 +371,7 @@ impl GodarkClient {
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
+        quantity: impl Into<Option<f64>>,
         price: Option<f64>,
         time_in_force: TimeInForce,
         aon: bool,
@@ -399,7 +399,7 @@ impl GodarkClient {
             &corr_id,
             options,
             timestamp_ns(),
-        );
+        )?;
 
         // Register before send so a terminal push that races the ack is not lost.
         let outcome = if confirmation == Confirmation::Book {

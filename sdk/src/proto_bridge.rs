@@ -61,7 +61,7 @@ pub fn build_place_order_proto(
     symbol_id: u64,
     side: Side,
     order_type: crate::enums::OrderType,
-    quantity: f64,
+    quantity: impl Into<Option<f64>>,
     account: &[u8],
     price: Option<f64>,
     time_in_force: crate::enums::TimeInForce,
@@ -71,9 +71,20 @@ pub fn build_place_order_proto(
     correlation_id_bytes: &[u8],
     options: PlaceOrderOptions,
     _timestamp: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, GodarkError> {
+    let quantity = quantity.into();
+    if quantity.is_some() == options.quote_notional.is_some() {
+        return Err(GodarkError::Config(
+            "exactly one of quantity or options.quote_notional is required".into(),
+        ));
+    }
+    if aon && quantity.is_none() {
+        return Err(GodarkError::Config(
+            "aon requires base quantity, not quote_notional".into(),
+        ));
+    }
     let min_fill_size = if aon && min_fill_size.is_none() {
-        Some(quantity)
+        quantity
     } else {
         min_fill_size
     };
@@ -81,8 +92,8 @@ pub fn build_place_order_proto(
         symbol_id,
         side: side.to_proto(),
         order_type: order_type.to_proto(),
-        quantity: Some(quantity),
-        quote_notional: None,
+        quantity,
+        quote_notional: options.quote_notional,
         time_in_force: time_in_force.to_proto(),
         price,
         min_fill_size,
@@ -99,7 +110,7 @@ pub fn build_place_order_proto(
         slippage_bps: options.slippage_bps,
     };
     // HPKE body is the bare inner proto (PlaceOrderInput), not EdgeSequencerRequest.
-    place.encode_to_vec()
+    Ok(place.encode_to_vec())
 }
 
 pub fn build_cancel_order_proto(
@@ -1226,7 +1237,8 @@ mod tests {
             &TEST_CORR,
             PlaceOrderOptions::default(),
             1_234_567_890,
-        );
+        )
+        .expect("build");
         let place =
             sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode PlaceOrderInput");
         assert_eq!(place.symbol_id, 42);
@@ -1262,6 +1274,7 @@ mod tests {
             reduce_only: true,
             post_only: true,
             stp_mode: crate::enums::StpMode::CancelAggressor,
+            quote_notional: None,
             peg_offset_bps: None,
             trigger_price: None,
             take_profit_price: None,
@@ -1282,7 +1295,8 @@ mod tests {
             &TEST_CORR,
             options,
             0,
-        );
+        )
+        .expect("build");
         let place = sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode");
         assert!(place.reduce_only);
         assert!(place.post_only);
@@ -1298,6 +1312,7 @@ mod tests {
             reduce_only: false,
             post_only: false,
             stp_mode: crate::enums::StpMode::Unspecified,
+            quote_notional: None,
             peg_offset_bps: Some(12),
             trigger_price: Some(95.5),
             take_profit_price: Some(110.0),
@@ -1318,7 +1333,8 @@ mod tests {
             &TEST_CORR,
             options,
             0,
-        );
+        )
+        .expect("build");
         let place = sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(place.peg_offset_bps, Some(12));
         assert_eq!(place.trigger_price, Some(95.5));
@@ -1342,7 +1358,8 @@ mod tests {
             &TEST_CORR,
             PlaceOrderOptions::default(),
             0,
-        );
+        )
+        .expect("build");
         let place =
             sequencer::PlaceOrderInput::decode(omit.as_slice()).expect("decode PlaceOrderInput");
         assert_eq!(place.slippage_bps, None);
@@ -1365,10 +1382,111 @@ mod tests {
             &TEST_CORR,
             options,
             0,
-        );
+        )
+        .expect("build");
         let place =
             sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode PlaceOrderInput");
         assert_eq!(place.slippage_bps, Some(200));
+    }
+
+    #[test]
+    fn test_build_place_order_quote_notional_is_exclusive_with_quantity() {
+        let base = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            1.0,
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            PlaceOrderOptions::default(),
+            0,
+        )
+        .expect("base-sized place");
+        let base = sequencer::PlaceOrderInput::decode(base.as_slice()).expect("decode");
+        assert_eq!(base.quantity, Some(1.0));
+        assert_eq!(base.quote_notional, None);
+
+        let options = PlaceOrderOptions {
+            quote_notional: Some(250.0),
+            slippage_bps: Some(100),
+            ..Default::default()
+        };
+        let quote = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            None,
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            options,
+            0,
+        )
+        .expect("quote-sized place");
+        let quote = sequencer::PlaceOrderInput::decode(quote.as_slice()).expect("decode");
+        assert_eq!(quote.quantity, None);
+        assert_eq!(quote.quote_notional, Some(250.0));
+        assert_eq!(quote.slippage_bps, Some(100));
+
+        let both = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            1.0,
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            options,
+            0,
+        );
+        assert!(both.unwrap_err().to_string().contains("exactly one"));
+
+        let neither = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            None,
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            PlaceOrderOptions::default(),
+            0,
+        );
+        assert!(neither.unwrap_err().to_string().contains("exactly one"));
+
+        let aon_quote = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            None,
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            true,
+            None,
+            None,
+            &TEST_CORR,
+            options,
+            0,
+        );
+        assert!(aon_quote.unwrap_err().to_string().contains("aon requires"));
     }
 
     #[test]
