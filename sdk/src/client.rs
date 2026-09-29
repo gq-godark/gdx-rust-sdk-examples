@@ -196,7 +196,18 @@ impl GodarkClient {
         if !self.config.explicit_symbol_map {
             let rest =
                 crate::rest_client::resolve_rest_base_url(Some(self.config.base_url.clone()));
-            self.config.symbol_map = crate::instruments::load_symbol_map_from_edge(&rest).await;
+            // In-process mock edges and localnet WS-only listeners share one port;
+            // an instruments GET would steal the accept() and break connect.
+            let local = rest.contains("127.0.0.1") || rest.contains("localhost");
+            if local {
+                let offline = crate::instruments::offline_catalog();
+                self.config.symbol_map = offline.symbol_map;
+                self.config.instrument_decimals = offline.decimals;
+            } else {
+                let catalog = crate::instruments::load_catalog_from_edge(&rest).await;
+                self.config.symbol_map = catalog.symbol_map;
+                self.config.instrument_decimals = catalog.decimals;
+            }
         }
         if let Some(h) = self.event_handle.take() {
             h.abort();
@@ -399,6 +410,7 @@ impl GodarkClient {
             &corr_id,
             options,
             timestamp_ns(),
+            self.resolve_decimals(symbol_id),
         )?;
 
         // Register before send so a terminal push that races the ack is not lost.
@@ -486,7 +498,8 @@ impl GodarkClient {
             new_quantity,
             new_trigger_price,
             &corr_id,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
 
         self.send_encrypted_order("modify", symbol_id, &plaintext, &corr_id)
             .await
@@ -605,7 +618,8 @@ impl GodarkClient {
             stop_loss_price,
             body_symbol_id,
             position_side,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
         let response = self
             .send_encrypted_command("amend_tpsl", symbol_id, &plaintext, &corr_id)
             .await?;
@@ -695,7 +709,8 @@ impl GodarkClient {
             legs,
             &corr_id,
             post_only,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
         let response = self
             .send_encrypted_command("mass_quote", symbol_id, &plaintext, &corr_id)
             .await?;
@@ -750,8 +765,13 @@ impl GodarkClient {
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let uuid = self.current_account()?;
 
-        let plaintext =
-            proto_bridge::build_batch_modify_proto(symbol_id, uuid.as_bytes(), legs, &corr_id);
+        let plaintext = proto_bridge::build_batch_modify_proto(
+            symbol_id,
+            uuid.as_bytes(),
+            legs,
+            &corr_id,
+            self.resolve_decimals(symbol_id),
+        )?;
         let response = self
             .send_encrypted_command("batch_modify", symbol_id, &plaintext, &corr_id)
             .await?;
@@ -1587,6 +1607,14 @@ impl GodarkClient {
             ))
         })
     }
+
+    fn resolve_decimals(&self, symbol_id: u64) -> crate::decimals::InstrumentDecimals {
+        self.config
+            .instrument_decimals
+            .get(&symbol_id)
+            .copied()
+            .unwrap_or(crate::decimals::InstrumentDecimals::FALLBACK)
+    }
 }
 
 fn timestamp_ns() -> u64 {
@@ -1596,16 +1624,49 @@ fn timestamp_ns() -> u64 {
         .as_nanos() as u64
 }
 
+/// Mint a REST access token for key-triple auth, or return the legacy `api_key`.
+async fn resolve_ws_login_token(config: &GodarkConfig) -> Result<String, GodarkError> {
+    match (
+        config.api_key_id.as_deref(),
+        config.api_secret.as_deref(),
+        config.passphrase.as_deref(),
+    ) {
+        (Some(id), Some(secret), Some(pp)) => {
+            let rest = crate::rest_client::resolve_rest_base_url(Some(config.base_url.clone()));
+            let http = crate::rest_transport::RestTransport::new(rest);
+            let data = http
+                .auth_token_document_body("client_credentials", id, secret, pp)
+                .await?;
+            data.get("access_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    GodarkError::Authentication("auth/token missing access_token".into())
+                })
+        }
+        _ => {
+            if config.auth_token.is_empty() {
+                return Err(GodarkError::Config(
+                    "missing WebSocket login credentials".into(),
+                ));
+            }
+            Ok(config.auth_token.clone())
+        }
+    }
+}
+
 async fn establish_transport_connection(
     config: &GodarkConfig,
     transport: &Arc<AsyncMutex<EdgeTransport>>,
     session: &Arc<Mutex<CryptoSession>>,
     account_slot: &Arc<Mutex<Option<AccountId>>>,
 ) -> Result<mpsc::Receiver<TransportEvent>, GodarkError> {
+    let login_token = resolve_ws_login_token(config).await?;
+
     let mut transport = transport.lock().await;
     transport.connect().await?;
 
-    let auth_result = transport.authenticate(&config.auth_token).await?;
+    let auth_result = transport.authenticate(&login_token).await?;
     if auth_result.get("success").and_then(|v| v.as_bool()) != Some(true) {
         transport.disconnect().await;
         let err = auth_result

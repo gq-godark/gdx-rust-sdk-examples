@@ -399,16 +399,16 @@ pub struct PlaceOrderInput {
     pub side: i32,
     #[prost(enumeration = "super::super::common::v1::OrderType", tag = "3")]
     pub order_type: i32,
-    #[prost(double, optional, tag = "4")]
-    pub price: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "23")]
+    pub price: ::core::option::Option<::prost::alloc::string::String>,
     /// Exclusive with quote_notional.
-    #[prost(double, optional, tag = "5")]
-    pub quantity: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "24")]
+    pub quantity: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(enumeration = "super::super::common::v1::TimeInForce", tag = "7")]
     pub time_in_force: i32,
     /// Same unit as the size field that is set.
-    #[prost(double, optional, tag = "8")]
-    pub min_fill_size: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "25")]
+    pub min_fill_size: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(uint64, optional, tag = "9")]
     pub expiry_time: ::core::option::Option<u64>,
     #[prost(bytes = "vec", tag = "10")]
@@ -421,20 +421,20 @@ pub struct PlaceOrderInput {
     pub reduce_only: bool,
     #[prost(bool, tag = "14")]
     pub post_only: bool,
-    #[prost(double, optional, tag = "15")]
-    pub take_profit_price: ::core::option::Option<f64>,
-    #[prost(double, optional, tag = "16")]
-    pub stop_loss_price: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "26")]
+    pub take_profit_price: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "27")]
+    pub stop_loss_price: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(sint32, optional, tag = "19")]
     pub peg_offset_bps: ::core::option::Option<i32>,
-    #[prost(double, optional, tag = "20")]
-    pub trigger_price: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "28")]
+    pub trigger_price: ::core::option::Option<::prost::alloc::string::String>,
     /// Max walk vs mark for market / stop-market (basis points). Omitted → venue max.
     #[prost(uint32, optional, tag = "21")]
     pub slippage_bps: ::core::option::Option<u32>,
-    /// Exclusive with quantity. Sequencer: qty = notional / price.
-    #[prost(double, optional, tag = "22")]
-    pub quote_notional: ::core::option::Option<f64>,
+    /// Exclusive with quantity. Sequencer: qty = notional / price, truncated.
+    #[prost(string, optional, tag = "29")]
+    pub quote_notional: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ModifyOrderInput {
@@ -442,16 +442,16 @@ pub struct ModifyOrderInput {
     pub order_id: u64,
     #[prost(uint64, tag = "3")]
     pub symbol_id: u64,
-    #[prost(double, optional, tag = "4")]
-    pub new_price: ::core::option::Option<f64>,
-    #[prost(double, optional, tag = "5")]
-    pub new_quantity: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "9")]
+    pub new_price: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "10")]
+    pub new_quantity: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bytes = "vec", tag = "6")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "7")]
     pub account: ::prost::alloc::vec::Vec<u8>,
-    #[prost(double, optional, tag = "8")]
-    pub new_trigger_price: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "11")]
+    pub new_trigger_price: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MassQuoteLeg {
@@ -459,10 +459,10 @@ pub struct MassQuoteLeg {
     pub cancel_order_id: u64,
     #[prost(enumeration = "super::super::common::v1::Side", tag = "2")]
     pub side: i32,
-    #[prost(double, tag = "3")]
-    pub price: f64,
-    #[prost(double, tag = "4")]
-    pub quantity: f64,
+    #[prost(string, tag = "8")]
+    pub price: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub quantity: ::prost::alloc::string::String,
     #[prost(enumeration = "super::super::common::v1::TimeInForce", tag = "5")]
     pub time_in_force: i32,
     #[prost(uint64, optional, tag = "6")]
@@ -532,10 +532,10 @@ pub struct ReverseInput {
 pub struct BatchModifyLeg {
     #[prost(uint64, tag = "1")]
     pub order_id: u64,
-    #[prost(double, optional, tag = "2")]
-    pub new_price: ::core::option::Option<f64>,
-    #[prost(double, optional, tag = "3")]
-    pub new_quantity: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "5")]
+    pub new_price: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "6")]
+    pub new_quantity: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bytes = "vec", tag = "4")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
 }
@@ -681,10 +681,10 @@ pub struct AmendTpslRequest {
     pub order_id: u64,
     #[prost(bytes = "vec", tag = "3")]
     pub correlation_id: ::prost::alloc::vec::Vec<u8>,
-    #[prost(double, optional, tag = "4")]
-    pub take_profit_price: ::core::option::Option<f64>,
-    #[prost(double, optional, tag = "5")]
-    pub stop_loss_price: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "9")]
+    pub take_profit_price: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "10")]
+    pub stop_loss_price: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(uint64, optional, tag = "7")]
     pub symbol_id: ::core::option::Option<u64>,
     #[prost(enumeration = "super::super::common::v1::Side", optional, tag = "8")]

@@ -56,9 +56,12 @@ pub(crate) fn resolve_rest_base_url(explicit: Option<String>) -> String {
 
 fn resolve_rest_base_url_with_default(explicit: Option<String>, default: &str) -> String {
     if let Some(url) = explicit {
-        let trimmed = url.trim_end_matches('/').to_string();
+        let trimmed = url.trim().trim_end_matches('/');
         if !trimmed.is_empty() {
-            return trimmed;
+            if let Some(http_url) = derive_http_from_ws(trimmed) {
+                return http_url.trim_end_matches('/').to_string();
+            }
+            return trimmed.to_string();
         }
     }
     for key in &["GODARK_REST_URL", "GDX_REST_URL"] {
@@ -326,6 +329,7 @@ impl GodarkRestClientBuilder {
             legacy_auth_token,
             symbol_map: self.symbol_map,
             explicit_symbol_map: self.explicit_symbol_map,
+            instrument_decimals: crate::instruments::offline_instrument_decimals(),
             bearer: None,
             account,
             token_scope: None,
@@ -352,6 +356,7 @@ pub struct GodarkRestClient {
     legacy_auth_token: Option<String>,
     symbol_map: HashMap<String, u64>,
     explicit_symbol_map: bool,
+    instrument_decimals: HashMap<u64, crate::decimals::InstrumentDecimals>,
     bearer: Option<String>,
     account: Option<AccountId>,
     token_scope: Option<String>,
@@ -381,6 +386,13 @@ impl GodarkRestClient {
         })
     }
 
+    fn resolve_decimals(&self, symbol_id: u64) -> crate::decimals::InstrumentDecimals {
+        self.instrument_decimals
+            .get(&symbol_id)
+            .copied()
+            .unwrap_or(crate::decimals::InstrumentDecimals::FALLBACK)
+    }
+
     fn current_account(&self) -> Result<AccountId, GodarkError> {
         self.account
             .ok_or_else(|| GodarkError::Session("account missing — set via builder or env".into()))
@@ -395,8 +407,9 @@ impl GodarkRestClient {
     /// `auth/token` → optional edge instruments fetch. HPKE is one-shot per order.
     pub async fn connect(&mut self) -> Result<(), GodarkError> {
         if !self.explicit_symbol_map {
-            self.symbol_map =
-                crate::instruments::load_symbol_map_from_edge(&self.rest_base_url).await;
+            let catalog = crate::instruments::load_catalog_from_edge(&self.rest_base_url).await;
+            self.symbol_map = catalog.symbol_map;
+            self.instrument_decimals = catalog.decimals;
         }
         let auth_data = if let (Some(id), Some(sec), Some(pp)) =
             (&self.api_key_id, &self.api_secret, &self.passphrase)
@@ -525,6 +538,7 @@ impl GodarkRestClient {
             &corr_id,
             options,
             timestamp_ns(),
+            self.resolve_decimals(symbol_id),
         )?;
 
         let coid_for_register = client_order_id.clone();
@@ -630,7 +644,8 @@ impl GodarkRestClient {
             new_quantity,
             new_trigger_price,
             &corr_id,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
         self.send_encrypted_order(
             EncryptedCall::new("modify", symbol_id, &plaintext, &corr_id)
                 .route(EncryptedRoute::PatchPathId(order_id.to_string())),
@@ -742,7 +757,8 @@ impl GodarkRestClient {
             legs,
             &corr_id,
             post_only,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
         let (sealed, raw) = self
             .send_encrypted(
                 EncryptedCall::new("mass_quote", symbol_id, &plaintext, &corr_id)
@@ -799,8 +815,13 @@ impl GodarkRestClient {
         let symbol_id = self.resolve_symbol(symbol)?;
         let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let plaintext =
-            proto_bridge::build_batch_modify_proto(symbol_id, uuid.as_bytes(), legs, &corr_id);
+        let plaintext = proto_bridge::build_batch_modify_proto(
+            symbol_id,
+            uuid.as_bytes(),
+            legs,
+            &corr_id,
+            self.resolve_decimals(symbol_id),
+        )?;
         let (sealed, raw) = self
             .send_encrypted(EncryptedCall::new(
                 "batch_modify",
@@ -1213,6 +1234,18 @@ mod tests {
                 std::env::remove_var(&k);
             }
         }
+    }
+
+    #[test]
+    fn resolve_rest_base_url_rewrites_wss_explicit() {
+        assert_eq!(
+            resolve_rest_base_url(Some("wss://api.devnet.godark-dex.com".into())),
+            "https://api.devnet.godark-dex.com"
+        );
+        assert_eq!(
+            resolve_rest_base_url(Some("ws://127.0.0.1:13300".into())),
+            "http://127.0.0.1:13300"
+        );
     }
 
     #[test]

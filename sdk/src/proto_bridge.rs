@@ -3,6 +3,7 @@
 use prost::Message;
 use uuid::Uuid;
 
+use crate::decimals::{format_decimal, format_opt_price, format_opt_quantity, InstrumentDecimals};
 use crate::enums::{
     self, CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce,
 };
@@ -71,6 +72,7 @@ pub fn build_place_order_proto(
     correlation_id_bytes: &[u8],
     options: PlaceOrderOptions,
     _timestamp: u64,
+    decimals: InstrumentDecimals,
 ) -> Result<Vec<u8>, GodarkError> {
     let quantity = quantity.into();
     if quantity.is_some() == options.quote_notional.is_some() {
@@ -88,25 +90,30 @@ pub fn build_place_order_proto(
     } else {
         min_fill_size
     };
+    // quote_notional is quote-currency; use price_decimals for its fraction limit.
+    let quote_notional = options
+        .quote_notional
+        .map(|v| format_decimal(v, decimals.price_decimals))
+        .transpose()?;
     let place = sequencer::PlaceOrderInput {
         symbol_id,
         side: side.to_proto(),
         order_type: order_type.to_proto(),
-        quantity,
-        quote_notional: options.quote_notional,
+        quantity: format_opt_quantity(quantity, decimals)?,
+        quote_notional,
         time_in_force: time_in_force.to_proto(),
-        price,
-        min_fill_size,
+        price: format_opt_price(price, decimals)?,
+        min_fill_size: format_opt_quantity(min_fill_size, decimals)?,
         expiry_time,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
         account: account.to_vec(),
         stp_mode: options.stp_mode.to_proto(),
         post_only: options.post_only,
         reduce_only: options.reduce_only,
-        stop_loss_price: options.stop_loss_price,
-        take_profit_price: options.take_profit_price,
+        stop_loss_price: format_opt_price(options.stop_loss_price, decimals)?,
+        take_profit_price: format_opt_price(options.take_profit_price, decimals)?,
         peg_offset_bps: options.peg_offset_bps,
-        trigger_price: options.trigger_price,
+        trigger_price: format_opt_price(options.trigger_price, decimals)?,
         slippage_bps: options.slippage_bps,
     };
     // HPKE body is the bare inner proto (PlaceOrderInput), not EdgeSequencerRequest.
@@ -164,6 +171,7 @@ pub fn build_reverse_proto(symbol_id: u64, account: &[u8], correlation_id_bytes:
     reverse.encode_to_vec()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_amend_tpsl_proto(
     account: &[u8],
     order_id: u64,
@@ -172,17 +180,18 @@ pub fn build_amend_tpsl_proto(
     stop_loss_price: Option<f64>,
     symbol_id: Option<u64>,
     position_side: Option<crate::enums::Side>,
-) -> Vec<u8> {
+    decimals: InstrumentDecimals,
+) -> Result<Vec<u8>, GodarkError> {
     let amend = sequencer::AmendTpslRequest {
         account: account.to_vec(),
         order_id,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        take_profit_price,
-        stop_loss_price,
+        take_profit_price: format_opt_price(take_profit_price, decimals)?,
+        stop_loss_price: format_opt_price(stop_loss_price, decimals)?,
         symbol_id,
         position_side: position_side.map(crate::enums::Side::to_proto),
     };
-    amend.encode_to_vec()
+    Ok(amend.encode_to_vec())
 }
 
 pub fn build_cancel_tpsl_proto(
@@ -202,6 +211,7 @@ pub fn build_cancel_tpsl_proto(
     cancel.encode_to_vec()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_modify_order_proto(
     order_id: u64,
     account: &[u8],
@@ -210,17 +220,18 @@ pub fn build_modify_order_proto(
     new_quantity: Option<f64>,
     new_trigger_price: Option<f64>,
     correlation_id_bytes: &[u8],
-) -> Vec<u8> {
+    decimals: InstrumentDecimals,
+) -> Result<Vec<u8>, GodarkError> {
     let modify = sequencer::ModifyOrderInput {
         order_id,
         symbol_id,
-        new_price,
-        new_quantity,
+        new_price: format_opt_price(new_price, decimals)?,
+        new_quantity: format_opt_quantity(new_quantity, decimals)?,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
         account: account.to_vec(),
-        new_trigger_price,
+        new_trigger_price: format_opt_price(new_trigger_price, decimals)?,
     };
-    modify.encode_to_vec()
+    Ok(modify.encode_to_vec())
 }
 
 pub fn build_update_leverage_proto(
@@ -282,23 +293,22 @@ pub fn build_mass_quote_proto(
     legs: &[crate::types::MassQuoteLegInput],
     correlation_id_bytes: &[u8],
     post_only: Option<bool>,
-) -> Vec<u8> {
-    let pb_legs = legs
-        .iter()
-        .map(|leg| {
-            let tif = leg.time_in_force.unwrap_or(crate::enums::TimeInForce::Gtc);
-            sequencer::MassQuoteLeg {
-                // 0 means "pure place" (no cancel target).
-                cancel_order_id: leg.cancel_order_id.unwrap_or(0),
-                side: leg.side.to_proto(),
-                price: leg.price,
-                quantity: leg.quantity,
-                time_in_force: tif.to_proto(),
-                expiry_time: leg.expiry_time,
-                correlation_id: Uuid::new_v4().into_bytes().to_vec(),
-            }
-        })
-        .collect();
+    decimals: InstrumentDecimals,
+) -> Result<Vec<u8>, GodarkError> {
+    let mut pb_legs = Vec::with_capacity(legs.len());
+    for leg in legs {
+        let tif = leg.time_in_force.unwrap_or(crate::enums::TimeInForce::Gtc);
+        pb_legs.push(sequencer::MassQuoteLeg {
+            // 0 means "pure place" (no cancel target).
+            cancel_order_id: leg.cancel_order_id.unwrap_or(0),
+            side: leg.side.to_proto(),
+            price: format_decimal(leg.price, decimals.price_decimals)?,
+            quantity: format_decimal(leg.quantity, decimals.quantity_decimals)?,
+            time_in_force: tif.to_proto(),
+            expiry_time: leg.expiry_time,
+            correlation_id: Uuid::new_v4().into_bytes().to_vec(),
+        });
+    }
     let mq = sequencer::MassQuoteInput {
         symbol_id,
         legs: pb_legs,
@@ -309,7 +319,7 @@ pub fn build_mass_quote_proto(
         // Some(false) enables the relaxed path where a crossing leg takes liquidity.
         post_only: Some(post_only.unwrap_or(true)),
     };
-    mq.encode_to_vec()
+    Ok(mq.encode_to_vec())
 }
 
 /// Build bare `BatchCancelInput` bytes (cancel up to 20 resting orders on one
@@ -337,23 +347,24 @@ pub fn build_batch_modify_proto(
     account: &[u8],
     legs: &[crate::types::BatchModifyLegInput],
     correlation_id_bytes: &[u8],
-) -> Vec<u8> {
-    let pb_legs = legs
-        .iter()
-        .map(|leg| sequencer::BatchModifyLeg {
+    decimals: InstrumentDecimals,
+) -> Result<Vec<u8>, GodarkError> {
+    let mut pb_legs = Vec::with_capacity(legs.len());
+    for leg in legs {
+        pb_legs.push(sequencer::BatchModifyLeg {
             order_id: leg.order_id,
-            new_price: leg.new_price,
-            new_quantity: leg.new_quantity,
+            new_price: format_opt_price(leg.new_price, decimals)?,
+            new_quantity: format_opt_quantity(leg.new_quantity, decimals)?,
             correlation_id: Uuid::new_v4().into_bytes().to_vec(),
-        })
-        .collect();
+        });
+    }
     let bm = sequencer::BatchModifyInput {
         symbol_id,
         legs: pb_legs,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
         account: account.to_vec(),
     };
-    bm.encode_to_vec()
+    Ok(bm.encode_to_vec())
 }
 
 fn mass_quote_leg_status_str(status: i32) -> &'static str {
@@ -1220,6 +1231,10 @@ mod tests {
         0x00,
     ];
     const TEST_ACCOUNT: [u8; AccountId::LEN] = [0x42; AccountId::LEN];
+    const TEST_DECIMALS: InstrumentDecimals = InstrumentDecimals {
+        price_decimals: 8,
+        quantity_decimals: 8,
+    };
 
     #[test]
     fn test_build_place_order_roundtrip() {
@@ -1237,6 +1252,7 @@ mod tests {
             &TEST_CORR,
             PlaceOrderOptions::default(),
             1_234_567_890,
+            TEST_DECIMALS,
         )
         .expect("build");
         let place =
@@ -1256,11 +1272,11 @@ mod tests {
         }
         assert_eq!(place.side, Side::Buy.to_proto());
         assert_eq!(place.order_type, OrderType::Limit.to_proto());
-        assert_eq!(place.quantity, Some(10.5));
+        assert_eq!(place.quantity.as_deref(), Some("10.5"));
         assert_eq!(place.account, TEST_ACCOUNT.as_slice());
-        assert_eq!(place.price, Some(1.25));
+        assert_eq!(place.price.as_deref(), Some("1.25"));
         assert_eq!(place.time_in_force, TimeInForce::Gtc.to_proto());
-        assert_eq!(place.min_fill_size, Some(0.5));
+        assert_eq!(place.min_fill_size.as_deref(), Some("0.5"));
         assert_eq!(place.expiry_time, Some(999));
         assert_eq!(
             place.correlation_id,
@@ -1295,6 +1311,7 @@ mod tests {
             &TEST_CORR,
             options,
             0,
+            TEST_DECIMALS,
         )
         .expect("build");
         let place = sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode");
@@ -1333,13 +1350,14 @@ mod tests {
             &TEST_CORR,
             options,
             0,
+            TEST_DECIMALS,
         )
         .expect("build");
         let place = sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(place.peg_offset_bps, Some(12));
-        assert_eq!(place.trigger_price, Some(95.5));
-        assert_eq!(place.take_profit_price, Some(110.0));
-        assert_eq!(place.stop_loss_price, Some(90.0));
+        assert_eq!(place.trigger_price.as_deref(), Some("95.5"));
+        assert_eq!(place.take_profit_price.as_deref(), Some("110"));
+        assert_eq!(place.stop_loss_price.as_deref(), Some("90"));
     }
 
     #[test]
@@ -1358,6 +1376,7 @@ mod tests {
             &TEST_CORR,
             PlaceOrderOptions::default(),
             0,
+            TEST_DECIMALS,
         )
         .expect("build");
         let place =
@@ -1382,6 +1401,7 @@ mod tests {
             &TEST_CORR,
             options,
             0,
+            TEST_DECIMALS,
         )
         .expect("build");
         let place =
@@ -1405,10 +1425,11 @@ mod tests {
             &TEST_CORR,
             PlaceOrderOptions::default(),
             0,
+            TEST_DECIMALS,
         )
         .expect("base-sized place");
         let base = sequencer::PlaceOrderInput::decode(base.as_slice()).expect("decode");
-        assert_eq!(base.quantity, Some(1.0));
+        assert_eq!(base.quantity.as_deref(), Some("1"));
         assert_eq!(base.quote_notional, None);
 
         let options = PlaceOrderOptions {
@@ -1430,11 +1451,12 @@ mod tests {
             &TEST_CORR,
             options,
             0,
+            TEST_DECIMALS,
         )
         .expect("quote-sized place");
         let quote = sequencer::PlaceOrderInput::decode(quote.as_slice()).expect("decode");
         assert_eq!(quote.quantity, None);
-        assert_eq!(quote.quote_notional, Some(250.0));
+        assert_eq!(quote.quote_notional.as_deref(), Some("250"));
         assert_eq!(quote.slippage_bps, Some(100));
 
         let both = build_place_order_proto(
@@ -1451,6 +1473,7 @@ mod tests {
             &TEST_CORR,
             options,
             0,
+            TEST_DECIMALS,
         );
         assert!(both.unwrap_err().to_string().contains("exactly one"));
 
@@ -1468,6 +1491,7 @@ mod tests {
             &TEST_CORR,
             PlaceOrderOptions::default(),
             0,
+            TEST_DECIMALS,
         );
         assert!(neither.unwrap_err().to_string().contains("exactly one"));
 
@@ -1485,16 +1509,26 @@ mod tests {
             &TEST_CORR,
             options,
             0,
+            TEST_DECIMALS,
         );
         assert!(aon_quote.unwrap_err().to_string().contains("aon requires"));
     }
 
     #[test]
     fn test_build_modify_order_new_trigger_price() {
-        let bytes =
-            build_modify_order_proto(7, &TEST_ACCOUNT, 9, None, None, Some(88.25), &TEST_CORR);
+        let bytes = build_modify_order_proto(
+            7,
+            &TEST_ACCOUNT,
+            9,
+            None,
+            None,
+            Some(88.25),
+            &TEST_CORR,
+            TEST_DECIMALS,
+        )
+        .unwrap();
         let modify = sequencer::ModifyOrderInput::decode(bytes.as_slice()).expect("decode");
-        assert_eq!(modify.new_trigger_price, Some(88.25));
+        assert_eq!(modify.new_trigger_price.as_deref(), Some("88.25"));
     }
 
     #[test]
@@ -1615,14 +1649,23 @@ mod tests {
 
     #[test]
     fn test_build_modify_order_roundtrip() {
-        let bytes =
-            build_modify_order_proto(7, &TEST_ACCOUNT, 9, Some(2.25), Some(3.5), None, &TEST_CORR);
+        let bytes = build_modify_order_proto(
+            7,
+            &TEST_ACCOUNT,
+            9,
+            Some(2.25),
+            Some(3.5),
+            None,
+            &TEST_CORR,
+            TEST_DECIMALS,
+        )
+        .unwrap();
         let modify = sequencer::ModifyOrderInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(modify.order_id, 7);
         assert_eq!(modify.account, TEST_ACCOUNT.as_slice());
         assert_eq!(modify.symbol_id, 9);
-        assert_eq!(modify.new_price, Some(2.25));
-        assert_eq!(modify.new_quantity, Some(3.5));
+        assert_eq!(modify.new_price.as_deref(), Some("2.25"));
+        assert_eq!(modify.new_quantity.as_deref(), Some("3.5"));
         assert_eq!(
             modify.correlation_id,
             u128::from_be_bytes(TEST_CORR).to_le_bytes()
@@ -1693,7 +1736,9 @@ mod tests {
                 expiry_time: None,
             },
         ];
-        let bytes = build_mass_quote_proto(7, &TEST_ACCOUNT, &legs, &TEST_CORR, None);
+        let bytes =
+            build_mass_quote_proto(7, &TEST_ACCOUNT, &legs, &TEST_CORR, None, TEST_DECIMALS)
+                .unwrap();
         let mq = sequencer::MassQuoteInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(mq.symbol_id, 7);
         assert_eq!(mq.account, TEST_ACCOUNT.as_slice());
@@ -1703,7 +1748,7 @@ mod tests {
         );
         assert_eq!(mq.legs.len(), 2);
         assert_eq!(mq.legs[0].cancel_order_id, 42);
-        assert_eq!(mq.legs[0].price, 100.5);
+        assert_eq!(mq.legs[0].price, "100.5");
         // Pure-place leg defaults the cancel target to 0.
         assert_eq!(mq.legs[1].cancel_order_id, 0);
         // Each leg carries a unique 16-byte correlation id.
@@ -1723,7 +1768,15 @@ mod tests {
             time_in_force: None,
             expiry_time: None,
         }];
-        let bytes = build_mass_quote_proto(1, &TEST_ACCOUNT, &legs, &[0u8; 16], Some(false));
+        let bytes = build_mass_quote_proto(
+            1,
+            &TEST_ACCOUNT,
+            &legs,
+            &[0u8; 16],
+            Some(false),
+            TEST_DECIMALS,
+        )
+        .unwrap();
         let mq = sequencer::MassQuoteInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(mq.post_only, Some(false));
     }
@@ -1755,7 +1808,8 @@ mod tests {
                 new_quantity: Some(4.0),
             },
         ];
-        let bytes = build_batch_modify_proto(9, &TEST_ACCOUNT, &legs, &TEST_CORR);
+        let bytes =
+            build_batch_modify_proto(9, &TEST_ACCOUNT, &legs, &TEST_CORR, TEST_DECIMALS).unwrap();
         let bm = sequencer::BatchModifyInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(bm.symbol_id, 9);
         assert_eq!(
@@ -1764,9 +1818,9 @@ mod tests {
         );
         assert_eq!(bm.legs.len(), 2);
         assert_eq!(bm.legs[0].order_id, 5);
-        assert_eq!(bm.legs[0].new_price, Some(101.0));
+        assert_eq!(bm.legs[0].new_price.as_deref(), Some("101"));
         assert_eq!(bm.legs[0].new_quantity, None);
-        assert_eq!(bm.legs[1].new_quantity, Some(4.0));
+        assert_eq!(bm.legs[1].new_quantity.as_deref(), Some("4"));
         assert_eq!(bm.legs[0].correlation_id.len(), 16);
     }
 

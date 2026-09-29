@@ -6,6 +6,7 @@
 mod access_token;
 mod client;
 mod config;
+mod decimals;
 mod enums;
 mod error;
 mod generated;
@@ -62,6 +63,7 @@ pub use client::GodarkClient;
 pub use config::{
     resolve_passphrase, Environment, GodarkConfig, GodarkConfigBuilder, TransportConfig,
 };
+pub use decimals::{format_decimal, parse_decimal, InstrumentDecimals};
 pub use enums::{
     CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, StpMode, TimeInForce,
 };
