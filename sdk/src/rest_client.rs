@@ -476,11 +476,11 @@ impl GodarkRestClient {
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
-        price: Option<f64>,
+        quantity: &str,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
         client_order_id: Option<String>,
     ) -> Result<OrderAck, GodarkError> {
@@ -488,7 +488,7 @@ impl GodarkRestClient {
             symbol,
             side,
             order_type,
-            quantity,
+            Some(quantity),
             price,
             time_in_force,
             aon,
@@ -504,18 +504,19 @@ impl GodarkRestClient {
     ///
     /// Pass `None` for `quantity` and set
     /// [`PlaceOrderOptions::quote_notional`](crate::types::PlaceOrderOptions::quote_notional)
-    /// to size in quote currency. Exactly one sizing field must be set.
+    /// to size in quote currency. Exactly one sizing field must be set. Prices
+    /// and sizes are human decimal strings (not `f64`).
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order_with_options(
         &mut self,
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: impl Into<Option<f64>>,
-        price: Option<f64>,
+        quantity: Option<&str>,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
         client_order_id: Option<String>,
         options: crate::types::PlaceOrderOptions,
@@ -626,9 +627,9 @@ impl GodarkRestClient {
         &mut self,
         order_id: &str,
         symbol: &str,
-        new_price: Option<f64>,
-        new_quantity: Option<f64>,
-        new_trigger_price: Option<f64>,
+        new_price: Option<&str>,
+        new_quantity: Option<&str>,
+        new_trigger_price: Option<&str>,
     ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
         let uuid = self.current_account()?;

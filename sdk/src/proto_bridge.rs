@@ -3,7 +3,9 @@
 use prost::Message;
 use uuid::Uuid;
 
-use crate::decimals::{format_decimal, format_opt_price, format_opt_quantity, InstrumentDecimals};
+use crate::decimals::{
+    normalize_decimal, normalize_opt_price, normalize_opt_quantity, InstrumentDecimals,
+};
 use crate::enums::{
     self, CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce,
 };
@@ -62,19 +64,18 @@ pub fn build_place_order_proto(
     symbol_id: u64,
     side: Side,
     order_type: crate::enums::OrderType,
-    quantity: impl Into<Option<f64>>,
+    quantity: Option<&str>,
     account: &[u8],
-    price: Option<f64>,
+    price: Option<&str>,
     time_in_force: crate::enums::TimeInForce,
     aon: bool,
-    min_fill_size: Option<f64>,
+    min_fill_size: Option<&str>,
     expiry_time: Option<u64>,
     correlation_id_bytes: &[u8],
     options: PlaceOrderOptions,
     _timestamp: u64,
     decimals: InstrumentDecimals,
 ) -> Result<Vec<u8>, GodarkError> {
-    let quantity = quantity.into();
     if quantity.is_some() == options.quote_notional.is_some() {
         return Err(GodarkError::Config(
             "exactly one of quantity or options.quote_notional is required".into(),
@@ -93,27 +94,28 @@ pub fn build_place_order_proto(
     // quote_notional is quote-currency; use price_decimals for its fraction limit.
     let quote_notional = options
         .quote_notional
-        .map(|v| format_decimal(v, decimals.price_decimals))
+        .as_deref()
+        .map(|v| normalize_decimal(v, decimals.price_decimals))
         .transpose()?;
     let place = sequencer::PlaceOrderInput {
         symbol_id,
         side: side.to_proto(),
         order_type: order_type.to_proto(),
-        quantity: format_opt_quantity(quantity, decimals)?,
+        quantity: normalize_opt_quantity(quantity, decimals)?,
         quote_notional,
         time_in_force: time_in_force.to_proto(),
-        price: format_opt_price(price, decimals)?,
-        min_fill_size: format_opt_quantity(min_fill_size, decimals)?,
+        price: normalize_opt_price(price, decimals)?,
+        min_fill_size: normalize_opt_quantity(min_fill_size, decimals)?,
         expiry_time,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
         account: account.to_vec(),
         stp_mode: options.stp_mode.to_proto(),
         post_only: options.post_only,
         reduce_only: options.reduce_only,
-        stop_loss_price: format_opt_price(options.stop_loss_price, decimals)?,
-        take_profit_price: format_opt_price(options.take_profit_price, decimals)?,
+        stop_loss_price: normalize_opt_price(options.stop_loss_price.as_deref(), decimals)?,
+        take_profit_price: normalize_opt_price(options.take_profit_price.as_deref(), decimals)?,
         peg_offset_bps: options.peg_offset_bps,
-        trigger_price: format_opt_price(options.trigger_price, decimals)?,
+        trigger_price: normalize_opt_price(options.trigger_price.as_deref(), decimals)?,
         slippage_bps: options.slippage_bps,
     };
     // HPKE body is the bare inner proto (PlaceOrderInput), not EdgeSequencerRequest.
@@ -176,8 +178,8 @@ pub fn build_amend_tpsl_proto(
     account: &[u8],
     order_id: u64,
     correlation_id_bytes: &[u8],
-    take_profit_price: Option<f64>,
-    stop_loss_price: Option<f64>,
+    take_profit_price: Option<&str>,
+    stop_loss_price: Option<&str>,
     symbol_id: Option<u64>,
     position_side: Option<crate::enums::Side>,
     decimals: InstrumentDecimals,
@@ -186,8 +188,8 @@ pub fn build_amend_tpsl_proto(
         account: account.to_vec(),
         order_id,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        take_profit_price: format_opt_price(take_profit_price, decimals)?,
-        stop_loss_price: format_opt_price(stop_loss_price, decimals)?,
+        take_profit_price: normalize_opt_price(take_profit_price, decimals)?,
+        stop_loss_price: normalize_opt_price(stop_loss_price, decimals)?,
         symbol_id,
         position_side: position_side.map(crate::enums::Side::to_proto),
     };
@@ -216,20 +218,20 @@ pub fn build_modify_order_proto(
     order_id: u64,
     account: &[u8],
     symbol_id: u64,
-    new_price: Option<f64>,
-    new_quantity: Option<f64>,
-    new_trigger_price: Option<f64>,
+    new_price: Option<&str>,
+    new_quantity: Option<&str>,
+    new_trigger_price: Option<&str>,
     correlation_id_bytes: &[u8],
     decimals: InstrumentDecimals,
 ) -> Result<Vec<u8>, GodarkError> {
     let modify = sequencer::ModifyOrderInput {
         order_id,
         symbol_id,
-        new_price: format_opt_price(new_price, decimals)?,
-        new_quantity: format_opt_quantity(new_quantity, decimals)?,
+        new_price: normalize_opt_price(new_price, decimals)?,
+        new_quantity: normalize_opt_quantity(new_quantity, decimals)?,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
         account: account.to_vec(),
-        new_trigger_price: format_opt_price(new_trigger_price, decimals)?,
+        new_trigger_price: normalize_opt_price(new_trigger_price, decimals)?,
     };
     Ok(modify.encode_to_vec())
 }
@@ -302,8 +304,8 @@ pub fn build_mass_quote_proto(
             // 0 means "pure place" (no cancel target).
             cancel_order_id: leg.cancel_order_id.unwrap_or(0),
             side: leg.side.to_proto(),
-            price: format_decimal(leg.price, decimals.price_decimals)?,
-            quantity: format_decimal(leg.quantity, decimals.quantity_decimals)?,
+            price: normalize_decimal(&leg.price, decimals.price_decimals)?,
+            quantity: normalize_decimal(&leg.quantity, decimals.quantity_decimals)?,
             time_in_force: tif.to_proto(),
             expiry_time: leg.expiry_time,
             correlation_id: Uuid::new_v4().into_bytes().to_vec(),
@@ -353,8 +355,8 @@ pub fn build_batch_modify_proto(
     for leg in legs {
         pb_legs.push(sequencer::BatchModifyLeg {
             order_id: leg.order_id,
-            new_price: format_opt_price(leg.new_price, decimals)?,
-            new_quantity: format_opt_quantity(leg.new_quantity, decimals)?,
+            new_price: normalize_opt_price(leg.new_price.as_deref(), decimals)?,
+            new_quantity: normalize_opt_quantity(leg.new_quantity.as_deref(), decimals)?,
             correlation_id: Uuid::new_v4().into_bytes().to_vec(),
         });
     }
@@ -1242,12 +1244,12 @@ mod tests {
             42,
             Side::Buy,
             OrderType::Limit,
-            10.5,
+            Some("10.5"),
             &TEST_ACCOUNT,
-            Some(1.25),
+            Some("1.25"),
             TimeInForce::Gtc,
             true,
-            Some(0.5),
+            Some("0.5"),
             Some(999),
             &TEST_CORR,
             PlaceOrderOptions::default(),
@@ -1301,9 +1303,9 @@ mod tests {
             42,
             Side::Buy,
             OrderType::Limit,
-            1.0,
+            Some("1"),
             &TEST_ACCOUNT,
-            Some(100.0),
+            Some("100"),
             TimeInForce::Gtc,
             false,
             None,
@@ -1331,16 +1333,16 @@ mod tests {
             stp_mode: crate::enums::StpMode::Unspecified,
             quote_notional: None,
             peg_offset_bps: Some(12),
-            trigger_price: Some(95.5),
-            take_profit_price: Some(110.0),
-            stop_loss_price: Some(90.0),
+            trigger_price: Some("95.5".into()),
+            take_profit_price: Some("110".into()),
+            stop_loss_price: Some("90".into()),
             slippage_bps: None,
         };
         let bytes = build_place_order_proto(
             42,
             Side::Buy,
             OrderType::Peg,
-            1.0,
+            Some("1"),
             &TEST_ACCOUNT,
             None,
             TimeInForce::Gtc,
@@ -1366,7 +1368,7 @@ mod tests {
             42,
             Side::Buy,
             OrderType::Market,
-            1.0,
+            Some("1"),
             &TEST_ACCOUNT,
             None,
             TimeInForce::Ioc,
@@ -1391,7 +1393,7 @@ mod tests {
             42,
             Side::Buy,
             OrderType::Market,
-            1.0,
+            Some("1"),
             &TEST_ACCOUNT,
             None,
             TimeInForce::Ioc,
@@ -1415,7 +1417,7 @@ mod tests {
             42,
             Side::Buy,
             OrderType::Market,
-            1.0,
+            Some("1"),
             &TEST_ACCOUNT,
             None,
             TimeInForce::Ioc,
@@ -1433,7 +1435,7 @@ mod tests {
         assert_eq!(base.quote_notional, None);
 
         let options = PlaceOrderOptions {
-            quote_notional: Some(250.0),
+            quote_notional: Some("250".into()),
             slippage_bps: Some(100),
             ..Default::default()
         };
@@ -1449,7 +1451,7 @@ mod tests {
             None,
             None,
             &TEST_CORR,
-            options,
+            options.clone(),
             0,
             TEST_DECIMALS,
         )
@@ -1463,7 +1465,7 @@ mod tests {
             42,
             Side::Buy,
             OrderType::Market,
-            1.0,
+            Some("1"),
             &TEST_ACCOUNT,
             None,
             TimeInForce::Ioc,
@@ -1471,7 +1473,7 @@ mod tests {
             None,
             None,
             &TEST_CORR,
-            options,
+            options.clone(),
             0,
             TEST_DECIMALS,
         );
@@ -1522,7 +1524,7 @@ mod tests {
             9,
             None,
             None,
-            Some(88.25),
+            Some("88.25"),
             &TEST_CORR,
             TEST_DECIMALS,
         )
@@ -1653,8 +1655,8 @@ mod tests {
             7,
             &TEST_ACCOUNT,
             9,
-            Some(2.25),
-            Some(3.5),
+            Some("2.25"),
+            Some("3.5"),
             None,
             &TEST_CORR,
             TEST_DECIMALS,
@@ -1721,16 +1723,16 @@ mod tests {
         let legs = vec![
             crate::types::MassQuoteLegInput {
                 side: Side::Buy,
-                price: 100.5,
-                quantity: 1.0,
+                price: "100.5".into(),
+                quantity: "1".into(),
                 cancel_order_id: Some(42),
                 time_in_force: None,
                 expiry_time: None,
             },
             crate::types::MassQuoteLegInput {
                 side: Side::Sell,
-                price: 200.0,
-                quantity: 2.0,
+                price: "200".into(),
+                quantity: "2".into(),
                 cancel_order_id: None,
                 time_in_force: Some(TimeInForce::Gtc),
                 expiry_time: None,
@@ -1762,8 +1764,8 @@ mod tests {
     fn test_build_mass_quote_proto_relaxed_post_only() {
         let legs = vec![crate::types::MassQuoteLegInput {
             side: Side::Buy,
-            price: 100.0,
-            quantity: 1.0,
+            price: "100".into(),
+            quantity: "1".into(),
             cancel_order_id: None,
             time_in_force: None,
             expiry_time: None,
@@ -1799,13 +1801,13 @@ mod tests {
         let legs = vec![
             crate::types::BatchModifyLegInput {
                 order_id: 5,
-                new_price: Some(101.0),
+                new_price: Some("101".into()),
                 new_quantity: None,
             },
             crate::types::BatchModifyLegInput {
                 order_id: 6,
                 new_price: None,
-                new_quantity: Some(4.0),
+                new_quantity: Some("4".into()),
             },
         ];
         let bytes =

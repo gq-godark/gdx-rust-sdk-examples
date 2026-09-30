@@ -119,10 +119,13 @@ contains the canonical `account` separately from its optional margin
 | `mass_quote(...)` | Up to 20 quote legs |
 | `batch_cancel(...)` / `batch_modify(...)` | Up to 20 order operations |
 
-`PlaceOrderOptions` contains `reduce_only`, `post_only`, `stp_mode`,
-`peg_offset_bps`, `trigger_price`, `take_profit_price`, `stop_loss_price`, and
-`slippage_bps`. Slippage is expressed in basis points; `None` delegates to the
-venue limit.
+Prices and sizes on place / modify / mass-quote / batch-modify / TP-SL are
+human **decimal strings** (`&str` / `String`), for example `"0.01"` or
+`Some("67500.5")` — not `f64`. `PlaceOrderOptions` also carries `reduce_only`,
+`post_only`, `stp_mode`, `quote_notional` (decimal string, XOR with base
+quantity), `peg_offset_bps`, `trigger_price`, `take_profit_price`,
+`stop_loss_price`, and `slippage_bps`. Slippage is expressed in basis points;
+`None` delegates to the venue limit.
 
 `Confirmation::Book` is the safe placement default. `Confirmation::Ack`
 returns at the sequencer acknowledgement boundary, so callers must consume

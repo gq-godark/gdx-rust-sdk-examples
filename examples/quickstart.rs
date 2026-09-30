@@ -75,14 +75,14 @@ async fn main() -> Result<(), GodarkError> {
     client.subscribe(&["orders"]).await?;
 
     let mark = live_mark_price();
-    let sell_px = (mark * 1.03 * 10.0).round() / 10.0;
+    let sell_px = format!("{:.1}", (mark * 1.03 * 10.0).round() / 10.0);
     match client
         .place_order_with_options(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
-            0.01,
-            Some(sell_px),
+            Some("0.01"),
+            Some(sell_px.as_str()),
             TimeInForce::Gtc,
             false,
             None,

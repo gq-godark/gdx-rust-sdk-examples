@@ -79,9 +79,11 @@ or `GDX_HPKE_STATIC_PUBLIC_KEY`.
 Balances come from sequencer `BalanceUpdateMessage` / encrypted
 `balance_and_position` (trading collateral `balance_raw`).
 
-`place_order_with_options` accepts `PlaceOrderOptions::slippage_bps` for market
-and stop-market orders. The value is the maximum walk from mark in basis points;
-leave it as `None` to use the venue limit.
+Prices and sizes on place / modify / mass-quote / batch-modify / TP-SL are
+**decimal strings** (for example `"0.01"`, `Some("67500.5")`), not `f64`.
+`place_order_with_options` also accepts `PlaceOrderOptions::slippage_bps` for
+market and stop-market orders (max walk from mark in basis points; `None` →
+venue limit) and `quote_notional` as a decimal string instead of base quantity.
 
 ## REST
 

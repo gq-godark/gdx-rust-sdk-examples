@@ -203,15 +203,15 @@ async fn main() {
     }
 
     let mark = live_mark_price();
-    let buy_px = (mark * 0.997 * 10.0).round() / 10.0;
+    let buy_px = format!("{:.1}", (mark * 0.997 * 10.0).round() / 10.0);
     println!("Placing limit BUY @ {buy_px} (mark={mark})...");
     let buy_ack = match client
         .place_order(
             SYMBOL,
             Side::Buy,
             OrderType::Limit,
-            0.1,
-            Some(buy_px),
+            "0.1",
+            Some(buy_px.as_str()),
             TimeInForce::Gtc,
             false,
             None,
@@ -236,10 +236,16 @@ async fn main() {
     drain_orders(&mut order_rx, "after BUY");
 
     if let Some(ref buy_ack) = buy_ack {
-        let modify_px = (mark * 0.996 * 10.0).round() / 10.0;
+        let modify_px = format!("{:.1}", (mark * 0.996 * 10.0).round() / 10.0);
         println!("Modifying order price to {modify_px}...");
         match client
-            .modify_order(&buy_ack.order_id, SYMBOL, Some(modify_px), None, None)
+            .modify_order(
+                &buy_ack.order_id,
+                SYMBOL,
+                Some(modify_px.as_str()),
+                None,
+                None,
+            )
             .await
         {
             Ok(ack) => println!("Modified: order_id={}", ack.order_id),
@@ -257,7 +263,7 @@ async fn main() {
             SYMBOL,
             Side::Buy,
             OrderType::Market,
-            0.01,
+            Some("0.01"),
             None,
             TimeInForce::Ioc,
             false,
@@ -278,15 +284,15 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     drain_orders(&mut order_rx, "after MARKET BUY");
 
-    let sell_px = (mark * 1.03 * 10.0).round() / 10.0;
+    let sell_px = format!("{:.1}", (mark * 1.03 * 10.0).round() / 10.0);
     println!("Placing limit SELL @ {sell_px}...");
     match client
         .place_order_with_options(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
-            0.05,
-            Some(sell_px),
+            Some("0.05"),
+            Some(sell_px.as_str()),
             TimeInForce::Gtc,
             false,
             None,
@@ -329,11 +335,10 @@ async fn main() {
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(64_000.0)
     });
-    let round1 = |p: f64| (p * 10.0).round() / 10.0;
     let mk = |price: f64, qty: f64| MassQuoteLegInput {
         side: Side::Buy,
-        price: round1(price),
-        quantity: qty,
+        price: format!("{:.1}", (price * 10.0).round() / 10.0),
+        quantity: format!("{qty}"),
         cancel_order_id: None,
         time_in_force: None,
         expiry_time: None,

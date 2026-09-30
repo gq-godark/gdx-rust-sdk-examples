@@ -116,17 +116,20 @@ pub struct LeverageSettings {
 }
 
 /// Optional place-order flags mirrored from gdx-web / sequencer `PlaceOrderInput`.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+///
+/// Price / size fields are human decimal strings (validated against instrument
+/// decimals before sealing). Example: `quote_notional: Some("250".into())`.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PlaceOrderOptions {
     pub reduce_only: bool,
     pub post_only: bool,
     pub stp_mode: crate::enums::StpMode,
     /// Quote-currency notional sizing. Mutually exclusive with base `quantity`.
-    pub quote_notional: Option<f64>,
+    pub quote_notional: Option<String>,
     pub peg_offset_bps: Option<i32>,
-    pub trigger_price: Option<f64>,
-    pub take_profit_price: Option<f64>,
-    pub stop_loss_price: Option<f64>,
+    pub trigger_price: Option<String>,
+    pub take_profit_price: Option<String>,
+    pub stop_loss_price: Option<String>,
     /// Max walk vs mark for market / stop-market (basis points). `None` → venue max.
     pub slippage_bps: Option<u32>,
 }
@@ -178,11 +181,13 @@ pub struct OrderAck {
 }
 
 /// One cancel-replace leg of a mass quote. Mirrors the Python SDK leg dict.
+///
+/// `price` / `quantity` are human decimal strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MassQuoteLegInput {
     pub side: Side,
-    pub price: f64,
-    pub quantity: f64,
+    pub price: String,
+    pub quantity: String,
     /// Resting order to cancel-replace. `None`/`0` = pure place (no cancel target).
     #[serde(default)]
     pub cancel_order_id: Option<u64>,
@@ -195,14 +200,14 @@ pub struct MassQuoteLegInput {
 }
 
 /// One amend leg of a batch modify. At least one of `new_price`/`new_quantity`
-/// must be set.
+/// must be set. Values are human decimal strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchModifyLegInput {
     pub order_id: u64,
     #[serde(default)]
-    pub new_price: Option<f64>,
+    pub new_price: Option<String>,
     #[serde(default)]
-    pub new_quantity: Option<f64>,
+    pub new_quantity: Option<String>,
 }
 
 /// Outcome of one cancel-replace leg in a mass-quote batch.

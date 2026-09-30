@@ -284,11 +284,11 @@ impl GodarkClient {
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
-        price: Option<f64>,
+        quantity: &str,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
     ) -> Result<OrderAck, GodarkError> {
         self.place_order_with_confirmation(
@@ -307,17 +307,21 @@ impl GodarkClient {
     }
 
     /// Place an order with optional reduce-only / post-only / STP flags.
+    ///
+    /// Pass `None` for `quantity` and set
+    /// [`PlaceOrderOptions::quote_notional`](crate::types::PlaceOrderOptions::quote_notional)
+    /// to size in quote currency. Prices and sizes are human decimal strings.
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order_with_options(
         &self,
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: impl Into<Option<f64>>,
-        price: Option<f64>,
+        quantity: Option<&str>,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
         confirmation: Confirmation,
         options: crate::types::PlaceOrderOptions,
@@ -345,11 +349,11 @@ impl GodarkClient {
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
-        price: Option<f64>,
+        quantity: &str,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
         confirmation: Confirmation,
     ) -> Result<OrderAck, GodarkError> {
@@ -357,7 +361,7 @@ impl GodarkClient {
             symbol,
             side,
             order_type,
-            quantity,
+            Some(quantity),
             price,
             time_in_force,
             aon,
@@ -376,17 +380,20 @@ impl GodarkClient {
     ///   [`GodarkError::Order`] with code + `reject_text`/`msg`.
     /// * [`Confirmation::Ack`] — return as soon as the sequencer acknowledges;
     ///   the caller must consume order updates for later rejects/fills.
+    ///
+    /// Prices and sizes are human decimal strings validated against instrument
+    /// decimals (never converted from `f64`).
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order_with_confirmation_and_options(
         &self,
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: impl Into<Option<f64>>,
-        price: Option<f64>,
+        quantity: Option<&str>,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
         confirmation: Confirmation,
         options: crate::types::PlaceOrderOptions,
@@ -477,9 +484,9 @@ impl GodarkClient {
         &self,
         order_id: &str,
         symbol: &str,
-        new_price: Option<f64>,
-        new_quantity: Option<f64>,
-        new_trigger_price: Option<f64>,
+        new_price: Option<&str>,
+        new_quantity: Option<&str>,
+        new_trigger_price: Option<&str>,
     ) -> Result<OrderAck, GodarkError> {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
@@ -587,14 +594,15 @@ impl GodarkClient {
     /// Amend / attach TP-SL on a resting order or open position.
     ///
     /// Set `order_id` to `"0"` and supply `position_side` to attach TP/SL to an open
-    /// position leg with no existing attachment. Price fields: `None` = leave unchanged,
-    /// `Some(0.0)` = clear that leg, `Some(x)` where `x > 0` = set.
+    /// position leg with no existing attachment. Price fields are decimal strings:
+    /// `None` = leave unchanged, `Some("0")` = clear that leg, `Some(x)` where
+    /// `x` is a positive decimal = set.
     pub async fn amend_tpsl(
         &self,
         symbol: &str,
         order_id: &str,
-        take_profit_price: Option<f64>,
-        stop_loss_price: Option<f64>,
+        take_profit_price: Option<&str>,
+        stop_loss_price: Option<&str>,
         position_side: Option<crate::enums::Side>,
     ) -> Result<crate::types::TpslAck, GodarkError> {
         self.ensure_ready()?;
@@ -2406,8 +2414,8 @@ mod tests {
                 "BTC-USDC-PERP",
                 Side::Buy,
                 OrderType::Limit,
-                1.0,
-                Some(100.0),
+                "1",
+                Some("100"),
                 TimeInForce::Gtc,
                 false,
                 None,
@@ -2460,7 +2468,7 @@ mod tests {
                 "BTC-USDC-PERP",
                 Side::Buy,
                 OrderType::Market,
-                0.1,
+                "0.1",
                 None,
                 TimeInForce::Ioc,
                 false,
@@ -2489,7 +2497,7 @@ mod tests {
     async fn test_modify_order_when_disconnected() {
         let client = GodarkClient::new(test_config());
         let err = client
-            .modify_order("12345", "BTC-USDC-PERP", Some(100.0), None, None)
+            .modify_order("12345", "BTC-USDC-PERP", Some("100"), None, None)
             .await
             .unwrap_err();
         assert!(matches!(err, GodarkError::Connection(_)));

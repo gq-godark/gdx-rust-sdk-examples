@@ -67,14 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(78000.0);
-    let limit_price = price - 5000.0;
+    let limit_price = format!("{:.1}", price - 5000.0);
+    let modify_price = format!("{:.1}", price - 5000.0 - 64.0);
     let ack = client
         .place_order(
             "BTC-USDC-PERP",
             Side::Buy,
             OrderType::Limit,
-            0.01,
-            Some(limit_price),
+            "0.01",
+            Some(limit_price.as_str()),
             TimeInForce::Gtc,
             false,
             None,
@@ -90,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .modify_order(
             &ack.order_id,
             "BTC-USDC-PERP",
-            Some(limit_price - 64.0),
+            Some(modify_price.as_str()),
             None,
             None,
         )

@@ -128,7 +128,10 @@ get fast incremental builds and IDE go-to-definition into the SDK source.
 | `rest_client_example` | `examples/rest_client_example.rs` | Bundle-safe REST auth, account reads, and public market-data queries |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and
-**`LIMIT`**.
+**`LIMIT`**. Place / modify / mass-quote prices and sizes are **decimal
+strings** (for example `"0.01"`, `Some("67500.5")`), not `f64`.
+
+
 
 ## Packaging for market makers
 
