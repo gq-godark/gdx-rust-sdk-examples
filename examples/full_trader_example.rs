@@ -28,12 +28,17 @@ mod dotenv;
 
 const SYMBOL: &str = "BTC-USDC-PERP";
 
-fn live_mark_price() -> f64 {
-    std::env::var("GDX_LIVE_PRICE")
-        .or_else(|_| std::env::var("GODARK_E2E_PRICE"))
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(79_000.0)
+/// Decimal-string prices for the public API (never f64).
+fn price_env(keys: &[&str], default: &str) -> String {
+    for key in keys {
+        if let Ok(v) = std::env::var(key) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+    }
+    default.to_string()
 }
 
 #[tokio::main]
@@ -158,8 +163,8 @@ async fn main() {
 
     // Drain the initial PositionsSnapshot the sequencer pushes right after subscribe.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    // BTC-USDC-PERP is symbol_id 1; capture its live mark for mass-quote ladder.
-    let mut last_mark_btc: Option<f64> = None;
+    // BTC-USDC-PERP is symbol_id 1; capture mark as a decimal string for display.
+    let mut last_mark_btc: Option<String> = None;
     while let Ok(snap) = positions_snapshot_rx.try_recv() {
         println!(
             "SNAP   source={:?}  rows={}  ts={}",
@@ -169,12 +174,8 @@ async fn main() {
         );
         for row in &snap.rows {
             if row.symbol_id == 1 {
-                if let Some(m) = row
-                    .mark_price
-                    .as_deref()
-                    .and_then(|s| s.parse::<f64>().ok())
-                {
-                    last_mark_btc = Some(m);
+                if let Some(m) = row.mark_price.as_deref().filter(|s| !s.is_empty()) {
+                    last_mark_btc = Some(m.to_string());
                 }
             }
             println!(
@@ -202,9 +203,10 @@ async fn main() {
         dotenv::print_order_error("update_leverage rejected", &e);
     }
 
-    let mark = live_mark_price();
-    let buy_px = format!("{:.1}", (mark * 0.997 * 10.0).round() / 10.0);
-    println!("Placing limit BUY @ {buy_px} (mark={mark})...");
+    let buy_px = price_env(&["GODARK_E2E_BUY_PRICE", "GDX_LIVE_PRICE", "GODARK_E2E_PRICE"], "78763");
+    let modify_px = price_env(&["GODARK_E2E_MODIFY_PRICE"], "78684");
+    let sell_px = price_env(&["GODARK_E2E_SELL_PRICE"], "81370");
+    println!("Placing limit BUY @ {buy_px}...");
     let buy_ack = match client
         .place_order(
             SYMBOL,
@@ -236,7 +238,6 @@ async fn main() {
     drain_orders(&mut order_rx, "after BUY");
 
     if let Some(ref buy_ack) = buy_ack {
-        let modify_px = format!("{:.1}", (mark * 0.996 * 10.0).round() / 10.0);
         println!("Modifying order price to {modify_px}...");
         match client
             .modify_order(
@@ -284,7 +285,6 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     drain_orders(&mut order_rx, "after MARKET BUY");
 
-    let sell_px = format!("{:.1}", (mark * 1.03 * 10.0).round() / 10.0);
     println!("Placing limit SELL @ {sell_px}...");
     match client
         .place_order_with_options(
@@ -328,26 +328,21 @@ async fn main() {
     // Pass `Some(false)` for the relaxed path, where a crossing leg takes
     // liquidity up to its limit and rests the remainder (the number of taker
     // fills is reported per leg as `fill_count`).
-    // Anchor to live BTC mark from the snapshot; fall back to GDX_BASE.
-    let base: f64 = last_mark_btc.unwrap_or_else(|| {
-        std::env::var("GDX_BASE")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(64_000.0)
-    });
-    let mk = |price: f64, qty: f64| MassQuoteLegInput {
+    // Ladder prices are decimal strings (optional GODARK_E2E_LADDER_* / mark string).
+    let _mark_hint = last_mark_btc.as_deref().unwrap_or("unknown");
+    let mk = |price: &str, qty: &str| MassQuoteLegInput {
         side: Side::Buy,
-        price: format!("{:.1}", (price * 10.0).round() / 10.0),
-        quantity: format!("{qty}"),
+        price: price.to_string(),
+        quantity: qty.to_string(),
         cancel_order_id: None,
         time_in_force: None,
         expiry_time: None,
     };
-    println!("Mass-quoting a 3-level BUY ladder (post-only), base={base:.2}...");
+    println!("Mass-quoting a 3-level BUY ladder (post-only), mark_hint={_mark_hint}...");
     let ladder = vec![
-        mk(base * (1.0 - 0.003), 0.02),
-        mk(base * (1.0 - 0.006), 0.02),
-        mk(base * (1.0 - 0.009), 0.02),
+        mk(&price_env(&["GODARK_E2E_LADDER_1"], "78763"), "0.02"),
+        mk(&price_env(&["GODARK_E2E_LADDER_2"], "78526"), "0.02"),
+        mk(&price_env(&["GODARK_E2E_LADDER_3"], "78289"), "0.02"),
     ];
     let mut resting_ids: Vec<u64> = Vec::new();
     match client.mass_quote(SYMBOL, &ladder, None).await {
@@ -394,11 +389,11 @@ async fn main() {
         drain_orders(&mut order_rx, "after CANCEL ALL");
     }
 
-    // Crossing BUY ~5% above mark (within oracle band): post_only true vs false.
-    let cross_px = base * 1.05;
+    // Crossing BUY string (within oracle band): post_only true vs false.
+    let cross_px = price_env(&["GODARK_E2E_CROSS_PRICE"], "82950");
     println!("Mass-quoting a crossing BUY with post_only=true (expect rejected/2018)...");
     match client
-        .mass_quote(SYMBOL, &[mk(cross_px, 0.001)], Some(true))
+        .mass_quote(SYMBOL, &[mk(&cross_px, "0.001")], Some(true))
         .await
     {
         Ok(mq) => {
@@ -417,7 +412,7 @@ async fn main() {
     // Crossing BUY with post_only=false (relaxed): leg takes liquidity, fills>0.
     println!("Mass-quoting a crossing BUY with post_only=false (expect filled, fills>0)...");
     match client
-        .mass_quote(SYMBOL, &[mk(cross_px, 0.003)], Some(false))
+        .mass_quote(SYMBOL, &[mk(&cross_px, "0.003")], Some(false))
         .await
     {
         Ok(mq) => {

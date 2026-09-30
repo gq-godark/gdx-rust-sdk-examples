@@ -23,10 +23,10 @@ mod dotenv;
 
 const SYMBOL: &str = "BTC-USDC-PERP";
 
-fn live_mark_price() -> f64 {
+/// Decimal-string limit price (override with GODARK_E2E_PRICE). Never f64.
+fn limit_price() -> String {
     dotenv::env_first(&["GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE"])
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(79_000.0)
+        .unwrap_or_else(|| "81370".into())
 }
 
 #[tokio::main]
@@ -74,8 +74,7 @@ async fn main() -> Result<(), GodarkError> {
     // Book confirmation waits on private order updates; subscribe first.
     client.subscribe(&["orders"]).await?;
 
-    let mark = live_mark_price();
-    let sell_px = format!("{:.1}", (mark * 1.03 * 10.0).round() / 10.0);
+    let sell_px = limit_price();
     match client
         .place_order_with_options(
             SYMBOL,
@@ -97,7 +96,7 @@ async fn main() -> Result<(), GodarkError> {
     {
         Ok(ack) => {
             println!(
-                "Place OK -- order_id={} (limit SELL @ {sell_px}, mark={mark})",
+                "Place OK -- order_id={} (limit SELL @ {sell_px})",
                 ack.order_id
             );
             // Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).

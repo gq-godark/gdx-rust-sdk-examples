@@ -4,7 +4,8 @@ This package provides the GoDark Rust SDK and minimal examples for encrypted
 darkpool trading.
 
 Supported order types in this distribution: `MARKET`, `LIMIT`. Prices and
-sizes are decimal strings (for example `"0.01"`), not `f64`.
+sizes on the public trading API are **decimal strings only** (for example
+`"0.01"`, `Some("68000")`) — not `f64` / `f32` / integers.
 
 ## Package contents
 

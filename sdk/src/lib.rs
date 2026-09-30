@@ -63,7 +63,7 @@ pub use client::GodarkClient;
 pub use config::{
     resolve_passphrase, Environment, GodarkConfig, GodarkConfigBuilder, TransportConfig,
 };
-pub use decimals::{format_decimal, normalize_decimal, parse_decimal, InstrumentDecimals};
+pub use decimals::{normalize_decimal, InstrumentDecimals};
 pub use enums::{
     CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, StpMode, TimeInForce,
 };

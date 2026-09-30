@@ -93,7 +93,8 @@ WebSocket commands:
   legs or ids)
 
 Prices and sizes on place / modify / mass-quote / batch-modify / TP-SL are
-human **decimal strings** (`&str` / `String`), not `f64`.
+human **decimal strings only** (`&str` / `String`) — not `f64` / `f32` /
+integers. Invalid strings are rejected before sealing.
 `PlaceOrderOptions` includes `reduce_only`, `post_only`, `stp_mode`,
 `quote_notional` (decimal string), `peg_offset_bps`, `trigger_price`,
 `take_profit_price`, `stop_loss_price`, and `slippage_bps`. Slippage is in

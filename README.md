@@ -128,8 +128,10 @@ get fast incremental builds and IDE go-to-definition into the SDK source.
 | `rest_client_example` | `examples/rest_client_example.rs` | Bundle-safe REST auth, account reads, and public market-data queries |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and
-**`LIMIT`**. Place / modify / mass-quote prices and sizes are **decimal
-strings** (for example `"0.01"`, `Some("67500.5")`), not `f64`.
+**`LIMIT`**. Place / modify / mass-quote / batch-modify / TP-SL /
+`quote_notional` / `min_fill_size` / trigger prices and sizes are **decimal
+strings only** (for example `"0.01"`, `Some("67500.5")`). There is no public
+`f64` / `f32` / integer price or size input; invalid strings are rejected.
 
 
 

@@ -105,32 +105,27 @@ pub async fn issue_ws_token(
         })
 }
 
+/// Human decimal price string for examples (override with `GODARK_E2E_PRICE`).
 #[allow(dead_code)]
-pub fn sample_mark_price() -> f64 {
+pub fn sample_mark_price() -> String {
     if let Some(raw) = env_first_many(&["GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE"]) {
-        if let Ok(v) = raw.parse::<f64>() {
-            return v;
-        }
+        return raw;
     }
     match env_first("GODARK_SYMBOL", "GDX_SYMBOL")
         .unwrap_or_else(|| "BTC-USDC-PERP".into())
         .to_uppercase()
         .as_str()
     {
-        s if s.starts_with("ETH") => 1930.0,
-        s if s.starts_with("SOL") => 180.0,
-        _ => 68_000.0,
+        s if s.starts_with("ETH") => "1930".into(),
+        s if s.starts_with("SOL") => "180".into(),
+        _ => "68000".into(),
     }
 }
 
+/// Human decimal quantity string for examples (override with `GODARK_E2E_QTY`).
 #[allow(dead_code)]
-pub fn sample_qty() -> f64 {
-    if let Some(raw) = env_first_many(&["GODARK_E2E_QTY", "GDX_E2E_QTY"]) {
-        if let Ok(v) = raw.parse::<f64>() {
-            return v;
-        }
-    }
-    0.01
+pub fn sample_qty() -> String {
+    env_first_many(&["GODARK_E2E_QTY", "GDX_E2E_QTY"]).unwrap_or_else(|| "0.01".into())
 }
 
 pub fn apply_hpke_pin(mut builder: GodarkConfigBuilder) -> GodarkConfigBuilder {

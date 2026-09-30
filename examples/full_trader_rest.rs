@@ -63,12 +63,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let price: f64 = std::env::var("GDX_LIVE_PRICE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(78000.0);
-    let limit_price = format!("{:.1}", price - 5000.0);
-    let modify_price = format!("{:.1}", price - 5000.0 - 64.0);
+    // Prices are decimal strings only.
+    let limit_price = std::env::var("GODARK_E2E_PRICE")
+        .or_else(|_| std::env::var("GDX_LIVE_PRICE"))
+        .unwrap_or_else(|_| "73000".into());
+    let modify_price = std::env::var("GODARK_E2E_MODIFY_PRICE")
+        .unwrap_or_else(|_| "72936".into());
     let ack = client
         .place_order(
             "BTC-USDC-PERP",

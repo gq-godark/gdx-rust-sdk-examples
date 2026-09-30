@@ -1534,6 +1534,149 @@ mod tests {
     }
 
     #[test]
+    fn test_build_place_order_rejects_invalid_decimal_strings() {
+        let tight = InstrumentDecimals {
+            price_decimals: 1,
+            quantity_decimals: 3,
+        };
+        for (qty, px, label) in [
+            (Some("1e2"), Some("100"), "qty exponent"),
+            (Some("-1"), Some("100"), "qty negative"),
+            (Some("abc"), Some("100"), "qty non-numeric"),
+            (Some("0.01"), Some("100.55"), "price over precision"),
+            (Some("0.0001"), Some("100"), "qty over precision"),
+            (Some(""), Some("100"), "empty qty"),
+        ] {
+            let err = build_place_order_proto(
+                42,
+                Side::Buy,
+                OrderType::Limit,
+                qty,
+                &TEST_ACCOUNT,
+                px,
+                TimeInForce::Gtc,
+                false,
+                None,
+                None,
+                &TEST_CORR,
+                PlaceOrderOptions::default(),
+                0,
+                tight,
+            )
+            .expect_err(label);
+            assert!(
+                matches!(err, crate::error::GodarkError::Config(_)),
+                "{label}: {err}"
+            );
+        }
+
+        let bad_opts = PlaceOrderOptions {
+            quote_notional: Some("1e3".into()),
+            trigger_price: Some("-1".into()),
+            take_profit_price: Some("NaN".into()),
+            stop_loss_price: Some("90.123".into()),
+            ..Default::default()
+        };
+        assert!(build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Limit,
+            None,
+            &TEST_ACCOUNT,
+            Some("100"),
+            TimeInForce::Gtc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            bad_opts,
+            0,
+            tight,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_build_modify_mass_quote_tpsl_reject_bad_strings() {
+        let d = InstrumentDecimals {
+            price_decimals: 1,
+            quantity_decimals: 2,
+        };
+        assert!(build_modify_order_proto(
+            1,
+            &TEST_ACCOUNT,
+            1,
+            Some("100.12"),
+            None,
+            None,
+            &TEST_CORR,
+            d,
+        )
+        .is_err());
+        assert!(build_modify_order_proto(
+            1,
+            &TEST_ACCOUNT,
+            1,
+            None,
+            Some("0.001"),
+            None,
+            &TEST_CORR,
+            d,
+        )
+        .is_err());
+        assert!(build_modify_order_proto(
+            1,
+            &TEST_ACCOUNT,
+            1,
+            None,
+            None,
+            Some("1e2"),
+            &TEST_CORR,
+            d,
+        )
+        .is_err());
+        assert!(build_amend_tpsl_proto(
+            &TEST_ACCOUNT,
+            1,
+            &TEST_CORR,
+            Some("bad"),
+            None,
+            None,
+            None,
+            d,
+        )
+        .is_err());
+        assert!(build_mass_quote_proto(
+            1,
+            &TEST_ACCOUNT,
+            &[crate::types::MassQuoteLegInput {
+                side: Side::Buy,
+                price: "1.23".into(),
+                quantity: "1".into(),
+                cancel_order_id: None,
+                time_in_force: None,
+                expiry_time: None,
+            }],
+            &TEST_CORR,
+            None,
+            d,
+        )
+        .is_err());
+        assert!(build_batch_modify_proto(
+            1,
+            &TEST_ACCOUNT,
+            &[crate::types::BatchModifyLegInput {
+                order_id: 1,
+                new_price: Some("-5".into()),
+                new_quantity: None,
+            }],
+            &TEST_CORR,
+            d,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn test_parse_cancel_all_ack_roundtrip() {
         let ack = sequencer::CancelAllAck {
             node_id: 1,

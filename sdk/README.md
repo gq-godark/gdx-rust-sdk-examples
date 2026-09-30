@@ -79,11 +79,13 @@ or `GDX_HPKE_STATIC_PUBLIC_KEY`.
 Balances come from sequencer `BalanceUpdateMessage` / encrypted
 `balance_and_position` (trading collateral `balance_raw`).
 
-Prices and sizes on place / modify / mass-quote / batch-modify / TP-SL are
-**decimal strings** (for example `"0.01"`, `Some("67500.5")`), not `f64`.
-`place_order_with_options` also accepts `PlaceOrderOptions::slippage_bps` for
-market and stop-market orders (max walk from mark in basis points; `None` →
-venue limit) and `quote_notional` as a decimal string instead of base quantity.
+Prices and sizes on place / modify / mass-quote / batch-modify / TP-SL /
+`quote_notional` / `min_fill_size` / triggers are **decimal strings only**
+(for example `"0.01"`, `Some("67500.5")`). There is no public `f64` / `f32` /
+integer price or size input; invalid strings are rejected by
+`normalize_decimal`. `place_order_with_options` also accepts
+`PlaceOrderOptions::slippage_bps` for market and stop-market orders (max walk
+from mark in basis points; `None` → venue limit).
 
 ## REST
 
