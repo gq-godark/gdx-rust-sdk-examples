@@ -3,7 +3,8 @@
 This package provides the GoDark Rust SDK and minimal examples for encrypted
 darkpool trading.
 
-Supported order types in this distribution: `MARKET`, `LIMIT`.
+Supported order types in this distribution: `MARKET`, `LIMIT`. Prices and
+sizes are decimal strings (for example `"0.01"`), not `f64`.
 
 ## Package contents
 
