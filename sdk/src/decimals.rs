@@ -126,22 +126,8 @@ mod tests {
     #[test]
     fn normalize_rejects_invalid_strings() {
         for bad in [
-            "",
-            "   ",
-            "-1.0",
-            "-",
-            "+",
-            "1e2",
-            "1E-3",
-            "abc",
-            "1.2.3",
-            "1..2",
-            ".5",
-            "1,25",
-            "0x10",
-            "NaN",
-            "inf",
-            "1 2",
+            "", "   ", "-1.0", "-", "+", "1e2", "1E-3", "abc", "1.2.3", "1..2", ".5", "1,25",
+            "0x10", "NaN", "inf", "1 2",
         ] {
             assert!(
                 normalize_decimal(bad, 8).is_err(),
@@ -157,7 +143,9 @@ mod tests {
             quantity_decimals: 3,
         };
         assert_eq!(
-            normalize_opt_price(Some("100.50"), d).unwrap_err().to_string(),
+            normalize_opt_price(Some("100.50"), d)
+                .unwrap_err()
+                .to_string(),
             normalize_decimal("100.50", 1).unwrap_err().to_string()
         );
         assert_eq!(
@@ -167,9 +155,7 @@ mod tests {
         assert_eq!(normalize_opt_price(None, d).unwrap(), None);
         assert!(normalize_opt_price(Some("100.55"), d).is_err());
         assert_eq!(
-            normalize_opt_quantity(Some("0.010"), d)
-                .unwrap()
-                .as_deref(),
+            normalize_opt_quantity(Some("0.010"), d).unwrap().as_deref(),
             Some("0.01")
         );
         assert!(normalize_opt_quantity(Some("0.0001"), d).is_err());
