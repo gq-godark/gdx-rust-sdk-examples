@@ -10,10 +10,10 @@ use hpke::{
     aead::AesGcm256, kdf::HkdfSha256, kem::X25519HkdfSha256, setup_receiver, setup_sender,
     Deserializable, Kem as KemTrait, OpModeR, OpModeS, Serializable,
 };
-use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::GodarkError;
+use crate::types::AccountId;
 
 pub const KEY_LEN: usize = 32;
 pub const ENCAPPED_KEY_LEN: usize = 32;
@@ -29,20 +29,20 @@ type Kem = X25519HkdfSha256;
 type Kdf = HkdfSha256;
 type AeadAlg = AesGcm256;
 
-/// `gdx-hpke/v1\0 ‖ user_uuid ‖ conn_id_be`
-pub fn info_for_conn(user_uuid: Uuid, conn_id: u64) -> Vec<u8> {
-    let mut info = Vec::with_capacity(INFO_DOMAIN.len() + 16 + 8);
+/// `gdx-hpke/v1\0 ‖ account ‖ conn_id_be`
+pub fn info_for_conn(account: AccountId, conn_id: u64) -> Vec<u8> {
+    let mut info = Vec::with_capacity(INFO_DOMAIN.len() + AccountId::LEN + 8);
     info.extend_from_slice(INFO_DOMAIN);
-    info.extend_from_slice(user_uuid.as_bytes());
+    info.extend_from_slice(account.as_bytes());
     info.extend_from_slice(&conn_id.to_be_bytes());
     info
 }
 
-/// `gdx-hpke/v1/rest\0 ‖ user_uuid ‖ request_id_be`
-pub fn info_for_rest_request(user_uuid: Uuid, request_id: u64) -> Vec<u8> {
-    let mut info = Vec::with_capacity(INFO_DOMAIN_REST.len() + 16 + 8);
+/// `gdx-hpke/v1/rest\0 ‖ account ‖ request_id_be`
+pub fn info_for_rest_request(account: AccountId, request_id: u64) -> Vec<u8> {
+    let mut info = Vec::with_capacity(INFO_DOMAIN_REST.len() + AccountId::LEN + 8);
     info.extend_from_slice(INFO_DOMAIN_REST);
-    info.extend_from_slice(user_uuid.as_bytes());
+    info.extend_from_slice(account.as_bytes());
     info.extend_from_slice(&request_id.to_be_bytes());
     info
 }
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn setup_open_roundtrip_and_seal() {
         let seq = StaticKeyPair::generate().unwrap();
-        let user = Uuid::from_u128(7);
+        let user = AccountId::from_bytes([7; AccountId::LEN]);
         let info = info_for_conn(user, 42);
         let (enc, client) = setup_session(seq.public_key(), &info).unwrap();
         assert_eq!(enc.len(), ENCAPPED_KEY_LEN);

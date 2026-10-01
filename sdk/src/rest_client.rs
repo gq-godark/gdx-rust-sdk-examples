@@ -3,7 +3,9 @@
 //! 1. `POST /api/v1/auth/token` (RFC 6749 client credentials).
 //! 2. Encrypted orders: one-shot HPKE per request (`encapped_key` + `request_id`,
 //!    `OrderHeader.conn_id = 0`) matching gdx-edge / gdx-sequencer.
-//! 3. Plaintext `GET /api/v1/orders/{order_id}` for terminal-status polling.
+//! 3. `GET /api/v1/orders/{order_id}` is a Zone-A pointer. Status is filled from
+//!    the decrypted open-orders snapshot, a local terminal-ack cache, or
+//!    plaintext `GET /api/v1/orders/history`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +16,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::config::{resolve_passphrase, Environment};
-use crate::enums::{OrderType, Side, TimeInForce};
+use crate::enums::{OrderStatus, OrderType, Side, TimeInForce};
 use crate::error::GodarkError;
 use crate::hpke::{self, parse_pinned_static_public_key};
 use crate::order_error_code::{make_order_error_from_code, make_order_error_from_json};
@@ -22,8 +24,8 @@ use crate::proto_bridge;
 use crate::rest_transport::RestTransport;
 use crate::session::CryptoSession;
 use crate::types::{
-    AccountMarginUpdate, LeverageSettings, MeProfile, OpenOrdersSnapshot, OrderAck,
-    PositionsSnapshot,
+    AccountId, AccountMarginUpdate, LeverageSettings, MeProfile, OpenOrderRow, OpenOrdersSnapshot,
+    OrderAck, PositionsSnapshot,
 };
 
 const DEFAULT_SYMBOLS_JSON: &str = include_str!("../shared/symbols.json");
@@ -33,15 +35,30 @@ const DEFAULT_SYMBOLS_JSON: &str = include_str!("../shared/symbols.json");
 /// REST clients (the localnet edge serves both protocols on the same
 /// listener; matches the C++ / Python SDKs).
 fn derive_http_from_ws(url: &str) -> Option<String> {
-    if let Some(rest) = url.strip_prefix("wss://") {
-        Some(format!("https://{rest}"))
+    let rewritten = if let Some(rest) = url.strip_prefix("wss://") {
+        format!("https://{rest}")
     } else if let Some(rest) = url.strip_prefix("ws://") {
-        Some(format!("http://{rest}"))
+        format!("http://{rest}")
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        Some(url.to_string())
+        url.to_string()
     } else {
-        None
+        return None;
+    };
+    Some(strip_ws_suffix(&rewritten))
+}
+
+/// Drop a trailing `/ws/v1` or `/ws` so a WebSocket URL can mint REST tokens
+/// against the same origin (`https://host/api/v1/...`, not `https://host/ws/v1/api/...`).
+fn strip_ws_suffix(url: &str) -> String {
+    let cut = url.split(['?', '#']).next().unwrap_or(url);
+    let trimmed = cut.trim_end_matches('/');
+    if let Some(idx) = trimmed.find("/ws/v1") {
+        return trimmed[..idx].to_string();
     }
+    if let Some(stripped) = trimmed.strip_suffix("/ws") {
+        return stripped.to_string();
+    }
+    trimmed.to_string()
 }
 
 /// Resolve the REST base URL by checking, in order:
@@ -56,9 +73,12 @@ pub(crate) fn resolve_rest_base_url(explicit: Option<String>) -> String {
 
 fn resolve_rest_base_url_with_default(explicit: Option<String>, default: &str) -> String {
     if let Some(url) = explicit {
-        let trimmed = url.trim_end_matches('/').to_string();
+        let trimmed = url.trim().trim_end_matches('/');
         if !trimmed.is_empty() {
-            return trimmed;
+            if let Some(http_url) = derive_http_from_ws(trimmed) {
+                return http_url.trim_end_matches('/').to_string();
+            }
+            return trimmed.to_string();
         }
     }
     for key in &["GODARK_REST_URL", "GDX_REST_URL"] {
@@ -177,7 +197,7 @@ pub struct GodarkRestClientBuilder {
     rest_base_url: Option<String>,
     /// When unset, inferred from the resolved REST base URL for HPKE pin selection.
     environment: Option<Environment>,
-    user_uuid: Option<Uuid>,
+    account: Option<AccountId>,
     hpke_static_public_key_hex: Option<String>,
     symbol_map: HashMap<String, u64>,
     explicit_symbol_map: bool,
@@ -194,7 +214,7 @@ impl GodarkRestClientBuilder {
             passphrase: None,
             rest_base_url: None,
             environment: None,
-            user_uuid: None,
+            account: None,
             hpke_static_public_key_hex: None,
             symbol_map,
             explicit_symbol_map: false,
@@ -234,9 +254,9 @@ impl GodarkRestClientBuilder {
         self
     }
 
-    /// Fallback user UUID when the edge auth response omits `user_uuid` (e.g. localnet).
-    pub fn user_uuid(mut self, id: impl Into<String>) -> Self {
-        self.user_uuid = Uuid::parse_str(&id.into()).ok();
+    /// Fallback account when the edge auth response omits `account` (e.g. localnet).
+    pub fn account(mut self, id: impl Into<String>) -> Self {
+        self.account = id.into().parse().ok();
         self
     }
 
@@ -298,11 +318,11 @@ impl GodarkRestClientBuilder {
                 .rest_base_url(),
         );
 
-        let user_uuid = self.user_uuid.or_else(|| {
-            for k in &["GODARK_USER_UUID", "GDX_USER_UUID"] {
+        let account = self.account.or_else(|| {
+            for k in &["GODARK_ACCOUNT", "GDX_ACCOUNT"] {
                 if let Ok(v) = std::env::var(k) {
-                    if let Ok(u) = Uuid::parse_str(v.trim()) {
-                        return Some(u);
+                    if let Ok(account) = v.trim().parse() {
+                        return Some(account);
                     }
                 }
             }
@@ -326,10 +346,12 @@ impl GodarkRestClientBuilder {
             legacy_auth_token,
             symbol_map: self.symbol_map,
             explicit_symbol_map: self.explicit_symbol_map,
+            instrument_decimals: crate::instruments::offline_instrument_decimals(),
             bearer: None,
-            user_uuid,
+            account,
             token_scope: None,
             local_coid_index: HashMap::new(),
+            order_status_cache: HashMap::new(),
         })
     }
 }
@@ -352,11 +374,14 @@ pub struct GodarkRestClient {
     legacy_auth_token: Option<String>,
     symbol_map: HashMap<String, u64>,
     explicit_symbol_map: bool,
+    instrument_decimals: HashMap<u64, crate::decimals::InstrumentDecimals>,
     bearer: Option<String>,
-    user_uuid: Option<Uuid>,
+    account: Option<AccountId>,
     token_scope: Option<String>,
     /// Populated after decrypting successful place ACKs; drives cancel-by-coid without sentinel bodies.
     local_coid_index: HashMap<String, String>,
+    /// Terminal statuses learned from cancel acks and decrypted reads.
+    order_status_cache: HashMap<String, String>,
 }
 
 impl GodarkRestClient {
@@ -364,8 +389,8 @@ impl GodarkRestClient {
         GodarkRestClientBuilder::new()
     }
 
-    pub fn user_uuid(&self) -> Option<Uuid> {
-        self.user_uuid
+    pub fn account(&self) -> Option<AccountId> {
+        self.account
     }
 
     pub fn token_scope(&self) -> Option<&str> {
@@ -381,10 +406,16 @@ impl GodarkRestClient {
         })
     }
 
-    fn current_user_uuid(&self) -> Result<Uuid, GodarkError> {
-        self.user_uuid.ok_or_else(|| {
-            GodarkError::Session("user_uuid missing — set via builder or env".into())
-        })
+    fn resolve_decimals(&self, symbol_id: u64) -> crate::decimals::InstrumentDecimals {
+        self.instrument_decimals
+            .get(&symbol_id)
+            .copied()
+            .unwrap_or(crate::decimals::InstrumentDecimals::FALLBACK)
+    }
+
+    fn current_account(&self) -> Result<AccountId, GodarkError> {
+        self.account
+            .ok_or_else(|| GodarkError::Session("account missing — set via builder or env".into()))
     }
 
     fn current_bearer(&self) -> Result<&str, GodarkError> {
@@ -396,8 +427,9 @@ impl GodarkRestClient {
     /// `auth/token` → optional edge instruments fetch. HPKE is one-shot per order.
     pub async fn connect(&mut self) -> Result<(), GodarkError> {
         if !self.explicit_symbol_map {
-            self.symbol_map =
-                crate::instruments::load_symbol_map_from_edge(&self.rest_base_url).await;
+            let catalog = crate::instruments::load_catalog_from_edge(&self.rest_base_url).await;
+            self.symbol_map = catalog.symbol_map;
+            self.instrument_decimals = catalog.decimals;
         }
         let auth_data = if let (Some(id), Some(sec), Some(pp)) =
             (&self.api_key_id, &self.api_secret, &self.passphrase)
@@ -423,19 +455,19 @@ impl GodarkRestClient {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let mut resolved: Option<Uuid> = auth_data
-            .get("user_uuid")
+        let mut resolved: Option<AccountId> = auth_data
+            .get("account")
             .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok());
+            .and_then(|s| s.parse().ok());
         if resolved.is_none() {
-            resolved = crate::access_token::user_uuid_from_access_token_jwt(&bearer);
+            resolved = crate::access_token::account_from_access_token_jwt(&bearer);
         }
         if resolved.is_none() {
-            resolved = self.user_uuid;
+            resolved = self.account;
         }
-        self.user_uuid = Some(resolved.ok_or_else(|| {
+        self.account = Some(resolved.ok_or_else(|| {
             GodarkError::Session(
-                "REST auth succeeded but user identity missing; JWT sub and fallback UUID both absent"
+                "REST auth succeeded but account missing; JWT sub and fallback account both absent"
                     .into(),
             )
         })?);
@@ -452,28 +484,71 @@ impl GodarkRestClient {
         self.bearer = None;
         self.token_scope = None;
         self.local_coid_index.clear();
+        self.order_status_cache.clear();
         Ok(())
     }
 
-    /// Place an encrypted order. `client_order_id` is sent additively (cleartext) only
-    /// for the edge's `client_order_id → order_id` lookup index — it is also embedded
-    /// inside the encrypted `OrderHeader` AAD so the sequencer can dedup.
+    /// Place an encrypted order.
+    ///
+    /// `client_order_id`, when set, is forwarded as cleartext on the REST body.
+    /// It is not registered with the edge: place correlation is armed only for
+    /// WebSocket Place, so `POST /api/v1/orders/_register_coid` after a REST
+    /// place returns 400 `unknown place correlation`. Register from
+    /// [`GodarkClient`](crate::GodarkClient) with
+    /// [`PlaceOrderOptions::client_order_id`](crate::types::PlaceOrderOptions::client_order_id).
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order(
         &mut self,
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
-        price: Option<f64>,
+        quantity: &str,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
         client_order_id: Option<String>,
     ) -> Result<OrderAck, GodarkError> {
+        self.place_order_with_options(
+            symbol,
+            side,
+            order_type,
+            Some(quantity),
+            price,
+            time_in_force,
+            aon,
+            min_fill_size,
+            expiry_time,
+            client_order_id,
+            crate::types::PlaceOrderOptions::default(),
+        )
+        .await
+    }
+
+    /// Place an encrypted order with optional flags or quote-notional sizing.
+    ///
+    /// Pass `None` for `quantity` and set
+    /// [`PlaceOrderOptions::quote_notional`](crate::types::PlaceOrderOptions::quote_notional)
+    /// to size in quote currency. Exactly one sizing field must be set. Prices
+    /// and sizes are human decimal strings (not `f64`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn place_order_with_options(
+        &mut self,
+        symbol: &str,
+        side: Side,
+        order_type: OrderType,
+        quantity: Option<&str>,
+        price: Option<&str>,
+        time_in_force: TimeInForce,
+        aon: bool,
+        min_fill_size: Option<&str>,
+        expiry_time: Option<u64>,
+        client_order_id: Option<String>,
+        options: crate::types::PlaceOrderOptions,
+    ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
 
         let plaintext = proto_bridge::build_place_order_proto(
@@ -488,43 +563,21 @@ impl GodarkRestClient {
             min_fill_size,
             expiry_time,
             &corr_id,
-            crate::types::PlaceOrderOptions::default(),
+            options,
             timestamp_ns(),
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
 
-        let coid_for_register = client_order_id.clone();
         let ack = self
             .send_encrypted_order(
                 EncryptedCall::new("place", symbol_id, &plaintext, &corr_id)
                     .client_order_id(client_order_id),
             )
             .await?;
-
-        // Phase B (Zone A): edge stays stateless and never decrypts. After we
-        // decrypt the encrypted place ACK locally we must populate the edge's
-        // `(client_order_id → order_id)` index so subsequent coid-based
-        // resolution works (`cancel_order_by_client_id`, `?client_order_id=`).
-        // Registration failures must NEVER bubble up — they don't invalidate
-        // the placed order.
-        if let Some(coid) = coid_for_register {
-            if ack.success && !ack.order_id.is_empty() {
-                self.local_coid_index
-                    .insert(coid.clone(), ack.order_id.clone());
-                let bearer = self.current_bearer()?.to_string();
-                if let Err(err) = self
-                    .http
-                    .register_client_order_mapping(&bearer, &coid, &ack.order_id)
-                    .await
-                {
-                    tracing::warn!(
-                        client_order_id = %coid,
-                        order_id = %ack.order_id,
-                        error = %err,
-                        "register_client_order_mapping failed; coid lookups may not resolve until next place"
-                    );
-                }
-            }
-        }
+        // Leave `local_coid_index` empty. A process-local insert is not an
+        // edge mapping, and REST place cannot register one (no armed
+        // correlation). Callers resolve via `GET /api/v1/orders?client_order_id=`
+        // after a WebSocket place has registered the id.
         Ok(ack)
     }
 
@@ -534,18 +587,23 @@ impl GodarkRestClient {
         symbol: &str,
     ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let oid: u64 = order_id
             .parse()
             .map_err(|_| GodarkError::Config(format!("Invalid order_id: {order_id}")))?;
         let plaintext =
             proto_bridge::build_cancel_order_proto(oid, uuid.as_bytes(), symbol_id, &corr_id);
-        self.send_encrypted_order(
-            EncryptedCall::new("cancel", symbol_id, &plaintext, &corr_id)
-                .route(EncryptedRoute::DeletePathId(order_id.to_string())),
-        )
-        .await
+        let ack = self
+            .send_encrypted_order(
+                EncryptedCall::new("cancel", symbol_id, &plaintext, &corr_id)
+                    .route(EncryptedRoute::DeletePathId(order_id.to_string())),
+            )
+            .await?;
+        if ack.success {
+            self.remember_order_status(order_id, "CANCELLED");
+        }
+        Ok(ack)
     }
 
     /// Resolves `(client_order_id → order_id)` via local decrypt cache or
@@ -566,6 +624,7 @@ impl GodarkRestClient {
         let oid = resolve_order_id_from_lookup(&row).ok_or_else(|| GodarkError::Order {
             message: "unknown client_order_id".into(),
             error_code: None,
+            user_message: None,
         })?;
         self.local_coid_index
             .insert(client_order_id.to_string(), oid.clone());
@@ -576,12 +635,12 @@ impl GodarkRestClient {
         &mut self,
         order_id: &str,
         symbol: &str,
-        new_price: Option<f64>,
-        new_quantity: Option<f64>,
-        new_trigger_price: Option<f64>,
+        new_price: Option<&str>,
+        new_quantity: Option<&str>,
+        new_trigger_price: Option<&str>,
     ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let oid: u64 = order_id
             .parse()
@@ -594,7 +653,8 @@ impl GodarkRestClient {
             new_quantity,
             new_trigger_price,
             &corr_id,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
         self.send_encrypted_order(
             EncryptedCall::new("modify", symbol_id, &plaintext, &corr_id)
                 .route(EncryptedRoute::PatchPathId(order_id.to_string())),
@@ -602,14 +662,39 @@ impl GodarkRestClient {
         .await
     }
 
-    pub async fn get_order(&self, order_id: &str) -> Result<Value, GodarkError> {
-        let bearer = self.current_bearer()?;
-        self.http.get_order(bearer, order_id).await
+    /// Read one order.
+    ///
+    /// Hosted edge returns `{encrypted: true, order_id}` (or HTTP 403 once the
+    /// ticket is terminal). Status is filled from the decrypted open-orders
+    /// book, then a local terminal-ack cache, then order history.
+    pub async fn get_order(&mut self, order_id: &str) -> Result<Value, GodarkError> {
+        let bearer = self.current_bearer()?.to_string();
+        let raw = match self.http.get_order(&bearer, order_id).await {
+            Ok(row) => row,
+            Err(err) if order_lookup_miss(&err) => {
+                json!({ "encrypted": true, "order_id": order_id })
+            }
+            Err(err) => return Err(err),
+        };
+        self.with_decrypted_status(raw, order_id).await
     }
 
-    pub async fn get_order_by_client_id(&self, coid: &str) -> Result<Value, GodarkError> {
-        let bearer = self.current_bearer()?;
-        self.http.get_order_by_client_order_id(bearer, coid).await
+    pub async fn get_order_by_client_id(&mut self, coid: &str) -> Result<Value, GodarkError> {
+        if let Some(local) = self.local_coid_index.get(coid).cloned() {
+            let mut row = self.get_order(&local).await?;
+            if let Some(obj) = row.as_object_mut() {
+                obj.entry("client_order_id".to_string())
+                    .or_insert_with(|| Value::String(coid.to_string()));
+            }
+            return Ok(row);
+        }
+        let bearer = self.current_bearer()?.to_string();
+        let raw = self
+            .http
+            .get_order_by_client_order_id(&bearer, coid)
+            .await?;
+        let oid = raw.get("order_id").map(json_id_string).unwrap_or_default();
+        self.with_decrypted_status(raw, &oid).await
     }
 
     /// Fetch cached per-symbol leverage settings via `GET /api/v1/leverage`.
@@ -627,7 +712,7 @@ impl GodarkRestClient {
         leverage: u32,
     ) -> Result<OrderAck, GodarkError> {
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let lev = leverage.max(1);
         let plaintext =
@@ -698,7 +783,7 @@ impl GodarkRestClient {
             ));
         }
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let plaintext = proto_bridge::build_mass_quote_proto(
             symbol_id,
@@ -706,7 +791,8 @@ impl GodarkRestClient {
             legs,
             &corr_id,
             post_only,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
         let (sealed, raw) = self
             .send_encrypted(
                 EncryptedCall::new("mass_quote", symbol_id, &plaintext, &corr_id)
@@ -731,7 +817,7 @@ impl GodarkRestClient {
             ));
         }
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let plaintext =
             proto_bridge::build_batch_cancel_proto(symbol_id, uuid.as_bytes(), order_ids, &corr_id);
@@ -761,10 +847,15 @@ impl GodarkRestClient {
             ));
         }
         let symbol_id = self.resolve_symbol(symbol)?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let plaintext =
-            proto_bridge::build_batch_modify_proto(symbol_id, uuid.as_bytes(), legs, &corr_id);
+        let plaintext = proto_bridge::build_batch_modify_proto(
+            symbol_id,
+            uuid.as_bytes(),
+            legs,
+            &corr_id,
+            self.resolve_decimals(symbol_id),
+        )?;
         let (sealed, raw) = self
             .send_encrypted(EncryptedCall::new(
                 "batch_modify",
@@ -800,7 +891,7 @@ impl GodarkRestClient {
         build: fn(&[u8], &[u8]) -> Vec<u8>,
         path: &'static str,
     ) -> Result<proto_bridge::NodeResponseKind, GodarkError> {
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let plaintext = build(uuid.as_bytes(), &corr_id);
         // Sequencer ingress admission keys off header `symbol_id` gates. Symbol 0
@@ -823,7 +914,7 @@ impl GodarkRestClient {
     /// Fetch browser session profile from `GET /api/v1/auth/me`.
     ///
     /// Requires a **session** JWT (Dynamic login). API-key tokens from
-    /// `auth/token` are rejected; use [`Self::user_uuid()`] after [`Self::connect`]
+    /// `auth/token` are rejected; use [`Self::account()`] after [`Self::connect`]
     /// instead (parsed from the access JWT `sub` claim).
     pub async fn get_me(&mut self) -> Result<MeProfile, GodarkError> {
         let bearer = self.current_bearer()?.to_string();
@@ -834,7 +925,7 @@ impl GodarkRestClient {
 
     /// Poll [`Self::get_order`] until status is one of `FILLED`, `CANCELLED`, `REJECTED`.
     pub async fn await_terminal_status(
-        &self,
+        &mut self,
         order_id: &str,
         timeout: Duration,
     ) -> Result<Value, GodarkError> {
@@ -854,6 +945,106 @@ impl GodarkRestClient {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+    }
+
+    fn remember_order_status(&mut self, order_id: &str, status: &str) {
+        let normalized = normalize_order_status(status);
+        if !order_id.is_empty() && !normalized.is_empty() {
+            self.order_status_cache
+                .insert(order_id.to_string(), normalized);
+        }
+    }
+
+    /// Fill `status` for a Zone-A `{encrypted, hint, order_id}` pointer.
+    async fn with_decrypted_status(
+        &mut self,
+        mut raw: Value,
+        order_id: &str,
+    ) -> Result<Value, GodarkError> {
+        let oid = raw
+            .get("order_id")
+            .map(json_id_string)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| order_id.to_string());
+        let existing = raw
+            .get("status")
+            .and_then(Value::as_str)
+            .or_else(|| raw.get("order_status").and_then(Value::as_str))
+            .map(normalize_order_status)
+            .unwrap_or_default();
+        if !existing.is_empty() {
+            if !oid.is_empty() {
+                self.remember_order_status(&oid, &existing);
+            }
+            if raw.get("status").and_then(Value::as_str) != Some(existing.as_str()) {
+                if let Some(obj) = raw.as_object_mut() {
+                    obj.insert("status".to_string(), Value::String(existing));
+                }
+            }
+            return Ok(raw);
+        }
+        if !is_encrypted_order_pointer(&raw) {
+            return Ok(raw);
+        }
+
+        if !oid.is_empty() {
+            match self.get_open_orders().await {
+                Ok(snap) => {
+                    if let Some(row) = snap.rows.iter().find(|row| row.order_id == oid) {
+                        let view = order_view_from_open_row(raw, row);
+                        if let Some(status) = view.get("status").and_then(Value::as_str) {
+                            self.remember_order_status(&oid, status);
+                        }
+                        return Ok(view);
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(order_id = %oid, error = %err, "open-orders decrypt failed while reading order");
+                }
+            }
+        }
+
+        if let Some(cached) = self.order_status_cache.get(&oid).cloned() {
+            if is_terminal_order_status(&cached) {
+                if let Some(obj) = raw.as_object_mut() {
+                    obj.insert("order_id".to_string(), Value::String(oid));
+                    obj.insert("status".to_string(), Value::String(cached));
+                }
+                return Ok(raw);
+            }
+        }
+
+        if !oid.is_empty() {
+            if let Some(historic) = self.history_status(&oid).await {
+                self.remember_order_status(&oid, &historic);
+                if let Some(obj) = raw.as_object_mut() {
+                    obj.insert("order_id".to_string(), Value::String(oid.clone()));
+                    obj.insert("status".to_string(), Value::String(historic));
+                }
+            }
+        }
+        Ok(raw)
+    }
+
+    async fn history_status(&self, order_id: &str) -> Option<String> {
+        let bearer = self.current_bearer().ok()?.to_string();
+        let page = self.http.get_order_history(&bearer, 50).await.ok()?;
+        let rows = page.get("rows")?.as_array()?;
+        for row in rows {
+            if json_id_string(&row["order_id"]) != order_id {
+                continue;
+            }
+            let status = row
+                .get("terminal_status")
+                .and_then(Value::as_str)
+                .or_else(|| row.get("status").and_then(Value::as_str))
+                .map(normalize_order_status)
+                .unwrap_or_default();
+            if !status.is_empty() {
+                return Some(status);
+            }
+        }
+        None
     }
 
     async fn send_encrypted_order(
@@ -886,7 +1077,7 @@ impl GodarkRestClient {
             header_leverage,
         } = call;
         let bearer = self.current_bearer()?.to_string();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let pin_hex = self.hpke_static_public_key_hex.as_deref().ok_or_else(|| {
             GodarkError::Config(
                 "HPKE static public key unset; pass .hpke_static_public_key_hex() or set GDX_HPKE_STATIC_PUBLIC_KEY".into(),
@@ -986,6 +1177,7 @@ impl GodarkRestClient {
             _ => Err(GodarkError::Order {
                 message: "Expected ack response".to_string(),
                 error_code: None,
+                user_message: None,
             }),
         }
     }
@@ -1011,7 +1203,7 @@ impl GodarkRestClient {
             .get("fencing_epoch")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let aad = proto_bridge::build_response_header_aad(
             uuid.as_bytes(),
             message_type,
@@ -1094,6 +1286,7 @@ fn snapshot_rpc_error(kind: proto_bridge::NodeResponseKind, expected: &str) -> G
         other => GodarkError::Order {
             message: format!("expected {expected}, got {other:?}"),
             error_code: None,
+            user_message: None,
         },
     }
 }
@@ -1143,6 +1336,133 @@ fn parse_order_ack(v: &Value) -> Result<OrderAck, GodarkError> {
     })
 }
 
+/// Decimal form of the place-header correlation id (big-endian UUID bytes).
+/// Edge `_register_coid` requires this non-zero decimal string.
+pub(crate) fn decimal_correlation_id(raw: &[u8]) -> Option<String> {
+    if raw.len() != 16 {
+        return None;
+    }
+    let mut arr = [0u8; 16];
+    arr.copy_from_slice(raw);
+    let value = u128::from_be_bytes(arr);
+    if value == 0 {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn order_lookup_miss(err: &GodarkError) -> bool {
+    let GodarkError::Connection(msg) = err else {
+        return false;
+    };
+    msg.contains("HTTP 403") || msg.contains("HTTP 404")
+}
+
+fn is_encrypted_order_pointer(raw: &Value) -> bool {
+    raw.get("encrypted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || raw
+            .get("encrypted_body")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        || raw
+            .get("ciphertext")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+}
+
+fn is_terminal_order_status(status: &str) -> bool {
+    matches!(status, "FILLED" | "CANCELLED" | "REJECTED")
+}
+
+fn normalize_order_status(raw: &str) -> String {
+    let folded = raw.trim().to_ascii_uppercase().replace(' ', "_");
+    match folded.as_str() {
+        "" => String::new(),
+        "CANCELED" => "CANCELLED".to_string(),
+        "PARTIALLYFILLED" => "PARTIALLY_FILLED".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn order_status_label(status: OrderStatus) -> &'static str {
+    match status {
+        OrderStatus::New => "NEW",
+        OrderStatus::PartiallyFilled => "PARTIALLY_FILLED",
+        OrderStatus::Filled => "FILLED",
+        OrderStatus::Cancelled => "CANCELLED",
+        OrderStatus::Rejected => "REJECTED",
+    }
+}
+
+fn side_label(side: Side) -> &'static str {
+    match side {
+        Side::Buy => "BUY",
+        Side::Sell => "SELL",
+    }
+}
+
+fn order_type_label(order_type: OrderType) -> &'static str {
+    match order_type {
+        OrderType::Market => "MARKET",
+        OrderType::Limit => "LIMIT",
+        OrderType::Peg => "PEG",
+        OrderType::StopMarket => "STOP_MARKET",
+        OrderType::StopLimit => "STOP_LIMIT",
+    }
+}
+
+fn json_id_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn order_view_from_open_row(mut raw: Value, row: &OpenOrderRow) -> Value {
+    let status = order_status_label(row.order_status).to_string();
+    let obj = raw.as_object_mut();
+    let Some(obj) = obj else {
+        return json!({
+            "order_id": row.order_id,
+            "symbol_id": row.symbol_id,
+            "status": status,
+            "price": row.price,
+            "quantity": row.quantity,
+            "remaining_qty": row.remaining_qty,
+            "filled_qty": row.filled_qty,
+            "leverage": row.leverage,
+            "side": side_label(row.side),
+            "order_type": order_type_label(row.order_type),
+        });
+    };
+    obj.insert("order_id".to_string(), Value::String(row.order_id.clone()));
+    obj.insert("symbol_id".to_string(), json!(row.symbol_id));
+    obj.insert("status".to_string(), Value::String(status));
+    obj.insert("price".to_string(), Value::String(row.price.clone()));
+    obj.insert("quantity".to_string(), Value::String(row.quantity.clone()));
+    obj.insert(
+        "remaining_qty".to_string(),
+        Value::String(row.remaining_qty.clone()),
+    );
+    obj.insert(
+        "filled_qty".to_string(),
+        Value::String(row.filled_qty.clone()),
+    );
+    obj.insert("leverage".to_string(), json!(row.leverage));
+    obj.insert(
+        "side".to_string(),
+        Value::String(side_label(row.side).to_string()),
+    );
+    obj.insert(
+        "order_type".to_string(),
+        Value::String(order_type_label(row.order_type).to_string()),
+    );
+    raw
+}
+
 fn timestamp_ns() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1178,6 +1498,69 @@ mod tests {
     }
 
     #[test]
+    fn decimal_correlation_id_is_header_u128() {
+        assert_eq!(
+            decimal_correlation_id(&99u128.to_be_bytes()).as_deref(),
+            Some("99")
+        );
+        assert!(decimal_correlation_id(&[0u8; 16]).is_none());
+        assert!(decimal_correlation_id(&[1u8; 15]).is_none());
+    }
+
+    #[test]
+    fn order_view_from_open_row_sets_wire_status() {
+        let row = OpenOrderRow {
+            order_id: "99".into(),
+            symbol_id: 1,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price: "60000".into(),
+            quantity: "0.01".into(),
+            filled_qty: "0".into(),
+            remaining_qty: "0.01".into(),
+            order_status: OrderStatus::New,
+            time_in_force: TimeInForce::Gtc,
+            leverage: 2,
+            timestamp: 1,
+            correlation_id: 0,
+            expiry_time: None,
+            reduce_only: false,
+            post_only: false,
+            take_profit: None,
+            stop_loss: None,
+        };
+        let view = order_view_from_open_row(
+            json!({"encrypted": true, "order_id": "99", "hint": "decrypt locally"}),
+            &row,
+        );
+        assert_eq!(view["status"].as_str(), Some("NEW"));
+        assert_eq!(view["price"].as_str(), Some("60000"));
+        assert_eq!(view["side"].as_str(), Some("BUY"));
+        assert_eq!(normalize_order_status("Filled"), "FILLED");
+        assert_eq!(normalize_order_status("canceled"), "CANCELLED");
+    }
+
+    #[test]
+    fn resolve_rest_base_url_rewrites_wss_explicit() {
+        assert_eq!(
+            resolve_rest_base_url(Some("wss://api.devnet.godark-dex.com".into())),
+            "https://api.devnet.godark-dex.com"
+        );
+        assert_eq!(
+            resolve_rest_base_url(Some("ws://127.0.0.1:13300".into())),
+            "http://127.0.0.1:13300"
+        );
+        assert_eq!(
+            resolve_rest_base_url(Some("wss://api.devnet.godark-dex.com/ws/v1".into())),
+            "https://api.devnet.godark-dex.com"
+        );
+        assert_eq!(
+            resolve_rest_base_url(Some("ws://127.0.0.1:13300/ws".into())),
+            "http://127.0.0.1:13300"
+        );
+    }
+
+    #[test]
     fn builder_rejects_no_credentials() {
         let res = GodarkRestClient::builder().build();
         assert!(matches!(res, Err(GodarkError::Config(_))));
@@ -1189,15 +1572,15 @@ mod tests {
         let saved = clear_env(&[
             "GODARK_API_KEY",
             "GDX_API_KEY",
-            "GODARK_USER_UUID",
-            "GDX_USER_UUID",
+            "GODARK_ACCOUNT",
+            "GDX_ACCOUNT",
         ]);
         let c = GodarkRestClient::builder()
             .api_key("k")
             .rest_base_url("http://localhost:4000")
             .build()
             .unwrap();
-        assert_eq!(c.user_uuid(), None);
+        assert_eq!(c.account(), None);
         restore_env(saved);
     }
 
@@ -1223,14 +1606,14 @@ mod tests {
     #[test]
     fn builder_accepts_id_secret_with_passphrase() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let saved = clear_env(&["GODARK_USER_UUID", "GDX_USER_UUID"]);
+        let saved = clear_env(&["GODARK_ACCOUNT", "GDX_ACCOUNT"]);
         let c = GodarkRestClient::builder()
             .api_key_id("id")
             .api_secret("sec")
             .passphrase("pp")
             .build()
             .unwrap();
-        assert!(c.user_uuid().is_none());
+        assert!(c.account().is_none());
         restore_env(saved);
     }
 
@@ -1262,14 +1645,14 @@ mod tests {
     }
 
     #[test]
-    fn builder_resolves_user_uuid_explicit() {
-        let id = "00000000-0000-4000-8000-000000000042";
+    fn builder_resolves_account_explicit() {
+        let id = "11111111111111111111111111111111";
         let c = GodarkRestClient::builder()
             .api_key("k")
-            .user_uuid(id)
+            .account(id)
             .build()
             .unwrap();
-        assert_eq!(c.user_uuid().unwrap().to_string(), id);
+        assert_eq!(c.account().unwrap().to_string(), id);
     }
 
     #[test]
@@ -1284,6 +1667,7 @@ mod tests {
             GodarkError::Order {
                 message,
                 error_code,
+                ..
             } => {
                 assert_eq!(message, "rate limit");
                 assert_eq!(error_code.as_deref(), Some("RL"));
@@ -1336,7 +1720,7 @@ mod tests {
     fn update_leverage_rejects_unknown_symbol() {
         let mut client = GodarkRestClient::builder()
             .api_key("k")
-            .user_uuid("00000000-0000-4000-8000-000000000001")
+            .account("11111111111111111111111111111111")
             .rest_base_url("http://localhost:4000")
             .build()
             .unwrap();

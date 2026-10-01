@@ -38,16 +38,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if !legacy.is_empty() {
         builder = builder.api_key(legacy);
     } else {
-        return Err("Set GODARK_API_KEY_ID, GODARK_API_SECRET and GODARK_PASSPHRASE in .env".into());
+        return Err(
+            "Set GODARK_API_KEY_ID, GODARK_API_SECRET and GODARK_PASSPHRASE in .env".into(),
+        );
     }
     let mut client = builder.build()?;
 
     client.connect().await?;
-    let uid = client
-        .user_uuid()
-        .ok_or("user_uuid missing after connect")?;
+    let account_id = client.account().ok_or("account missing after connect")?;
     println!(
-        "identity: user_uuid={uid} scope={:?}",
+        "identity: account={account_id} scope={:?}",
         client.token_scope()
     );
 
@@ -56,25 +56,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let positions = client.get_positions().await?;
     println!("positions: {} row(s)", positions.rows.len());
     let account = client.get_account().await?;
-    if let Some(s) = account.account {
+    if let Some(s) = account.summary {
         println!(
             "account free_collateral={} total_collateral={}",
             s.free_collateral, s.total_collateral
         );
     }
 
-    let price: f64 = std::env::var("GDX_LIVE_PRICE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(78000.0);
-    let limit_price = price - 5000.0;
+    // Prices are decimal strings only.
+    let limit_price = std::env::var("GODARK_E2E_PRICE")
+        .or_else(|_| std::env::var("GDX_LIVE_PRICE"))
+        .unwrap_or_else(|_| "73000".into());
+    let modify_price = std::env::var("GODARK_E2E_MODIFY_PRICE")
+        .unwrap_or_else(|_| "72936".into());
     let ack = client
         .place_order(
             "BTC-USDC-PERP",
             Side::Buy,
             OrderType::Limit,
-            0.01,
-            Some(limit_price),
+            "0.01",
+            Some(limit_price.as_str()),
             TimeInForce::Gtc,
             false,
             None,
@@ -90,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .modify_order(
             &ack.order_id,
             "BTC-USDC-PERP",
-            Some(limit_price - 64.0),
+            Some(modify_price.as_str()),
             None,
             None,
         )

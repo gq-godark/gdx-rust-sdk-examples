@@ -1,231 +1,219 @@
-# GoDark Rust SDK Reference (MM Distribution)
+# GoDark Rust SDK Reference
 
-This reference describes the API surface used by the two examples shipped in
-this distribution. The examples use WebSocket encrypted trading
-via `godark::GodarkClient`. Encrypted REST trading is not supported — all order
-flow (place / modify / cancel / mass-quote) runs over the HPKE WebSocket
-client. Standalone market-data surfaces are
-intentionally excluded.
+The bundled `godark` crate provides two client surfaces:
 
-Order placement support in this MM distribution is limited to `MARKET` and
-`LIMIT`.
+- `GodarkClient`: persistent HPKE-encrypted WebSocket trading and push streams.
+- `GodarkRestClient`: bearer authentication, one-shot HPKE-encrypted REST
+  commands and snapshots, plaintext authenticated order lookup, and public
+  market-data snapshots.
 
-## Quick Start
+The examples exercise `MARKET` and `LIMIT` placement. Other order variants in
+the public enum are protocol types, not a promise that every environment
+accepts them.
 
-```rust
-use godark::{GodarkClient, OrderType, Side, TimeInForce};
+## Canonical account identity
 
-#[tokio::main]
-async fn main() -> Result<(), godark::GodarkError> {
-    let config = GodarkClient::builder()
-        .base_url("wss://api.godark-dex.com")  // optional override
-        .api_key_id(std::env::var("GODARK_API_KEY_ID").unwrap())
-        .api_secret(std::env::var("GODARK_API_SECRET").unwrap())
-        .build()?;
+The canonical trading identity is `AccountId`, a 32-byte value displayed and
+serialized as a Solana-style base58 string.
 
-    let mut client = GodarkClient::new(config);
-    client.connect().await?;
+- After either client connects, use `client.account()`.
+- Use builder `.account(...)` or `GODARK_ACCOUNT` only as a local/static-key
+  fallback when authentication does not supply the account.
+- `GodarkRestClient::get_account()` returns an encrypted account-margin
+  snapshot; it is not the identity accessor.
+- `GodarkRestClient::get_me()` is a browser-session profile endpoint. API-key
+  access tokens are normally rejected there; use `account()` instead.
 
-    let ack = client
-        .place_order(
-            "BTC-USDC-PERP",
-            Side::Sell,
-            OrderType::Limit,
-            0.01,
-            Some(999_999.0),
-            TimeInForce::Gtc,
-            false,
-            None,
-            None,
-        )
-        .await?;
-
-    client.cancel_order(&ack.order_id, "BTC-USDC-PERP").await?;
-    client.disconnect().await;
-    Ok(())
-}
-```
+The Rust API has no UUID-named identity alias. Protocol fields that retain
+settlement-specific legacy names are unchanged.
 
 ## Configuration
 
-The MM examples expect:
+API key-pair authentication requires `GODARK_API_KEY_ID`,
+`GODARK_API_SECRET`, and `GODARK_PASSPHRASE`.
 
-- `GODARK_API_KEY_ID` (required)
-- `GODARK_API_SECRET` (required)
-- `GODARK_PASSPHRASE` (required for API key-pair auth)
-- `GDX_HPKE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_HPKE_STATIC_PUBKEY`, `GODARK_HPKE_STATIC_PUBLIC_KEY`
-- `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
+Optional overrides:
 
-Use `.env.example` as the template for your local `.env`.
+- `GODARK_EDGE_URL` / `GDX_EDGE_URL`: WebSocket edge URL and REST fallback.
+- `GODARK_REST_URL` / `GDX_REST_URL`: explicit REST origin.
+- `GDX_HPKE_STATIC_PUBLIC_KEY`: 64-hex sequencer HPKE pin. Aliases:
+  `GDX_HPKE_STATIC_PUBKEY`, `GODARK_HPKE_STATIC_PUBLIC_KEY`,
+  `VITE_GDX_HPKE_STATIC_PUBKEY`.
+- `GODARK_ACCOUNT` / `GDX_ACCOUNT`: canonical account fallback.
 
-### WebSocket transport defaults
+REST has baked Testnet and Devnet pins; Localnet REST requires an explicit pin.
 
-`TransportConfig` defaults: ping every `30s`, stale after `120s` with no inbound
-traffic or `2` consecutive missed heartbeat intervals. Stale disconnects emit a
-non-fatal error on `take_error_receiver()` before reconnect events. Manual
-`disconnect()` does not auto-reconnect.
-
-## GodarkClient API
-
-**Crate:** `godark` (statically linked into each example binary in this
-distribution; also available under `sdk/` for path-dependency builds).
-
-### Core lifecycle
-
-| Method | Signature | Purpose |
-|--------|-----------|---------|
-| `builder` | `GodarkClient::builder() -> ConfigBuilder` | Start a new client config |
-| `new` | `GodarkClient::new(config) -> GodarkClient` | Construct the client |
-| `connect` | `async fn connect(&mut self) -> Result<(), GodarkError>` | Authenticate and establish HPKE WebSocket session |
-| `disconnect` | `async fn disconnect(&mut self)` | Graceful disconnect |
-| `is_connected` | `fn is_connected(&self) -> bool` | Connection state |
-| `user_uuid` | `fn user_uuid(&self) -> Option<&Uuid>` | Authenticated user id |
-
-### Trading commands
-
-| Method | Signature (abridged) | Purpose |
-|--------|----------------------|---------|
-| `place_order` | `async fn place_order(symbol, side, order_type, quantity, price?, tif, post_only, ...) -> Result<OrderAck>` | Place encrypted order |
-| `cancel_order` | `async fn cancel_order(order_id, symbol) -> Result<OrderAck>` | Cancel order |
-| `modify_order` | `async fn modify_order(order_id, symbol, new_price?, new_quantity?, new_trigger_price?) -> Result<OrderAck>` | Modify price, quantity, and/or stop trigger |
-
-### Subscriptions
-
-| Method | Purpose |
-|--------|---------|
-| `subscribe(&["orders", "positions"])` | Subscribe to private channels |
-| `unsubscribe(&[...])` | Unsubscribe |
-
-### Receivers (channels)
-
-The SDK exposes one `tokio::sync::mpsc::Receiver<T>` per push stream. Take
-each one **before** calling `connect()` (single-consumer):
-
-| Method | Receiver type | Stream |
-|--------|---------------|--------|
-| `take_order_receiver()` | `Receiver<OrderUpdate>` | Order lifecycle |
-| `take_position_receiver()` | `Receiver<PositionUpdate>` | Per-fill position deltas |
-| `take_positions_snapshot_receiver()` | `Receiver<PositionsSnapshot>` | Initial / periodic / event-triggered snapshots |
-| `take_system_health_receiver()` | `Receiver<SystemHealthUpdate>` | Sequencer / MPC node cluster pulses |
-| `take_balance_receiver()` | `Receiver<BalanceUpdate>` | Updated shielded balance |
-| `take_margin_alert_receiver()` | `Receiver<MarginAlert>` | Margin tier transition / recovery |
-| `take_funding_rate_receiver()` | `Receiver<FundingRateUpdate>` | Per-symbol funding ticks |
-| `take_settlement_receiver()` | `Receiver<SettlementUpdate>` | Settlement batch lifecycle |
-| `take_error_receiver()` | `Receiver<GodarkError>` | Non-fatal SDK errors |
-
-| Push                  | Field highlights                                                                                | Typical use                                                                          |
-|-----------------------|-------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------|
-| `PositionsSnapshot`   | `rows[]` (`PositionRow{symbol_id, side, size, entry_price, mark_price, unrealized_pnl, ...}`), `source` (Initial / Periodic / Event) | Hydrate the open-positions table on connect; refresh every ~5s.                      |
-| `SystemHealthUpdate`  | `total_nodes`, `ready`, `degraded`, `accepting_orders`                                          | Display node-cluster status; pause submissions if `accepting_orders == false`.       |
-| `BalanceUpdate`       | `shielded_balance_raw` (raw lamports-style integer)                                             | Refresh the wallet/equity widget after each fill or settlement.                      |
-| `MarginAlert`         | `symbol_id`, `tier`, `margin_ratio_bps`, `liquidation_price_bps`, `recovered`                   | Show / clear the margin-tier banner per `(owner, symbol_id)`.                        |
-| `FundingRateUpdate`   | `symbol_id`, `current_rate`, `predicted_rate`, `next_funding_time`                              | Update funding ticker / book metadata.                                               |
-| `SettlementUpdate`    | `batch_id`, `status` (Submitted / Confirmed / Failed), `tx_signature`, `affected_user_uuids[]`  | Reconcile settled batches, surface Solana tx links.                                  |
-
-### Concurrency rule
-
-Only one command (`place_order`, `cancel_order`, `modify_order`) should be in
-flight at a time. Call these sequentially.
-
-## Core Types
-
-| Type | Notable fields |
-|------|----------------|
-| `OrderAck` | `order_id`, `success`, `sequence`, `error_code: Option<String>`, `error: Option<String>` |
-| `OrderUpdate` | `order_id`, `symbol_id`, `side`, `status`, `update_type`, `price`, `quantity`, `filled_qty`, `remaining_qty`, `cum_fill`, `cancel_reason`, `reject_reason_code`, `correlation_id`, `timestamp` |
-| `PositionUpdate` | `user_uuid`, `symbol_id`, `side`, `update_type`, `size`, `entry_price`, `previous_size`, `fill_price`, `fill_qty`, `correlation_id`, `timestamp` |
-| `PositionsSnapshot` | `user_uuid`, `rows: Vec<PositionRow>`, `server_timestamp`, `source: PositionsSnapshotSource`, `correlation_id` |
-
-## Enums
-
-Important enums used in MM examples (all implement `Debug`):
-
-- `Side`: `Buy`, `Sell`
-- `OrderType`: `Market`, `Limit`, `PegToMid`, `PegToBid`, `PegToAsk`
-- `TimeInForce`: `Gtc`, `Ioc`, `Fok`, `Gtd`
-- `OrderStatus`: `New`, `PartiallyFilled`, `Filled`, `Cancelled`, `Rejected`
-- `OrderUpdateType`: `Open`, `Filled`, `PartiallyFilled`, `Cancelled`, `Rejected`, `Modified`, `CancelRejected`, `ModifyRejected`
-- `PositionUpdateType`: `Snapshot`, `Open`, `Increase`, `Decrease`, `Close`
-- `CancelReason`: `UserRequested`, `IocRemainder`, `FokNotFilled`, `Expired`, `System`
-- `PositionsSnapshotSource`: `Unspecified`, `Initial`, `Periodic`, `Event`
-- `SettlementBatchStatus`: `Unspecified`, `Submitted`, `Confirmed`, `Failed`
-
-Note: the SDK enum includes additional order types for compatibility, but this
-MM distribution supports placing only `Market` and `Limit` orders.
-
-## Errors
-
-`GodarkError` is the single error type returned from every fallible SDK call:
-
-- `Authentication(String)`
-- `Session(String)` — HPKE setup handshake or rekey failure
-- `Order { message: String, error_code: Option<String> }`
-  — also carries the symbolic reason (e.g. `"PRICE_DEVIATION_TOO_LARGE"`,
-  `"MARGIN_INSUFFICIENT"`). See the `quickstart` source for the match-and-print
-  pattern.
-- `Connection(String)`
-- `Encryption(String)`
-- `Timeout(String)`
-- `Config(String)`
-
-## Example files in this distribution
-
-| File | Purpose |
-|------|---------|
-| `examples/quickstart.rs` | Minimal connect, place, cancel |
-| `examples/full_trader_example.rs` | Reference bot flow: callbacks, place / modify / cancel, mass-quote / batch-cancel |
-| `examples/rest_client_example.rs` | REST auth, account reads, and public funding/OI/volume GETs (`GodarkRestClient`) |
-| `examples/dotenv.rs` | Shared `.env` loader and symbolic-error printer used by the example mains |
-
-Build from the bundle root with `cargo build --release --examples`. Binaries
-land in `target/release/examples/`.
-
-## Cargo integration (your own bot)
-
-The bundle includes a bundled `godark` crate under `sdk/`. Depend on it
-via a path dependency from your own `Cargo.toml`:
-
-```toml
-# Cargo.toml — your own bot
-[dependencies]
-godark  = { path = "path/to/this-bundle/sdk" }
-tokio   = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-dotenvy = "0.15"
-```
-
-Then in `src/main.rs`:
+## `GodarkClient` (WebSocket)
 
 ```rust
-use godark::{GodarkClient, OrderType, Side, TimeInForce};
+use godark::{Environment, GodarkClient};
 
-#[tokio::main]
-async fn main() -> Result<(), godark::GodarkError> {
-    let _ = dotenvy::dotenv();
+let config = GodarkClient::builder()
+    .environment(Environment::Testnet)
+    .api_key_id(std::env::var("GODARK_API_KEY_ID")?)
+    .api_secret(std::env::var("GODARK_API_SECRET")?)
+    .passphrase(std::env::var("GODARK_PASSPHRASE")?)
+    .build()?;
 
-    let config = GodarkClient::builder()
-        .api_key_id(std::env::var("GODARK_API_KEY_ID").unwrap())
-        .api_secret(std::env::var("GODARK_API_SECRET").unwrap())
-        .build()?;
+let mut client = GodarkClient::new(config);
+client.connect().await?;
+println!("account={}", client.account().expect("account after connect"));
+```
 
-    let mut client = GodarkClient::new(config);
-    client.connect().await?;
+`connect()` sends the REST `access_token` (`POST /api/v1/auth/token`,
+`client_credentials`) as the `/ws/v1` login. It does not send
+`key_id:secret:passphrase`.
 
-    let ack = client
-        .place_order(
-            "BTC-USDC-PERP",
-            Side::Sell,
-            OrderType::Limit,
-            0.01,
-            Some(999_999.0),
-            TimeInForce::Gtc,
-            false,
-            None,
-            None,
-        )
-        .await?;
+Channels: `orders`, `positions`, `volume`, `open_interest`, `funding_rate`.
+No `trades` or L2 channel on `/ws/v1`. Take
+`take_open_orders_snapshot_receiver()` before `connect()`;
+`open_orders_snapshot` is delivered on that receiver.
 
-    client.cancel_order(&ack.order_id, "BTC-USDC-PERP").await?;
-    client.disconnect().await;
-    Ok(())
-}
+Lifecycle and control:
+
+- `builder()`, `new(config)`, `connect()`, `disconnect()`, `logout()`
+- `is_connected()`, `account()`
+- `subscribe(channels)`, `unsubscribe(channels)`
+
+Take each single-consumer receiver before `connect()`:
+
+- `take_order_receiver()`
+- `take_open_orders_snapshot_receiver()`
+- `take_positions_snapshot_receiver()`
+- `take_system_health_receiver()`
+- `take_balance_receiver()`
+- `take_account_margin_receiver()`
+- `take_leverage_settings_receiver()`
+- `take_funding_rate_receiver()`
+- `take_error_receiver()`
+- `take_reconnect_receiver()`
+
+`BalanceUpdate` is the collateral-balance stream. `AccountMarginUpdate`
+contains the canonical `account` separately from its optional margin
+`summary`.
+
+WebSocket commands:
+
+- Placement: `place_order`, `place_order_with_confirmation`,
+  `place_order_with_options`, `place_order_with_confirmation_and_options`
+- Single order: `cancel_order`, `modify_order`
+- Account/position commands: `update_leverage`, `cancel_all_orders`,
+  `close_all`, `reverse_position`, `amend_tpsl`, `cancel_tpsl`
+- MM/batch commands: `mass_quote`, `batch_cancel`, `batch_modify` (up to 20
+  legs or ids)
+
+Prices and sizes on place / modify / mass-quote / batch-modify / TP-SL are
+human **decimal strings only** (`&str` / `String`) — not `f64` / `f32` /
+integers. Invalid strings are rejected before sealing.
+`PlaceOrderOptions` includes `reduce_only`, `post_only`, `stp_mode`,
+`quote_notional` (decimal string), `peg_offset_bps`, `trigger_price`,
+`take_profit_price`, `stop_loss_price`, `slippage_bps`, and `client_order_id`.
+`slippage_bps` applies only to `MARKET` and `STOP_MARKET` (`None` uses the
+venue limit). Peg (`peg_offset_bps`) is not post-only.
+
+A client order id is registered only after a successful WebSocket place, and
+cached only after `_register_coid` returns HTTP 200. REST place does not
+register it.
+
+`Confirmation::Book` waits beyond the fast acknowledgement for a matching
+order update. `Confirmation::Ack` returns at the sequencer acknowledgement
+boundary; callers must consume updates for later rejects and fills.
+
+## `GodarkRestClient`
+
+Encrypted REST trading is supported. Each encrypted command performs a fresh
+one-shot HPKE setup and decrypts the node response inside the SDK.
+
+```rust
+use godark::{Environment, GodarkRestClient};
+
+let mut client = GodarkRestClient::builder()
+    .environment(Environment::Testnet)
+    .api_key_id(std::env::var("GODARK_API_KEY_ID")?)
+    .api_secret(std::env::var("GODARK_API_SECRET")?)
+    .passphrase(std::env::var("GODARK_PASSPHRASE")?)
+    .build()?;
+
+client.connect().await?;
+println!("account={}", client.account().expect("account after connect"));
+let account_margin = client.get_account().await?;
+```
+
+Authentication and identity:
+
+- `connect()`, `disconnect()`
+- `account()` — canonical authenticated account
+- `token_scope()`
+- `get_me()` — browser-session profile endpoint, generally unavailable to
+  API-key tokens
+
+Encrypted REST methods:
+
+| Method | Behavior |
+|---|---|
+| `place_order(...)` | Place; optional client order id is not registered |
+| `cancel_order(...)` | Cancel by server order id |
+| `cancel_order_by_client_id(...)` | Resolve client id, then cancel |
+| `modify_order(...)` | Modify price, quantity, and/or trigger |
+| `update_leverage(...)` | Update per-symbol leverage |
+| `get_open_orders()` | Typed `OpenOrdersSnapshot` |
+| `get_positions()` | Typed `PositionsSnapshot` |
+| `get_account()` | Typed `AccountMarginUpdate` |
+| `mass_quote(...)` | 1–20 quote legs |
+| `batch_cancel(...)` | 1–20 order ids |
+| `batch_modify(...)` | 1–20 post-only amendments |
+
+REST reads:
+
+- `get_order(order_id)` and `get_order_by_client_id(client_id)` perform
+  authenticated plaintext status lookups.
+- `await_terminal_status(...)` polls until filled, cancelled, or rejected.
+- `get_leverage()` returns typed leverage settings.
+- `get_funding_rates()`, `get_open_interest()`, and `get_volume()` return
+  public `serde_json::Value` snapshots.
+
+Plaintext lookup does not mean order flow is plaintext. Placement,
+modification, cancellation, leverage update, account/open-order/position
+snapshots, and the supported batch commands are HPKE encrypted.
+
+### Explicit REST gaps
+
+`GodarkRestClient` does not currently expose:
+
+- `place_order_with_options` or REST `slippage_bps`
+- explicit `Confirmation::Book` / `Confirmation::Ack`
+- cancel-all, close-all, reverse-position, amend-TP/SL, or cancel-TP/SL
+- subscriptions, push receivers, or reconnect events
+- typed order-lookup or public funding/open-interest/volume models
+
+Do not infer SDK support merely because an edge route exists.
+
+## Main public types
+
+- Identity: `AccountId`
+- Placement: `OrderAck`, `Confirmation`, `PlaceOrderOptions`
+- Orders: `OrderUpdate`, `OrderStatus`, `OrderUpdateType`, `CancelReason`
+- Positions/account: `PositionRow`, `PositionsSnapshot`, `BalanceUpdate`,
+  `AccountMarginUpdate`, `AccountMarginSummary`, `LeverageSettings`
+- Batch/MM: `MassQuoteLegInput`, `MassQuoteAck`, `BatchCancelAck`,
+  `BatchModifyLegInput`, `BatchModifyAck`, `CountAck`, `TpslAck`
+- Enums: `Side`, `OrderType`, `TimeInForce`, `StpMode`
+
+All fallible calls return `GodarkError`. Order rejects use
+`GodarkError::Order { message, error_code, user_message }`.
+
+## Included examples
+
+- `quickstart.rs`: minimal encrypted WebSocket place/cancel.
+- `full_trader_example.rs`: WebSocket callbacks and advanced commands.
+- `rest_client_example.rs`: REST authentication and account-oriented reads.
+- `dotenv.rs`: shared environment loader and error printer.
+
+The crate supports encrypted REST placement, modification, and cancellation,
+although the package includes only the smaller REST read example.
+
+Build from the package root:
+
+```bash
+cargo build --release --examples
 ```

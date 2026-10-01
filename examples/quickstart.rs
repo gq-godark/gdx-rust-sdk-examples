@@ -23,10 +23,10 @@ mod dotenv;
 
 const SYMBOL: &str = "BTC-USDC-PERP";
 
-fn live_mark_price() -> f64 {
+/// Decimal-string limit price (override with GODARK_E2E_PRICE). Never f64.
+fn limit_price() -> String {
     dotenv::env_first(&["GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE"])
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(79_000.0)
+        .unwrap_or_else(|| "81370".into())
 }
 
 #[tokio::main]
@@ -39,44 +39,49 @@ async fn main() -> Result<(), GodarkError> {
     }
     if let Some(legacy) = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]) {
         builder = builder.api_key(legacy);
-        if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
-            builder = builder.user_uuid(uid);
+        if let Some(account) = dotenv::env_first(&["GODARK_ACCOUNT", "GDX_ACCOUNT"]) {
+            builder = builder.account(account);
         }
     } else {
-        let api_key_id = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).ok_or_else(|| {
-            GodarkError::Config("Set GODARK_API_KEY_ID or legacy GODARK_API_KEY".into())
-        })?;
-        let api_secret = dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).ok_or_else(|| {
-            GodarkError::Config("Set GODARK_API_SECRET or legacy GODARK_API_KEY".into())
-        })?;
-        let passphrase = dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).ok_or_else(|| {
-            GodarkError::Config("Set GODARK_PASSPHRASE or legacy GODARK_API_KEY".into())
-        })?;
-        builder = builder.api_key_id(api_key_id).api_secret(api_secret).passphrase(passphrase);
+        let api_key_id =
+            dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).ok_or_else(|| {
+                GodarkError::Config("Set GODARK_API_KEY_ID or legacy GODARK_API_KEY".into())
+            })?;
+        let api_secret =
+            dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).ok_or_else(|| {
+                GodarkError::Config("Set GODARK_API_SECRET or legacy GODARK_API_KEY".into())
+            })?;
+        let passphrase =
+            dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).ok_or_else(|| {
+                GodarkError::Config("Set GODARK_PASSPHRASE or legacy GODARK_API_KEY".into())
+            })?;
+        builder = builder
+            .api_key_id(api_key_id)
+            .api_secret(api_secret)
+            .passphrase(passphrase);
     }
     let config = builder.build()?;
 
     let mut client = GodarkClient::new(config);
     client.connect().await?;
 
-    let user = client
-        .user_uuid()
-        .map(|u| u.to_string())
+    let account = client
+        .account()
+        .map(|id| id.to_string())
         .unwrap_or_default();
-    println!("Connected as user {user}");
+    println!("Connected as account {account}");
 
     // Book confirmation waits on private order updates; subscribe first.
     client.subscribe(&["orders"]).await?;
 
-    let mark = live_mark_price();
-    let sell_px = (mark * 1.03 * 10.0).round() / 10.0;
+    let sell_px = limit_price();
     match client
         .place_order_with_options(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
-            0.01,
-            Some(sell_px),
+            Some("0.01"),
+            Some(sell_px.as_str()),
             TimeInForce::Gtc,
             false,
             None,
@@ -91,7 +96,7 @@ async fn main() -> Result<(), GodarkError> {
     {
         Ok(ack) => {
             println!(
-                "Place OK -- order_id={} (limit SELL @ {sell_px}, mark={mark})",
+                "Place OK -- order_id={} (limit SELL @ {sell_px})",
                 ack.order_id
             );
             // Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
