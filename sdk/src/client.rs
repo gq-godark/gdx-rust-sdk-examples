@@ -22,8 +22,9 @@ use crate::proto_bridge::{self, EdgeMessage};
 use crate::session::CryptoSession;
 use crate::transport::{EdgeTransport, TransportEvent};
 use crate::types::{
-    AccountId, AccountMarginUpdate, BalanceUpdate, Confirmation, FundingRateUpdate,
-    LeverageSettings, OrderAck, OrderUpdate, PositionsSnapshot, ReconnectEvent, SystemHealthUpdate,
+    AccountId, AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, Confirmation,
+    FundingRateUpdate, LeverageSettings, OpenOrderRow, OpenOrdersSnapshot, OrderAck, OrderUpdate,
+    PositionsSnapshot, ReconnectEvent, SystemHealthUpdate,
 };
 use crate::wire;
 
@@ -53,6 +54,8 @@ pub struct GodarkClient {
     order_rx: Option<mpsc::Receiver<OrderUpdate>>,
     positions_snapshot_tx: mpsc::Sender<PositionsSnapshot>,
     positions_snapshot_rx: Option<mpsc::Receiver<PositionsSnapshot>>,
+    open_orders_snapshot_tx: mpsc::Sender<OpenOrdersSnapshot>,
+    open_orders_snapshot_rx: Option<mpsc::Receiver<OpenOrdersSnapshot>>,
     system_health_tx: mpsc::Sender<SystemHealthUpdate>,
     system_health_rx: Option<mpsc::Receiver<SystemHealthUpdate>>,
     balance_tx: mpsc::Sender<BalanceUpdate>,
@@ -87,6 +90,7 @@ impl GodarkClient {
         let ws_url = config::ws_url(&config.base_url);
         let (order_tx, order_rx) = mpsc::channel(256);
         let (positions_snapshot_tx, positions_snapshot_rx) = mpsc::channel(64);
+        let (open_orders_snapshot_tx, open_orders_snapshot_rx) = mpsc::channel(64);
         let (system_health_tx, system_health_rx) = mpsc::channel(64);
         let (balance_tx, balance_rx) = mpsc::channel(64);
         let (funding_rate_tx, funding_rate_rx) = mpsc::channel(64);
@@ -107,6 +111,8 @@ impl GodarkClient {
             order_rx: Some(order_rx),
             positions_snapshot_tx,
             positions_snapshot_rx: Some(positions_snapshot_rx),
+            open_orders_snapshot_tx,
+            open_orders_snapshot_rx: Some(open_orders_snapshot_rx),
             system_health_tx,
             system_health_rx: Some(system_health_rx),
             balance_tx,
@@ -149,6 +155,17 @@ impl GodarkClient {
         &mut self,
     ) -> Option<mpsc::Receiver<PositionsSnapshot>> {
         self.positions_snapshot_rx.take()
+    }
+
+    /// Receive full working-order snapshots (`open_orders_snapshot`).
+    ///
+    /// Delivered on `orders` subscribe (cleartext hydrate) and on later encrypted
+    /// pushes of the same message type. Latest snapshot replaces the previous one
+    /// on the caller side.
+    pub fn take_open_orders_snapshot_receiver(
+        &mut self,
+    ) -> Option<mpsc::Receiver<OpenOrdersSnapshot>> {
+        self.open_orders_snapshot_rx.take()
     }
 
     /// Receive sequencer / MPC node health pulses.
@@ -1305,6 +1322,7 @@ impl GodarkClient {
         let transport = Arc::clone(&self.transport);
         let order_tx = self.order_tx.clone();
         let positions_snapshot_tx = self.positions_snapshot_tx.clone();
+        let open_orders_snapshot_tx = self.open_orders_snapshot_tx.clone();
         let system_health_tx = self.system_health_tx.clone();
         let balance_tx = self.balance_tx.clone();
         let funding_rate_tx = self.funding_rate_tx.clone();
@@ -1324,10 +1342,32 @@ impl GodarkClient {
         self.event_handle = Some(tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
+                    TransportEvent::OpenOrdersSnapshot(val) => {
+                        if let Some(snap) = parse_cleartext_open_orders_snapshot(&val) {
+                            let _ = open_orders_snapshot_tx.send(snap).await;
+                        }
+                    }
                     TransportEvent::OrderUpdate(val) => {
                         if let Some(update) = parse_cleartext_order_update(&val) {
                             observe_place_order_update(&place_outcomes, &update);
                             let _ = order_tx.send(update).await;
+                        }
+                    }
+                    TransportEvent::SystemHealth(val) => {
+                        if let Some(health) = parse_cleartext_system_health(&val) {
+                            let _ = system_health_tx.send(health).await;
+                        }
+                    }
+                    TransportEvent::AccountUpdate(val) => {
+                        let acct = account
+                            .lock()
+                            .ok()
+                            .and_then(|guard| *guard)
+                            .unwrap_or_default();
+                        if let Some((balance, margin)) = parse_cleartext_account_update(&val, acct)
+                        {
+                            let _ = balance_tx.send(balance).await;
+                            let _ = account_margin_tx.send(margin).await;
                         }
                     }
                     TransportEvent::PublicMessage(val) => {
@@ -1402,6 +1442,9 @@ impl GodarkClient {
                                         }
                                         DecodedPush::PositionsSnapshot(snap) => {
                                             let _ = positions_snapshot_tx.send(snap).await;
+                                        }
+                                        DecodedPush::OpenOrdersSnapshot(snap) => {
+                                            let _ = open_orders_snapshot_tx.send(snap).await;
                                         }
                                         DecodedPush::SystemHealth(health) => {
                                             let _ = system_health_tx.send(health).await;
@@ -1901,6 +1944,7 @@ async fn reconnect_transport(
 enum DecodedPush {
     Order(OrderUpdate),
     PositionsSnapshot(PositionsSnapshot),
+    OpenOrdersSnapshot(OpenOrdersSnapshot),
     SystemHealth(SystemHealthUpdate),
     Balance(BalanceUpdate),
     FundingRate(FundingRateUpdate),
@@ -1972,10 +2016,10 @@ fn decode_decrypted_push(message_type: &str, plaintext: &[u8]) -> Result<Decoded
     }
 
     if message_type == "open_orders_snapshot" {
-        if let Ok(proto_bridge::NodeResponseKind::OpenOrdersSnapshot(_)) =
+        if let Ok(proto_bridge::NodeResponseKind::OpenOrdersSnapshot(snapshot)) =
             proto_bridge::parse_node_response_with_expected(plaintext, Some("open_orders_snapshot"))
         {
-            return Ok(DecodedPush::Ignored);
+            return Ok(DecodedPush::OpenOrdersSnapshot(snapshot));
         }
     }
 
@@ -2053,6 +2097,125 @@ fn observe_place_order_update(state: &Arc<Mutex<PlaceOutcomeState>>, update: &Or
         if let Some(sender) = state.waiters.remove(index).sender {
             let _ = sender.send(Ok(update.clone()));
         }
+    }
+}
+
+fn parse_cleartext_system_health(msg: &Value) -> Option<SystemHealthUpdate> {
+    let kind = msg.get("type").and_then(Value::as_str)?;
+    if kind != "system_health" && kind != "health_report" {
+        return None;
+    }
+    Some(SystemHealthUpdate {
+        component_id: json_str(msg, "component_id").unwrap_or(kind).to_string(),
+        state: msg.get("state").and_then(Value::as_i64).unwrap_or(0) as i32,
+        serving: msg.get("serving").and_then(Value::as_bool).unwrap_or(true),
+        cause: json_str(msg, "cause").unwrap_or("").to_string(),
+        updated_at_nanos: json_u64(msg, "updated_at_nanos")
+            .or_else(|| json_u64(msg, "timestamp"))
+            .unwrap_or(0),
+        sequence: json_u64(msg, "sequence").unwrap_or(0),
+        schema_version: json_u64(msg, "schema_version").unwrap_or(0) as u32,
+    })
+}
+
+fn json_str<'a>(msg: &'a Value, key: &str) -> Option<&'a str> {
+    msg.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Map the public plaintext `account_update` onto the balance and margin receivers.
+fn parse_cleartext_account_update(
+    msg: &Value,
+    account: AccountId,
+) -> Option<(BalanceUpdate, AccountMarginUpdate)> {
+    if msg.get("type").and_then(Value::as_str) != Some("account_update") {
+        return None;
+    }
+    let risk = msg.get("risk")?;
+    let wallet = json_str(risk, "wallet_balance").unwrap_or("0").to_string();
+    let available = json_str(risk, "available").unwrap_or("0").to_string();
+    let timestamp = json_u64(msg, "timestamp").unwrap_or_default();
+    let summary = AccountMarginSummary {
+        total_collateral: wallet.clone(),
+        position_margin: json_str(risk, "isolated_margin").unwrap_or("0").to_string(),
+        reserved_order_margin: json_str(risk, "order_margin").unwrap_or("0").to_string(),
+        free_collateral: available,
+        isolated_margin: json_str(risk, "isolated_margin").unwrap_or("0").to_string(),
+        isolated_equity: json_str(risk, "isolated_equity").unwrap_or("0").to_string(),
+        cross_im: json_str(risk, "cross_im").unwrap_or("0").to_string(),
+    };
+    Some((
+        BalanceUpdate {
+            account,
+            balance_raw: 0,
+            timestamp,
+            balance: wallet,
+            signed_balance_8dp: 0,
+            free_collateral_8dp: 0,
+        },
+        AccountMarginUpdate {
+            account,
+            server_timestamp: timestamp,
+            summary: Some(summary),
+        },
+    ))
+}
+
+fn parse_cleartext_open_orders_snapshot(msg: &Value) -> Option<OpenOrdersSnapshot> {
+    let rows = msg.get("rows").and_then(Value::as_array)?;
+    Some(OpenOrdersSnapshot {
+        rows: rows.iter().map(parse_open_order_row_json).collect(),
+        server_timestamp: json_u64(msg, "server_timestamp").unwrap_or_default(),
+        correlation_id: json_u128(msg, "correlation_id").unwrap_or_default(),
+    })
+}
+
+fn parse_open_order_row_json(msg: &Value) -> OpenOrderRow {
+    OpenOrderRow {
+        order_id: json_string(msg, "order_id", "0"),
+        symbol_id: json_u64(msg, "symbol_id").unwrap_or_default(),
+        side: parse_side(msg.get("side").and_then(Value::as_str).unwrap_or("BUY")),
+        order_type: parse_order_type(
+            msg.get("order_type")
+                .and_then(Value::as_str)
+                .unwrap_or("LIMIT"),
+        ),
+        price: json_string(msg, "price", "0"),
+        quantity: json_string(msg, "quantity", "0"),
+        filled_qty: json_string(msg, "filled_qty", "0"),
+        remaining_qty: json_string(msg, "remaining_qty", "0"),
+        order_status: parse_order_status(
+            msg.get("order_status")
+                .or_else(|| msg.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("NEW"),
+        ),
+        time_in_force: parse_time_in_force(
+            msg.get("time_in_force")
+                .and_then(Value::as_str)
+                .unwrap_or("GTC"),
+        ),
+        leverage: json_u64(msg, "leverage").unwrap_or(1) as u32,
+        timestamp: json_u64(msg, "timestamp").unwrap_or_default(),
+        correlation_id: json_u128(msg, "correlation_id").unwrap_or_default(),
+        expiry_time: json_u64(msg, "expiry_time"),
+        reduce_only: msg
+            .get("reduce_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        post_only: msg
+            .get("post_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        take_profit: msg
+            .get("take_profit")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        stop_loss: msg
+            .get("stop_loss")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -2170,6 +2333,25 @@ fn parse_side(raw: &str) -> Side {
     match raw {
         "SELL" => Side::Sell,
         _ => Side::Buy,
+    }
+}
+
+fn parse_order_type(raw: &str) -> OrderType {
+    match raw {
+        "MARKET" => OrderType::Market,
+        "PEG" => OrderType::Peg,
+        "STOP_MARKET" | "STOP" => OrderType::StopMarket,
+        "STOP_LIMIT" => OrderType::StopLimit,
+        _ => OrderType::Limit,
+    }
+}
+
+fn parse_time_in_force(raw: &str) -> TimeInForce {
+    match raw {
+        "IOC" => TimeInForce::Ioc,
+        "FOK" => TimeInForce::Fok,
+        "GTD" => TimeInForce::Gtd,
+        _ => TimeInForce::Gtc,
     }
 }
 
@@ -2460,6 +2642,67 @@ mod tests {
         assert!(client.take_positions_snapshot_receiver().is_none());
     }
 
+    #[test]
+    fn test_take_open_orders_snapshot_receiver() {
+        let mut client = GodarkClient::new(test_config());
+        assert!(client.take_open_orders_snapshot_receiver().is_some());
+        assert!(client.take_open_orders_snapshot_receiver().is_none());
+    }
+
+    #[test]
+    fn test_decode_open_orders_snapshot_is_delivered() {
+        use crate::generated::sequencer::v1 as sequencer;
+        use prost::Message;
+
+        let row = sequencer::OpenOrderRow {
+            order_id: 42,
+            symbol_id: 7,
+            side: Side::Buy.to_proto(),
+            order_type: OrderType::Limit.to_proto(),
+            price: "100".into(),
+            quantity: "1.5".into(),
+            filled_qty: "0".into(),
+            remaining_qty: "1.5".into(),
+            order_status: OrderStatus::New.to_proto(),
+            time_in_force: TimeInForce::Gtc.to_proto(),
+            leverage: 5,
+            timestamp: 9,
+            correlation_id: vec![],
+            expiry_time: None,
+            reduce_only: false,
+            post_only: true,
+            take_profit: Some("110".into()),
+            stop_loss: Some("90".into()),
+            tpsl_status: None,
+            close_reason: None,
+            peg_offset_bps: None,
+            trigger_price: None,
+        };
+        let snap = sequencer::OpenOrdersSnapshot {
+            rows: vec![row],
+            server_timestamp: 99,
+            correlation_id: 7u128.to_le_bytes().to_vec(),
+            decimal_places: 0,
+            error_code: None,
+            reject_text: None,
+        };
+        match decode_decrypted_push("open_orders_snapshot", &snap.encode_to_vec())
+            .expect("decode snapshot")
+        {
+            DecodedPush::OpenOrdersSnapshot(parsed) => {
+                assert_eq!(parsed.server_timestamp, 99);
+                assert_eq!(parsed.rows.len(), 1);
+                assert_eq!(parsed.rows[0].order_id, "42");
+                assert_eq!(parsed.rows[0].price, "100");
+                assert_eq!(parsed.rows[0].take_profit.as_deref(), Some("110"));
+                assert_eq!(parsed.rows[0].stop_loss.as_deref(), Some("90"));
+                assert!(parsed.rows[0].post_only);
+            }
+            DecodedPush::Ignored => panic!("open_orders_snapshot was parsed and dropped"),
+            _ => panic!("expected OpenOrdersSnapshot"),
+        }
+    }
+
     #[tokio::test]
     async fn test_place_order_when_disconnected() {
         let client = GodarkClient::new(test_config());
@@ -2545,6 +2788,117 @@ mod tests {
         assert_eq!(update.cancel_reason, Some(CancelReason::UserRequested));
         assert_eq!(update.correlation_id, 99);
         assert_eq!(update.timestamp, 123);
+    }
+
+    #[tokio::test]
+    async fn test_start_event_loop_routes_open_orders_snapshot() {
+        let mut client = GodarkClient::new(test_config());
+        let mut snap_rx = client
+            .take_open_orders_snapshot_receiver()
+            .expect("snapshot receiver");
+        let (event_tx, event_rx) = mpsc::channel(8);
+        client.start_event_loop(event_rx);
+        event_tx
+            .send(TransportEvent::OpenOrdersSnapshot(json!({
+                "type": "open_orders_snapshot",
+                "server_timestamp": 11,
+                "correlation_id": "7",
+                "rows": [{
+                    "order_id": "42",
+                    "symbol_id": 1,
+                    "side": "BUY",
+                    "order_type": "LIMIT",
+                    "price": "100",
+                    "quantity": "1",
+                    "filled_qty": "0",
+                    "remaining_qty": "1",
+                    "order_status": "NEW",
+                    "time_in_force": "GTC",
+                    "leverage": 2,
+                    "timestamp": 3,
+                    "correlation_id": "8",
+                    "take_profit": "120",
+                    "stop_loss": "80",
+                    "post_only": true
+                }]
+            })))
+            .await
+            .expect("send event");
+
+        let snap = tokio::time::timeout(Duration::from_millis(200), snap_rx.recv())
+            .await
+            .expect("receive timeout")
+            .expect("snapshot");
+        assert_eq!(snap.server_timestamp, 11);
+        assert_eq!(snap.correlation_id, 7);
+        assert_eq!(snap.rows.len(), 1);
+        assert_eq!(snap.rows[0].order_id, "42");
+        assert_eq!(snap.rows[0].take_profit.as_deref(), Some("120"));
+        assert_eq!(snap.rows[0].stop_loss.as_deref(), Some("80"));
+        assert!(snap.rows[0].post_only);
+    }
+
+    #[tokio::test]
+    async fn test_start_event_loop_routes_account_update() {
+        let mut client = GodarkClient::new(test_config());
+        let mut bal_rx = client.take_balance_receiver().expect("balance");
+        let mut mar_rx = client.take_account_margin_receiver().expect("margin");
+        let (event_tx, event_rx) = mpsc::channel(8);
+        client.start_event_loop(event_rx);
+        event_tx
+            .send(TransportEvent::AccountUpdate(json!({
+                "type": "account_update",
+                "timestamp": "42",
+                "risk": {
+                    "wallet_balance": "10.5",
+                    "available": "7",
+                    "isolated_margin": "2",
+                    "isolated_equity": "2.1",
+                    "order_margin": "1",
+                    "cross_im": "0.4"
+                }
+            })))
+            .await
+            .expect("send");
+        let bal = tokio::time::timeout(Duration::from_millis(200), bal_rx.recv())
+            .await
+            .expect("balance timeout")
+            .expect("balance");
+        let mar = tokio::time::timeout(Duration::from_millis(200), mar_rx.recv())
+            .await
+            .expect("margin timeout")
+            .expect("margin");
+        assert_eq!(bal.balance, "10.5");
+        assert_eq!(bal.timestamp, 42);
+        let summary = mar.summary.expect("summary");
+        assert_eq!(summary.free_collateral, "7");
+        assert_eq!(summary.reserved_order_margin, "1");
+        assert_eq!(summary.cross_im, "0.4");
+        assert_eq!(mar.server_timestamp, 42);
+    }
+
+    #[tokio::test]
+    async fn test_start_event_loop_routes_system_health() {
+        let mut client = GodarkClient::new(test_config());
+        let mut rx = client.take_system_health_receiver().expect("health");
+        let (event_tx, event_rx) = mpsc::channel(4);
+        client.start_event_loop(event_rx);
+        event_tx
+            .send(TransportEvent::SystemHealth(json!({
+                "type": "system_health",
+                "component_id": "sequencer",
+                "serving": true,
+                "timestamp": "77"
+            })))
+            .await
+            .expect("send");
+        let health = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("health");
+        assert_eq!(health.component_id, "sequencer");
+        assert!(health.serving);
+        assert_eq!(health.updated_at_nanos, 77);
     }
 
     #[tokio::test]

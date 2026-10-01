@@ -200,6 +200,31 @@ impl RestTransport {
         data_clone_from_env(&v)
     }
 
+    /// `GET /api/v1/orders/history` — terminal rows (plaintext after edge decrypt).
+    ///
+    /// The route returns either a raw `{rows, next_cursor}` object or a docs envelope.
+    pub async fn get_order_history(&self, bearer: &str, limit: u32) -> Result<Value> {
+        let mut h = HeaderMap::new();
+        h.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {bearer}"))
+                .map_err(|e| GodarkError::Connection(e.to_string()))?,
+        );
+        let r = self
+            .client
+            .get(self.url("/api/v1/orders/history"))
+            .query(&[("limit", limit.to_string())])
+            .headers(h)
+            .send()
+            .await
+            .map_err(|e| GodarkError::Connection(format!("GET order history: {e}")))?;
+        let v = parse_ok_json(r).await?;
+        if v.get("rows").is_some() {
+            return Ok(v);
+        }
+        data_clone_from_env(&v)
+    }
+
     /// Phase B (Zone A): edge stays stateless and never decrypts. After the SDK
     /// decrypts the encrypted place ACK locally, it posts the
     /// `(client_order_id, order_id)` mapping here so subsequent coid-based
@@ -210,10 +235,12 @@ impl RestTransport {
         bearer: &str,
         client_order_id: &str,
         order_id: &str,
+        correlation_id: &str,
     ) -> Result<Value> {
         let body = json!({
             "client_order_id": client_order_id,
             "order_id": order_id,
+            "correlation_id": correlation_id,
         });
         post_json_envelope(
             &self.client,
@@ -313,10 +340,22 @@ fn urlencode(s: &str) -> String {
 }
 
 async fn parse_ok_json(r: reqwest::Response) -> Result<Value> {
+    let status = r.status();
     let txt = r
         .text()
         .await
         .map_err(|e| GodarkError::Connection(format!("read body: {e}")))?;
+    if !status.is_success() {
+        let body = txt.trim();
+        return Err(if body.is_empty() {
+            GodarkError::Connection(format!("HTTP {status}"))
+        } else {
+            GodarkError::Connection(format!("HTTP {status}: {body}"))
+        });
+    }
+    if txt.trim().is_empty() {
+        return Ok(Value::Null);
+    }
     serde_json::from_str(&txt).map_err(|e| GodarkError::Connection(format!("json: {e}")))
 }
 
