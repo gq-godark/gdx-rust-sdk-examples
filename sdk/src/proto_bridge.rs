@@ -1298,6 +1298,7 @@ mod tests {
             take_profit_price: None,
             stop_loss_price: None,
             slippage_bps: None,
+            client_order_id: None,
         };
         let bytes = build_place_order_proto(
             42,
@@ -1337,6 +1338,7 @@ mod tests {
             take_profit_price: Some("110".into()),
             stop_loss_price: Some("90".into()),
             slippage_bps: None,
+            client_order_id: None,
         };
         let bytes = build_place_order_proto(
             42,
@@ -1387,6 +1389,7 @@ mod tests {
 
         let options = PlaceOrderOptions {
             slippage_bps: Some(200),
+            client_order_id: None,
             ..Default::default()
         };
         let bytes = build_place_order_proto(
@@ -1437,6 +1440,7 @@ mod tests {
         let options = PlaceOrderOptions {
             quote_notional: Some("250".into()),
             slippage_bps: Some(100),
+            client_order_id: None,
             ..Default::default()
         };
         let quote = build_place_order_proto(

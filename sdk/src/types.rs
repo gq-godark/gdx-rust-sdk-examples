@@ -132,6 +132,15 @@ pub struct PlaceOrderOptions {
     pub stop_loss_price: Option<String>,
     /// Max walk vs mark for market / stop-market (basis points). `None` → venue max.
     pub slippage_bps: Option<u32>,
+    /// Cleartext client order id. After a successful WebSocket place ack,
+    /// [`GodarkClient`](crate::GodarkClient) posts this id to
+    /// `POST /api/v1/orders/_register_coid` with the header correlation id
+    /// (decimal `u128`) and the decimal `order_id`. The process-local cache is
+    /// written only after HTTP 200. A non-200 response fails the place call.
+    /// The edge arms place correlation for WebSocket Place only, so
+    /// [`GodarkRestClient`](crate::GodarkRestClient) place leaves this id
+    /// unregistered on the edge.
+    pub client_order_id: Option<String>,
 }
 
 /// RPC reply for amend / cancel TP-SL (`NodeResponse::tpsl_ack`).

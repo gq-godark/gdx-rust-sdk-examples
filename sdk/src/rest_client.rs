@@ -488,9 +488,14 @@ impl GodarkRestClient {
         Ok(())
     }
 
-    /// Place an encrypted order. `client_order_id` is sent additively (cleartext) only
-    /// for the edge's `client_order_id → order_id` lookup index — it is also embedded
-    /// inside the encrypted `OrderHeader` AAD so the sequencer can dedup.
+    /// Place an encrypted order.
+    ///
+    /// `client_order_id`, when set, is forwarded as cleartext on the REST body.
+    /// It is not registered with the edge: place correlation is armed only for
+    /// WebSocket Place, so `POST /api/v1/orders/_register_coid` after a REST
+    /// place returns 400 `unknown place correlation`. Register from
+    /// [`GodarkClient`](crate::GodarkClient) with
+    /// [`PlaceOrderOptions::client_order_id`](crate::types::PlaceOrderOptions::client_order_id).
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order(
         &mut self,
@@ -563,45 +568,16 @@ impl GodarkRestClient {
             self.resolve_decimals(symbol_id),
         )?;
 
-        let coid_for_register = client_order_id.clone();
         let ack = self
             .send_encrypted_order(
                 EncryptedCall::new("place", symbol_id, &plaintext, &corr_id)
                     .client_order_id(client_order_id),
             )
             .await?;
-
-        // Phase B (Zone A): edge stays stateless and never decrypts. After we
-        // decrypt the encrypted place ACK locally we must populate the edge's
-        // `(client_order_id → order_id)` index so subsequent coid-based
-        // resolution works (`cancel_order_by_client_id`, `?client_order_id=`).
-        // Registration failures must NEVER bubble up — they don't invalidate
-        // the placed order.
-        if let Some(coid) = coid_for_register {
-            if ack.success && !ack.order_id.is_empty() {
-                self.local_coid_index
-                    .insert(coid.clone(), ack.order_id.clone());
-                let bearer = self.current_bearer()?.to_string();
-                let correlation_decimal = decimal_correlation_id(&corr_id);
-                if let Err(err) = self
-                    .http
-                    .register_client_order_mapping(
-                        &bearer,
-                        &coid,
-                        &ack.order_id,
-                        &correlation_decimal,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        client_order_id = %coid,
-                        order_id = %ack.order_id,
-                        error = %err,
-                        "register_client_order_mapping failed; coid lookups may not resolve until next place"
-                    );
-                }
-            }
-        }
+        // Leave `local_coid_index` empty. A process-local insert is not an
+        // edge mapping, and REST place cannot register one (no armed
+        // correlation). Callers resolve via `GET /api/v1/orders?client_order_id=`
+        // after a WebSocket place has registered the id.
         Ok(ack)
     }
 
@@ -1362,13 +1338,17 @@ fn parse_order_ack(v: &Value) -> Result<OrderAck, GodarkError> {
 
 /// Decimal form of the place-header correlation id (big-endian UUID bytes).
 /// Edge `_register_coid` requires this non-zero decimal string.
-fn decimal_correlation_id(raw: &[u8]) -> String {
+pub(crate) fn decimal_correlation_id(raw: &[u8]) -> Option<String> {
     if raw.len() != 16 {
-        return String::new();
+        return None;
     }
     let mut arr = [0u8; 16];
     arr.copy_from_slice(raw);
-    u128::from_be_bytes(arr).to_string()
+    let value = u128::from_be_bytes(arr);
+    if value == 0 {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 fn order_lookup_miss(err: &GodarkError) -> bool {
@@ -1515,6 +1495,16 @@ mod tests {
                 std::env::remove_var(&k);
             }
         }
+    }
+
+    #[test]
+    fn decimal_correlation_id_is_header_u128() {
+        assert_eq!(
+            decimal_correlation_id(&99u128.to_be_bytes()).as_deref(),
+            Some("99")
+        );
+        assert!(decimal_correlation_id(&[0u8; 16]).is_none());
+        assert!(decimal_correlation_id(&[1u8; 15]).is_none());
     }
 
     #[test]

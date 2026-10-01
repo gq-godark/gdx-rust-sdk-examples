@@ -79,6 +79,12 @@ pub struct GodarkClient {
     /// Serializes HPKE encrypt + WS send so ciphertext nonces hit the wire
     /// in order under concurrent place/cancel/modify.
     encrypted_send_lock: Arc<AsyncMutex<()>>,
+    /// JWT minted for WebSocket login. Used to register a client order id
+    /// after a successful WebSocket place.
+    access_token: Arc<Mutex<Option<String>>>,
+    /// `(client_order_id → order_id)` written only after
+    /// `POST /orders/_register_coid` returns HTTP 200.
+    coid_index: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl GodarkClient {
@@ -133,6 +139,8 @@ impl GodarkClient {
             place_outcomes: Arc::new(Mutex::new(PlaceOutcomeState::default())),
             encrypted_ack_waiters: Arc::new(Mutex::new(HashMap::new())),
             encrypted_send_lock: Arc::new(AsyncMutex::new(())),
+            access_token: Arc::new(Mutex::new(None)),
+            coid_index: Arc::new(Mutex::new(HashMap::new())),
             config,
         }
     }
@@ -234,6 +242,7 @@ impl GodarkClient {
             &self.transport,
             &self.session,
             &self.account,
+            &self.access_token,
         )
         .await?;
         self.connected.store(true, Ordering::SeqCst);
@@ -265,6 +274,12 @@ impl GodarkClient {
         }
         if let Ok(mut guard) = self.account.lock() {
             *guard = None;
+        }
+        if let Ok(mut token) = self.access_token.lock() {
+            *token = None;
+        }
+        if let Ok(mut index) = self.coid_index.lock() {
+            index.clear();
         }
     }
 
@@ -419,6 +434,7 @@ impl GodarkClient {
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
         let uuid = self.current_account()?;
+        let client_order_id = options.client_order_id.clone();
 
         let plaintext = proto_bridge::build_place_order_proto(
             symbol_id,
@@ -455,6 +471,21 @@ impl GodarkClient {
                 return Err(err);
             }
         };
+        if let Some(coid) = client_order_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Err(err) = self
+                .register_placed_client_order(coid, &ack.order_id, &corr_id)
+                .await
+            {
+                if let Some((token, _)) = outcome {
+                    self.cancel_place_outcome_waiter(token);
+                }
+                return Err(err);
+            }
+        }
         let Some((token, receiver)) = outcome else {
             return Ok(ack);
         };
@@ -859,6 +890,67 @@ impl GodarkClient {
             .send_encrypted_command(request_type, symbol_id, plaintext, correlation_id)
             .await?;
         self.parse_order_response(&response)
+    }
+
+    /// Post the place-header correlation so the edge stores
+    /// `(client_order_id → order_id)`. The local cache is updated only after
+    /// HTTP 200. A 400 (`unknown place correlation` and any other non-200)
+    /// is returned to the caller.
+    async fn register_placed_client_order(
+        &self,
+        client_order_id: &str,
+        order_id: &str,
+        correlation_id: &[u8],
+    ) -> Result<(), GodarkError> {
+        if order_id.is_empty() || order_id == "0" {
+            return Err(GodarkError::Order {
+                message: "client_order_id registration requires a decimal order_id".into(),
+                error_code: None,
+                user_message: None,
+            });
+        }
+        let correlation =
+            crate::rest_client::decimal_correlation_id(correlation_id).ok_or_else(|| {
+                GodarkError::Config(
+                    "client_order_id registration requires a non-zero place correlation_id".into(),
+                )
+            })?;
+        let bearer = self
+            .access_token
+            .lock()
+            .map_err(|_| GodarkError::Session("access token mutex poisoned".into()))?
+            .clone()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                GodarkError::Authentication(
+                    "client_order_id registration requires the WebSocket access token".into(),
+                )
+            })?;
+        let rest = crate::rest_client::resolve_rest_base_url(Some(self.config.base_url.clone()));
+        let http = crate::rest_transport::RestTransport::new(rest);
+        http.register_client_order_mapping(&bearer, client_order_id, order_id, &correlation)
+            .await
+            .map_err(|err| {
+                GodarkError::Connection(format!(
+                    "placed {order_id}; client_order_id registration failed: {err}"
+                ))
+            })?;
+        let mut index = self
+            .coid_index
+            .lock()
+            .map_err(|_| GodarkError::Session("client order index mutex poisoned".into()))?;
+        if index
+            .get(client_order_id)
+            .is_some_and(|existing| existing != order_id)
+        {
+            tracing::warn!(
+                client_order_id,
+                order_id,
+                "client_order_id cache replaced after edge register"
+            );
+        }
+        index.insert(client_order_id.to_string(), order_id.to_string());
+        Ok(())
     }
 
     /// Encrypts `plaintext`, sends it over the wire with the appropriate op for
@@ -1338,6 +1430,7 @@ impl GodarkClient {
         let reconnect_tx = self.reconnect_tx.clone();
         let place_outcomes = Arc::clone(&self.place_outcomes);
         let encrypted_ack_waiters = Arc::clone(&self.encrypted_ack_waiters);
+        let access_token = Arc::clone(&self.access_token);
 
         self.event_handle = Some(tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
@@ -1554,6 +1647,7 @@ impl GodarkClient {
                             &transport,
                             &session,
                             &account,
+                            &access_token,
                             &desired_channels,
                             &connected,
                             &reconnect_attempts,
@@ -1586,6 +1680,7 @@ impl GodarkClient {
                             &transport,
                             &session,
                             &account,
+                            &access_token,
                             &desired_channels,
                             &connected,
                             &reconnect_attempts,
@@ -1711,15 +1806,38 @@ async fn establish_transport_connection(
     transport: &Arc<AsyncMutex<EdgeTransport>>,
     session: &Arc<Mutex<CryptoSession>>,
     account_slot: &Arc<Mutex<Option<AccountId>>>,
+    access_token: &Arc<Mutex<Option<String>>>,
 ) -> Result<mpsc::Receiver<TransportEvent>, GodarkError> {
     let login_token = resolve_ws_login_token(config).await?;
+    {
+        let mut slot = access_token
+            .lock()
+            .map_err(|_| GodarkError::Session("access token mutex poisoned".into()))?;
+        *slot = Some(login_token.clone());
+    }
+    let clear_token = || {
+        if let Ok(mut slot) = access_token.lock() {
+            *slot = None;
+        }
+    };
 
     let mut transport = transport.lock().await;
-    transport.connect().await?;
+    if let Err(err) = transport.connect().await {
+        clear_token();
+        return Err(err);
+    }
 
-    let auth_result = transport.authenticate(&login_token).await?;
+    let auth_result = match transport.authenticate(&login_token).await {
+        Ok(result) => result,
+        Err(err) => {
+            transport.disconnect().await;
+            clear_token();
+            return Err(err);
+        }
+    };
     if auth_result.get("success").and_then(|v| v.as_bool()) != Some(true) {
         transport.disconnect().await;
+        clear_token();
         let err = auth_result
             .get("error")
             .and_then(|v| v.as_str())
@@ -1729,6 +1847,7 @@ async fn establish_transport_connection(
 
     let uid = parse_account_from_auth(&auth_result).or_else(|_| {
         config.account.ok_or_else(|| {
+            clear_token();
             GodarkError::Authentication(
                 "auth response has no account and none configured \
                      (set GODARK_ACCOUNT or pass .account() to the builder)"
@@ -1746,7 +1865,7 @@ async fn establish_transport_connection(
 
     if let Err(err) = setup_hpke_session_with_transport(
         &uid,
-        parse_conn_id_from_auth(&auth_result)?,
+        parse_conn_id_from_auth(&auth_result).inspect_err(|_| clear_token())?,
         config,
         &transport,
         session,
@@ -1754,15 +1873,22 @@ async fn establish_transport_connection(
     .await
     {
         transport.disconnect().await;
+        clear_token();
         if let Ok(mut guard) = account_slot.lock() {
             *guard = None;
         }
         return Err(err);
     }
 
-    transport
-        .take_event_receiver()
-        .ok_or_else(|| GodarkError::Session("No event receiver after connect".into()))
+    match transport.take_event_receiver() {
+        Some(rx) => Ok(rx),
+        None => {
+            clear_token();
+            Err(GodarkError::Session(
+                "No event receiver after connect".into(),
+            ))
+        }
+    }
 }
 
 async fn setup_hpke_session_with_transport(
@@ -1874,6 +2000,7 @@ async fn reconnect_transport(
     transport: &Arc<AsyncMutex<EdgeTransport>>,
     session: &Arc<Mutex<CryptoSession>>,
     account_slot: &Arc<Mutex<Option<AccountId>>>,
+    access_token: &Arc<Mutex<Option<String>>>,
     desired_channels: &Arc<Mutex<HashSet<String>>>,
     connected: &Arc<AtomicBool>,
     reconnect_attempts: &Arc<AtomicU32>,
@@ -1910,7 +2037,9 @@ async fn reconnect_transport(
                 EdgeTransport::new(&config::ws_url(&config.base_url), config.transport.clone());
         }
 
-        match establish_transport_connection(config, transport, session, account_slot).await {
+        match establish_transport_connection(config, transport, session, account_slot, access_token)
+            .await
+        {
             Ok(rx) => {
                 if let Err(err) = resubscribe_desired_channels(transport, desired_channels).await {
                     connected.store(false, Ordering::SeqCst);
