@@ -7,7 +7,8 @@ It includes:
   loop — no private crates registry required, no `protoc` required
   (pre-generated protobuf bindings ship with the SDK under
   `sdk/src/generated/`)
-- **example sources** (`quickstart` + `full_trader_example`) shipped in a
+- **example sources** (`quickstart`, `full_trader_example`, and
+  `rest_client_example`) shipped in a
   `.zip` release — recipients build with `cargo build`
 - a simple **`.env`** workflow (no shell `export` required)
 
@@ -58,6 +59,8 @@ Optional:
 
 - `GODARK_EDGE_URL` — override the edge URL (default: public testnet `wss://api.godark-dex.com` via the SDK Testnet environment preset).
 - `GDX_HPKE_STATIC_PUBLIC_KEY` — sequencer HPKE static public key (64 hex). Required for **localnet/devnet** encrypted trading Aliases: `GDX_HPKE_STATIC_PUBKEY`, `GODARK_HPKE_STATIC_PUBLIC_KEY`, `VITE_GDX_HPKE_STATIC_PUBKEY`.
+- `GODARK_ACCOUNT` — 32-byte account encoded as base58; only needed when
+  local static-key authentication does not return `account`.
 
 The OS environment always wins over `.env`.
 
@@ -66,8 +69,9 @@ The OS environment always wins over `.env`.
 ```bash
 GODARK_EDGE_URL=ws://127.0.0.1:13300
 GODARK_API_KEY=test-key-1
+GODARK_ACCOUNT=<base58-32-byte-account>
 GDX_HPKE_STATIC_PUBLIC_KEY=1d61f116451fdfda1aa4aaf50b7200c3b362d0445bfa2d7ef1f80b3b8881a533
-gdx fund 00000000-0000-4000-8000-000000000001
+gdx fund <base58-32-byte-account>
 ```
 
 Copy `VITE_GDX_HPKE_STATIC_PUBKEY` from `gdx-web/.env.localnet` if your pin differs.
@@ -119,10 +123,47 @@ get fast incremental builds and IDE go-to-definition into the SDK source.
 | Sample | Source | Purpose |
 |--------|--------|---------|
 | `quickstart` | `examples/quickstart.rs` | Minimal connect → `subscribe(["orders"])` → LIMIT sell far from touch → cancel (book confirmation needs the private orders channel) |
-| `full_trader_example` | `examples/full_trader_example.rs` | Reference bot flow with all 6 sequencer push callbacks, place / modify / cancel, mass-quote / batch-cancel, and queued-update drain |
+| `full_trader_example` | `examples/full_trader_example.rs` | Reference bot: sequencer push receivers, place / modify / cancel, mass-quote / batch-cancel, and queued-update drain |
+| `full_trader_rest` | `examples/full_trader_rest.rs` | Development-only REST reference flow with account preflight and trading commands |
+| `rest_client_example` | `examples/rest_client_example.rs` | Bundle-safe REST auth, account reads, and public market-data queries |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and
-**`LIMIT`**.
+**`LIMIT`**. Place / modify / mass-quote / batch-modify / TP-SL /
+`quote_notional` / `min_fill_size` / trigger prices and sizes are **decimal
+strings only** (for example `"0.01"`, `Some("67500.5")`). There is no public
+`f64` / `f32` / integer price or size input; invalid strings are rejected.
+
+## Current SDK flow
+
+`sdk/UPSTREAM_REF` is `92e087b52f00f9457b73978e6101dff1a270c20a`. Follow this
+order. Environment **names** (values live in `.env`):
+
+- `GODARK_API_KEY_ID`, `GODARK_API_SECRET`, `GODARK_PASSPHRASE`
+- optional: `GODARK_EDGE_URL`, `GODARK_REST_URL`, `GDX_HPKE_STATIC_PUBLIC_KEY`, `GODARK_ACCOUNT`
+
+1. **Install** — `cargo build --release --examples` from a clone or unzipped bundle.
+2. **REST auth** — `GodarkRestClient::connect` calls `POST /api/v1/auth/token`
+   with `grant_type=client_credentials` and stores `access_token`.
+3. **WebSocket login** — `GodarkClient::connect` uses that REST access token
+   on the `/ws/v1` `login` frame. The socket does not accept
+   `key_id:secret:passphrase`.
+4. **Subscribe** — channels are `orders`, `positions`, `volume`,
+   `open_interest`, `funding_rate`. `/ws/v1` has no `trades` or L2 book.
+   Call `take_open_orders_snapshot_receiver()` before `connect`. The SDK
+   delivers `open_orders_snapshot` on that receiver (orders-channel hydrate
+   and later replaces).
+5. **String place** — `quantity` and `price` are `&str` (`"0.01"`,
+   `Some("68000")`). `slippage_bps` is only for `MARKET` and `STOP_MARKET`.
+   `peg_offset_bps` does not imply post-only; set `post_only` yourself.
+6. **Client order id** — registered only after a successful WebSocket place.
+   The local cache is written only after `POST /api/v1/orders/_register_coid`
+   returns HTTP 200. REST `place_order` forwards the id in the body and does
+   **not** register it.
+7. **Read position** — REST `get_positions()` or the `positions` subscription
+   via `take_positions_snapshot_receiver()`.
+8. **Cancel** — `cancel_order(order_id, symbol)` (WebSocket or REST).
+
+
 
 ## Packaging for market makers
 
@@ -140,7 +181,8 @@ Output lands in the repo root as
 `godark-rust-sdk-<bundle>.zip`. The zip includes:
 
 - `Cargo.toml` — workspace manifest (`godark = { path = "sdk" }`) for source builds
-- `examples/*.rs` — example source files (`quickstart.rs`, `full_trader_example.rs`, `dotenv.rs`)
+- `examples/*.rs` — bundle source files (`quickstart.rs`,
+  `full_trader_example.rs`, `rest_client_example.rs`, `dotenv.rs`)
 - `sdk/` — bundled `godark` crate source
 - `README.md`, `SDK_REFERENCE.md` — recipient-facing docs from `bundle/`
 - `.env.example` — credential template
@@ -178,7 +220,7 @@ CI publishes a tagged `godark-rust-sdk-*.zip` on every push to
 
 | Path | Purpose |
 |------|---------|
-| `examples/` | Source for runnable MM examples (`quickstart.rs`, `full_trader_example.rs`, `dotenv.rs` helper) |
+| `examples/` | Source for runnable MM examples (including the shared `dotenv.rs` helper) |
 | `Cargo.toml` | Examples crate; depends on the vendored `godark` via `path = "sdk"` |
 | `sdk/` | Vendored `godark` SDK source (with pre-generated protobuf bindings under `sdk/src/generated/`) |
 | `sdk/UPSTREAM_REF` | Pinned upstream `gdx-rust-sdk` commit; CI rebuilds against this exact ref |

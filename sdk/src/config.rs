@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
 
-use uuid::Uuid;
-
+use crate::decimals::InstrumentDecimals;
 use crate::error::GodarkError;
+use crate::types::AccountId;
 
 /// Default edge base URL (host only). The transport appends `/ws/v1` at
 /// connect time.
@@ -117,15 +117,18 @@ impl Default for TransportConfig {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct GodarkConfig {
+    /// Legacy opaque WebSocket login token (`api_key`). Empty when using
+    /// `api_key_id` + `api_secret` + passphrase (those mint a REST access token
+    /// at connect time instead of putting the secret on the socket).
     pub auth_token: String,
     pub base_url: String,
     pub auto_reconnect: bool,
     pub symbol_map: HashMap<String, u64>,
     pub transport: TransportConfig,
-    /// Pre-configured user UUID. When the edge auth response does not include
-    /// `user_uuid`, the SDK falls back to this value.  Resolved from
-    /// `.user_uuid()` builder call or `GODARK_USER_UUID` / `GDX_USER_UUID`.
-    pub user_uuid: Option<Uuid>,
+    /// Pre-configured account. When the edge auth response does not include
+    /// `account`, the SDK falls back to this value.  Resolved from
+    /// `.account()` builder call or `GODARK_ACCOUNT` / `GDX_ACCOUNT`.
+    pub account: Option<AccountId>,
     /// Pinned sequencer HPKE static X25519 public key (64 hex).
     /// From `.hpke_static_public_key_hex()`, `GDX_HPKE_STATIC_PUBLIC_KEY`, or Environment preset.
     pub hpke_static_public_key_hex: Option<String>,
@@ -137,6 +140,12 @@ pub struct GodarkConfig {
     pub(crate) place_order_terminal_timeout: Duration,
     /// When true, caller supplied custom symbols via builder; skip edge fetch.
     pub(crate) explicit_symbol_map: bool,
+    /// Client-credentials triple for minting `POST /api/v1/auth/token`.
+    pub(crate) api_key_id: Option<String>,
+    pub(crate) api_secret: Option<String>,
+    pub(crate) passphrase: Option<String>,
+    /// Per-`symbol_id` price/quantity decimal scales (from instruments).
+    pub(crate) instrument_decimals: HashMap<u64, InstrumentDecimals>,
 }
 
 impl GodarkConfig {
@@ -158,7 +167,7 @@ pub struct GodarkConfigBuilder {
     auto_reconnect: bool,
     symbol_map: HashMap<String, u64>,
     transport: TransportConfig,
-    user_uuid: Option<Uuid>,
+    account: Option<AccountId>,
     hpke_static_public_key_hex: Option<String>,
     place_order_terminal_timeout: Option<Duration>,
     explicit_symbol_map: bool,
@@ -179,7 +188,7 @@ impl GodarkConfigBuilder {
             auto_reconnect: true,
             symbol_map: symbols,
             transport: TransportConfig::default(),
-            user_uuid: None,
+            account: None,
             hpke_static_public_key_hex: None,
             place_order_terminal_timeout: None,
             explicit_symbol_map: false,
@@ -236,11 +245,11 @@ impl GodarkConfigBuilder {
         self
     }
 
-    /// Set the user UUID explicitly. Required when the edge auth response does
-    /// not return `user_uuid` (e.g. localnet / static-key auth). Falls back to
-    /// `GODARK_USER_UUID` / `GDX_USER_UUID` environment variables at build time.
-    pub fn user_uuid(mut self, uuid: impl Into<String>) -> Self {
-        self.user_uuid = Uuid::parse_str(&uuid.into()).ok();
+    /// Set the account explicitly. Required when the edge auth response does
+    /// not return `account` (e.g. localnet / static-key auth). Falls back to
+    /// `GODARK_ACCOUNT` / `GDX_ACCOUNT` environment variables at build time.
+    pub fn account(mut self, account: impl Into<String>) -> Self {
+        self.account = account.into().parse().ok();
         self
     }
 
@@ -257,50 +266,52 @@ impl GodarkConfigBuilder {
     }
 
     pub fn build(self) -> Result<GodarkConfig, GodarkError> {
-        let auth_token = match (self.api_key_id, self.api_secret, self.api_key) {
-            (Some(id), Some(secret), None) => {
-                let pp = resolve_passphrase(self.passphrase.as_deref()).ok_or_else(|| {
-                    GodarkError::Config(
-                        "passphrase is required when using api_key_id and api_secret".into(),
-                    )
-                })?;
-                format!("{id}:{secret}:{pp}")
-            }
-            (None, None, Some(key)) => {
-                if self
-                    .passphrase
-                    .as_ref()
-                    .is_some_and(|pp| !pp.trim().is_empty())
-                {
+        let (auth_token, api_key_id, api_secret, passphrase) =
+            match (self.api_key_id, self.api_secret, self.api_key) {
+                (Some(id), Some(secret), None) => {
+                    let pp = resolve_passphrase(self.passphrase.as_deref()).ok_or_else(|| {
+                        GodarkError::Config(
+                            "passphrase is required when using api_key_id and api_secret".into(),
+                        )
+                    })?;
+                    // Do not concatenate the secret into auth_token — connect mints a JWT.
+                    (String::new(), Some(id), Some(secret), Some(pp))
+                }
+                (None, None, Some(key)) => {
+                    if self
+                        .passphrase
+                        .as_ref()
+                        .is_some_and(|pp| !pp.trim().is_empty())
+                    {
+                        return Err(GodarkError::Config(
+                            "passphrase must not be set when using legacy api_key".into(),
+                        ));
+                    }
+                    (key, None, None, None)
+                }
+                (Some(_), None, _) | (None, Some(_), _) => {
                     return Err(GodarkError::Config(
-                        "passphrase must not be set when using legacy api_key".into(),
+                        "api_key_id and api_secret must be provided together".into(),
                     ));
                 }
-                key
-            }
-            (Some(_), None, _) | (None, Some(_), _) => {
-                return Err(GodarkError::Config(
-                    "api_key_id and api_secret must be provided together".into(),
-                ));
-            }
-            (Some(_), Some(_), Some(_)) => {
-                return Err(GodarkError::Config(
-                    "use either api_key or (api_key_id, api_secret), not both".into(),
-                ));
-            }
-            (None, None, None) => {
-                return Err(GodarkError::Config(
-                    "provide api_key or both api_key_id and api_secret".into(),
-                ));
-            }
-        };
+                (Some(_), Some(_), Some(_)) => {
+                    return Err(GodarkError::Config(
+                        "use either api_key or (api_key_id, api_secret), not both".into(),
+                    ));
+                }
+                (None, None, None) => {
+                    return Err(GodarkError::Config(
+                        "provide api_key or both api_key_id and api_secret".into(),
+                    ));
+                }
+            };
 
         let base_url = resolve_edge_base_url_with_default(
             self.base_url.as_deref(),
             self.environment.edge_base_url(),
         );
 
-        let user_uuid = self.user_uuid.or_else(resolve_user_uuid_env);
+        let account = self.account.or_else(resolve_account_env);
         let environment = self.environment;
         let pin_env = if self
             .base_url
@@ -332,10 +343,14 @@ impl GodarkConfigBuilder {
             auto_reconnect: self.auto_reconnect,
             symbol_map: self.symbol_map,
             transport: self.transport,
-            user_uuid,
+            account,
             hpke_static_public_key_hex,
             place_order_terminal_timeout,
             explicit_symbol_map: self.explicit_symbol_map,
+            api_key_id,
+            api_secret,
+            passphrase,
+            instrument_decimals: crate::instruments::offline_instrument_decimals(),
         })
     }
 }
@@ -391,12 +406,12 @@ pub fn resolve_passphrase(explicit: Option<&str>) -> Option<String> {
     None
 }
 
-/// Resolve user UUID from `GODARK_USER_UUID` or `GDX_USER_UUID` environment variables.
-fn resolve_user_uuid_env() -> Option<Uuid> {
-    for key in &["GODARK_USER_UUID", "GDX_USER_UUID"] {
+/// Resolve account from `GODARK_ACCOUNT` or `GDX_ACCOUNT` environment variables.
+fn resolve_account_env() -> Option<AccountId> {
+    for key in &["GODARK_ACCOUNT", "GDX_ACCOUNT"] {
         if let Ok(v) = env::var(key) {
-            if let Ok(u) = Uuid::parse_str(v.trim()) {
-                return Some(u);
+            if let Ok(account) = v.trim().parse() {
+                return Some(account);
             }
         }
     }
@@ -545,7 +560,11 @@ mod tests {
             .passphrase("pp")
             .build()
             .unwrap();
-        assert_eq!(cfg.auth_token, "id:secret:pp");
+        assert!(cfg.auth_token.is_empty());
+        assert_eq!(cfg.api_key_id.as_deref(), Some("id"));
+        assert_eq!(cfg.api_secret.as_deref(), Some("secret"));
+        assert_eq!(cfg.passphrase.as_deref(), Some("pp"));
+        assert!(!cfg.auth_token.contains("secret"));
     }
 
     #[test]
@@ -598,7 +617,9 @@ mod tests {
             .api_secret("secret")
             .build()
             .unwrap();
-        assert_eq!(cfg.auth_token, "id:secret:env-pp");
+        assert!(cfg.auth_token.is_empty());
+        assert_eq!(cfg.passphrase.as_deref(), Some("env-pp"));
+        assert!(!cfg.auth_token.contains("secret"));
 
         if let Some(v) = old_g {
             std::env::set_var("GODARK_PASSPHRASE", v);

@@ -2,10 +2,9 @@
 
 use std::collections::HashSet;
 
-use uuid::Uuid;
-
 use crate::error::GodarkError;
 use crate::hpke::{self, SealedSession, TAG_LEN};
+use crate::types::AccountId;
 
 pub struct CryptoSession {
     sealed: Option<SealedSession>,
@@ -52,13 +51,13 @@ impl CryptoSession {
     pub fn setup(
         &mut self,
         recipient_public: &[u8; 32],
-        user_uuid: Uuid,
+        account: AccountId,
         conn_id: u64,
     ) -> Result<Vec<u8>, GodarkError> {
         if conn_id == 0 {
             return Err(GodarkError::Session("HPKE conn_id must be non-zero".into()));
         }
-        let info = hpke::info_for_conn(user_uuid, conn_id);
+        let info = hpke::info_for_conn(account, conn_id);
         let (encapped, sealed) = hpke::setup_session(recipient_public, &info)?;
         self.pending_sealed = Some(sealed);
         self.pending_conn_id = conn_id;
@@ -87,10 +86,10 @@ impl CryptoSession {
     /// One-shot REST HPKE (conn_id is 0 on the order header).
     pub fn setup_rest(
         recipient_public: &[u8; 32],
-        user_uuid: Uuid,
+        account: AccountId,
         request_id: u64,
     ) -> Result<(Vec<u8>, SealedSession), GodarkError> {
-        let info = hpke::info_for_rest_request(user_uuid, request_id);
+        let info = hpke::info_for_rest_request(account, request_id);
         hpke::setup_session(recipient_public, &info)
     }
 
@@ -156,7 +155,7 @@ mod tests {
     #[test]
     fn setup_encrypt_decrypt_roundtrip() {
         let seq = StaticKeyPair::generate().unwrap();
-        let user = Uuid::from_u128(1);
+        let user = AccountId::from_bytes([1; AccountId::LEN]);
         let mut client = CryptoSession::new();
         let enc = client.setup(seq.public_key(), user, 9).unwrap();
         assert!(!client.is_established());

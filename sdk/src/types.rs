@@ -1,11 +1,84 @@
 // Domain types for the public SDK surface.
 
+use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::enums::{CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce};
+
+/// GoDark L2 account identifier (32 bytes, displayed as a Solana-style base58 address).
+///
+/// The authenticated edge returns this value in the `account` field and in the
+/// access JWT `sub` claim. It is also bound into every HPKE info string and
+/// encrypted command body.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct AccountId([u8; 32]);
+
+impl AccountId {
+    pub const LEN: usize = 32;
+
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; Self::LEN]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; Self::LEN] {
+        &self.0
+    }
+
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, String> {
+        let bytes: [u8; Self::LEN] = bytes
+            .try_into()
+            .map_err(|_| format!("account must be {} bytes, got {}", Self::LEN, bytes.len()))?;
+        Ok(Self(bytes))
+    }
+}
+
+impl fmt::Debug for AccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Display for AccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&bs58::encode(self.0).into_string())
+    }
+}
+
+impl FromStr for AccountId {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let bytes = bs58::decode(value.trim())
+            .into_vec()
+            .map_err(|error| format!("invalid base58 account: {error}"))?;
+        Self::try_from_slice(&bytes)
+    }
+}
+
+impl Serialize for AccountId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for AccountId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// Lifecycle notifications for trading client reconnect (and market data reconnect).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,21 +110,37 @@ pub struct LeverageSettings {
     #[serde(default)]
     pub settings: Vec<LeverageSetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_uuid: Option<Uuid>,
+    pub account: Option<AccountId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_timestamp: Option<u64>,
 }
 
 /// Optional place-order flags mirrored from gdx-web / sequencer `PlaceOrderInput`.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+///
+/// Price / size fields are human decimal strings (validated against instrument
+/// decimals before sealing). Example: `quote_notional: Some("250".into())`.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PlaceOrderOptions {
     pub reduce_only: bool,
     pub post_only: bool,
     pub stp_mode: crate::enums::StpMode,
+    /// Quote-currency notional sizing. Mutually exclusive with base `quantity`.
+    pub quote_notional: Option<String>,
     pub peg_offset_bps: Option<i32>,
-    pub trigger_price: Option<f64>,
-    pub take_profit_price: Option<f64>,
-    pub stop_loss_price: Option<f64>,
+    pub trigger_price: Option<String>,
+    pub take_profit_price: Option<String>,
+    pub stop_loss_price: Option<String>,
+    /// Max walk vs mark for market / stop-market (basis points). `None` → venue max.
+    pub slippage_bps: Option<u32>,
+    /// Cleartext client order id. After a successful WebSocket place ack,
+    /// [`GodarkClient`](crate::GodarkClient) posts this id to
+    /// `POST /api/v1/orders/_register_coid` with the header correlation id
+    /// (decimal `u128`) and the decimal `order_id`. The process-local cache is
+    /// written only after HTTP 200. A non-200 response fails the place call.
+    /// The edge arms place correlation for WebSocket Place only, so
+    /// [`GodarkRestClient`](crate::GodarkRestClient) place leaves this id
+    /// unregistered on the edge.
+    pub client_order_id: Option<String>,
 }
 
 /// RPC reply for amend / cancel TP-SL (`NodeResponse::tpsl_ack`).
@@ -101,11 +190,13 @@ pub struct OrderAck {
 }
 
 /// One cancel-replace leg of a mass quote. Mirrors the Python SDK leg dict.
+///
+/// `price` / `quantity` are human decimal strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MassQuoteLegInput {
     pub side: Side,
-    pub price: f64,
-    pub quantity: f64,
+    pub price: String,
+    pub quantity: String,
     /// Resting order to cancel-replace. `None`/`0` = pure place (no cancel target).
     #[serde(default)]
     pub cancel_order_id: Option<u64>,
@@ -118,14 +209,14 @@ pub struct MassQuoteLegInput {
 }
 
 /// One amend leg of a batch modify. At least one of `new_price`/`new_quantity`
-/// must be set.
+/// must be set. Values are human decimal strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchModifyLegInput {
     pub order_id: u64,
     #[serde(default)]
-    pub new_price: Option<f64>,
+    pub new_price: Option<String>,
     #[serde(default)]
-    pub new_quantity: Option<f64>,
+    pub new_quantity: Option<String>,
 }
 
 /// Outcome of one cancel-replace leg in a mass-quote batch.
@@ -187,7 +278,7 @@ pub struct BatchModifyAck {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderUpdate {
     pub order_id: String,
-    pub user_uuid: Uuid,
+    pub account: AccountId,
     pub symbol_id: u64,
     pub side: Side,
     pub status: OrderStatus,
@@ -233,7 +324,7 @@ where
 /// Sequencer trading-collateral snapshot (`BalanceUpdateMessage`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BalanceUpdate {
-    pub user_uuid: Uuid,
+    pub account: AccountId,
     /// Collateral in SPL raw token units (6 dp).
     pub balance_raw: u64,
     pub timestamp: u64,
@@ -282,7 +373,7 @@ pub struct PositionRow {
 /// periodic / event-triggered).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PositionsSnapshot {
-    pub user_uuid: Uuid,
+    pub account: AccountId,
     pub rows: Vec<PositionRow>,
     /// Sequencer wall-clock (ns) when the batch was assembled.
     pub server_timestamp: u64,
@@ -369,16 +460,27 @@ pub struct AccountMarginSummary {
 /// positions, or resting-order holds change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountMarginUpdate {
-    pub user_uuid: Uuid,
+    pub account: AccountId,
     /// Sequencer wall-clock timestamp when the summary was computed, ns.
     pub server_timestamp: u64,
     /// Absent if the sequencer did not include a summary.
-    pub account: Option<AccountMarginSummary>,
+    pub summary: Option<AccountMarginSummary>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_id_base58_and_serde_roundtrip() {
+        let account: AccountId = "11111111111111111111111111111111".parse().unwrap();
+        assert_eq!(account, AccountId::default());
+        assert_eq!(account.to_string(), "11111111111111111111111111111111");
+        let json = serde_json::to_string(&account).unwrap();
+        assert_eq!(serde_json::from_str::<AccountId>(&json).unwrap(), account);
+        assert!("not-an-account".parse::<AccountId>().is_err());
+        assert!(AccountId::try_from_slice(&[0; 16]).is_err());
+    }
 
     #[test]
     fn test_order_ack_construction() {
@@ -400,7 +502,7 @@ mod tests {
     fn test_order_update_all_fields() {
         let u = OrderUpdate {
             order_id: "o1".to_string(),
-            user_uuid: Uuid::nil(),
+            account: AccountId::default(),
             symbol_id: 200,
             side: Side::Sell,
             status: OrderStatus::PartiallyFilled,
@@ -419,7 +521,7 @@ mod tests {
             timestamp: 1_700_000_000,
         };
         assert_eq!(u.order_id, "o1");
-        assert_eq!(u.user_uuid, Uuid::nil());
+        assert_eq!(u.account, AccountId::default());
         assert_eq!(u.symbol_id, 200);
         assert_eq!(u.side, Side::Sell);
         assert_eq!(u.status, OrderStatus::PartiallyFilled);
@@ -449,7 +551,7 @@ mod tests {
 
         let ou = OrderUpdate {
             order_id: "o".into(),
-            user_uuid: Uuid::nil(),
+            account: AccountId::default(),
             symbol_id: 0,
             side: Side::Buy,
             status: OrderStatus::New,
