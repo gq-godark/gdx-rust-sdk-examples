@@ -60,6 +60,15 @@ client.connect().await?;
 println!("account={}", client.account().expect("account after connect"));
 ```
 
+`connect()` sends the REST `access_token` (`POST /api/v1/auth/token`,
+`client_credentials`) as the `/ws/v1` login. It does not send
+`key_id:secret:passphrase`.
+
+Channels: `orders`, `positions`, `volume`, `open_interest`, `funding_rate`.
+No `trades` or L2 channel on `/ws/v1`. Take
+`take_open_orders_snapshot_receiver()` before `connect()`;
+`open_orders_snapshot` is delivered on that receiver.
+
 Lifecycle and control:
 
 - `builder()`, `new(config)`, `connect()`, `disconnect()`, `logout()`
@@ -69,6 +78,7 @@ Lifecycle and control:
 Take each single-consumer receiver before `connect()`:
 
 - `take_order_receiver()`
+- `take_open_orders_snapshot_receiver()`
 - `take_positions_snapshot_receiver()`
 - `take_system_health_receiver()`
 - `take_balance_receiver()`
@@ -97,8 +107,13 @@ human **decimal strings only** (`&str` / `String`) — not `f64` / `f32` /
 integers. Invalid strings are rejected before sealing.
 `PlaceOrderOptions` includes `reduce_only`, `post_only`, `stp_mode`,
 `quote_notional` (decimal string), `peg_offset_bps`, `trigger_price`,
-`take_profit_price`, `stop_loss_price`, and `slippage_bps`. Slippage is in
-basis points; `None` delegates to the venue limit.
+`take_profit_price`, `stop_loss_price`, `slippage_bps`, and `client_order_id`.
+`slippage_bps` applies only to `MARKET` and `STOP_MARKET` (`None` uses the
+venue limit). Peg (`peg_offset_bps`) is not post-only.
+
+A client order id is registered only after a successful WebSocket place, and
+cached only after `_register_coid` returns HTTP 200. REST place does not
+register it.
 
 `Confirmation::Book` waits beyond the fast acknowledgement for a matching
 order update. `Confirmation::Ack` returns at the sequencer acknowledgement
@@ -136,7 +151,7 @@ Encrypted REST methods:
 
 | Method | Behavior |
 |---|---|
-| `place_order(...)` | Place with optional client order id |
+| `place_order(...)` | Place; optional client order id is not registered |
 | `cancel_order(...)` | Cancel by server order id |
 | `cancel_order_by_client_id(...)` | Resolve client id, then cancel |
 | `modify_order(...)` | Modify price, quantity, and/or trigger |

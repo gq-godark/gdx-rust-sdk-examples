@@ -3,7 +3,7 @@
 //! Demonstrates:
 //!   1. Load credentials from `.env` / environment
 //!   2. Connect and authenticate (HPKE WebSocket session)
-//!   3. Take receivers for order, position, and all 6 sequencer push streams
+//!   3. Take receivers for orders, positions, and the other sequencer pushes
 //!   4. Subscribe to the private order + position channels
 //!   5. Place, modify, and cancel `MARKET` / `LIMIT` orders
 //!   6. Mass-quote / batch-cancel ladder demo

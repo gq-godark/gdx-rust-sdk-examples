@@ -76,6 +76,23 @@ client.connect().await?;
 println!("account={}", client.account().expect("account after connect"));
 ```
 
+`connect()` logs in with the REST `access_token` from
+`POST /api/v1/auth/token` (`client_credentials` using the key id, secret, and
+passphrase). The `/ws/v1` login frame is that bearer, not
+`key_id:secret:passphrase`. A legacy `.api_key(...)` token is sent only when
+the key triple is absent.
+
+### Channels
+
+`subscribe` / `unsubscribe` accept `orders`, `positions`, `volume`,
+`open_interest`, and `funding_rate`. `/ws/v1` does not carry `trades` or an
+L2 book.
+
+`open_orders_snapshot` is delivered to the caller. Take
+`take_open_orders_snapshot_receiver()` before `connect()` (single-consumer).
+The orders channel hydrates with a cleartext snapshot; later encrypted
+replaces use the same receiver.
+
 ### Lifecycle and subscriptions
 
 | Method | Purpose |
@@ -89,6 +106,7 @@ println!("account={}", client.account().expect("account after connect"));
 Take each receiver before `connect()`; each receiver is single-consumer:
 
 - `take_order_receiver()`
+- `take_open_orders_snapshot_receiver()`
 - `take_positions_snapshot_receiver()`
 - `take_system_health_receiver()`
 - `take_balance_receiver()`
@@ -126,8 +144,15 @@ There is no public `f64` / `f32` / integer conversion helper for trading
 inputs; pass venue decimal strings and let `normalize_decimal` validate them.
 `PlaceOrderOptions` also carries `reduce_only`, `post_only`, `stp_mode`,
 `quote_notional` (decimal string, XOR with base quantity), `peg_offset_bps`,
-`trigger_price`, `take_profit_price`, `stop_loss_price`, and `slippage_bps`.
-Slippage is expressed in basis points; `None` delegates to the venue limit.
+`trigger_price`, `take_profit_price`, `stop_loss_price`, `slippage_bps`, and
+`client_order_id`. `slippage_bps` is accepted only on `MARKET` and
+`STOP_MARKET` (basis points; `None` delegates to the venue limit). A peg
+(`peg_offset_bps`) is not post-only; `post_only` stays false unless you set it.
+
+`client_order_id` is registered with `POST /api/v1/orders/_register_coid`
+only after a successful WebSocket place. The process-local cache is written
+only after that call returns HTTP 200. REST `place_order` does not register
+the id.
 
 `Confirmation::Book` is the safe placement default. `Confirmation::Ack`
 returns at the sequencer acknowledgement boundary, so callers must consume
@@ -181,8 +206,10 @@ let account_margin = client.get_account().await?;
 | `batch_modify(...)` | Encrypted post-only batch amend, 1–20 legs |
 
 The REST `place_order(...)` signature supports the base placement fields plus
-an optional `client_order_id`. It does not expose `PlaceOrderOptions`, explicit
-confirmation selection, or `slippage_bps`.
+an optional `client_order_id` on the request body. That id is not registered
+on the edge and is not written to the WebSocket coid cache. REST place does
+not expose `PlaceOrderOptions`, explicit confirmation selection, or
+`slippage_bps`.
 
 ### REST reads
 

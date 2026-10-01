@@ -89,7 +89,33 @@ dotenvy = "0.15"
 
 (Or copy `sdk/` into your own project and reference it as `path = "sdk"`.)
 
-Then in `src/main.rs`:
+## Participant flow
+
+Environment names only (values stay in `.env`): `GODARK_API_KEY_ID`,
+`GODARK_API_SECRET`, `GODARK_PASSPHRASE`. Optional: `GODARK_EDGE_URL`,
+`GODARK_REST_URL`, `GDX_HPKE_STATIC_PUBLIC_KEY`, `GODARK_ACCOUNT`.
+
+1. **REST auth.** `GodarkRestClient::connect` posts
+   `POST /api/v1/auth/token` (`client_credentials`) and keeps the
+   `access_token`.
+2. **WebSocket login.** `GodarkClient::connect` mints that same REST access
+   token and sends it as the `/ws/v1` `login` frame. Do not send
+   `key_id:secret:passphrase` on the socket.
+3. **Subscribe.** Channels on `/ws/v1` are `orders`, `positions`, `volume`,
+   `open_interest`, and `funding_rate`. There is no `trades` or L2 channel.
+   Take `take_open_orders_snapshot_receiver()` before `connect`; an
+   `open_orders_snapshot` is delivered to that caller.
+4. **Place with strings.** Prices and sizes are `&str` / `String`
+   (`"0.01"`, `Some("68000")`). `slippage_bps` applies only to `MARKET` and
+   `STOP_MARKET`. A peg (`peg_offset_bps`) is not post-only unless you set
+   `post_only: true`.
+5. **Client order id.** Set `PlaceOrderOptions.client_order_id` on a
+   WebSocket place. The SDK registers it only after that place succeeds, and
+   caches the mapping only after `_register_coid` returns HTTP 200. A REST
+   place does not register the id.
+6. **Read a position.** `get_positions()` (REST) or the `positions` channel
+   (`take_positions_snapshot_receiver`).
+7. **Cancel.** `cancel_order(&order_id, symbol)`.
 
 ```rust
 use godark::{GodarkClient, GodarkError, OrderType, Side, TimeInForce};
@@ -101,18 +127,25 @@ async fn main() -> Result<(), GodarkError> {
     let config = GodarkClient::builder()
         .api_key_id(std::env::var("GODARK_API_KEY_ID").expect("GODARK_API_KEY_ID"))
         .api_secret(std::env::var("GODARK_API_SECRET").expect("GODARK_API_SECRET"))
+        .passphrase(std::env::var("GODARK_PASSPHRASE").expect("GODARK_PASSPHRASE"))
         .build()?;
 
     let mut client = GodarkClient::new(config);
+    let mut positions = client
+        .take_positions_snapshot_receiver()
+        .expect("positions receiver");
     client.connect().await?;
+    client
+        .subscribe(&["orders", "positions", "volume", "open_interest", "funding_rate"])
+        .await?;
 
     let ack = client
         .place_order(
             "BTC-USDC-PERP",
             Side::Sell,
             OrderType::Limit,
-            0.01,
-            Some(999_999.0),
+            "0.01",
+            Some("68000"),
             TimeInForce::Gtc,
             false,
             None,
@@ -120,6 +153,9 @@ async fn main() -> Result<(), GodarkError> {
         )
         .await?;
 
+    if let Ok(snap) = positions.try_recv() {
+        println!("positions: {}", snap.rows.len());
+    }
     client.cancel_order(&ack.order_id, "BTC-USDC-PERP").await?;
     client.disconnect().await;
     Ok(())
