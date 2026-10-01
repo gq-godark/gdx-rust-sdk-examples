@@ -36,6 +36,13 @@ fn normalize_inbound_value(val: &Value) -> Value {
     let op = val.get("op").and_then(|v| v.as_str()).unwrap_or("");
     let data = val.get("data");
     let msg_str = val.get("message").and_then(|v| v.as_str());
+    let admit_code = val
+        .get("error_code")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u16::try_from(n).ok());
+    let resolved_err = |fallback: &str| {
+        crate::ws_admit_error_code::resolve_message(admit_code, msg_str.unwrap_or(fallback))
+    };
 
     match op {
         "pong" if code == 0 => serde_json::json!({ "type": "pong" }),
@@ -44,13 +51,14 @@ fn normalize_inbound_value(val: &Value) -> Value {
                 serde_json::json!({
                     "type": "auth_result",
                     "success": false,
-                    "error": msg_str.unwrap_or("authentication failed")
+                    "error": resolved_err("authentication failed"),
+                    "error_code": admit_code
                 })
             } else if let Some(d) = data.and_then(|v| v.as_object()) {
                 serde_json::json!({
                     "type": "auth_result",
                     "success": true,
-                    "user_uuid": d.get("user_uuid"),
+                    "account": d.get("account"),
                     "account_id": d.get("account_id"),
                     "session_id": d.get("session_id"),
                     "token_expires_at": d.get("token_expires_at"),
@@ -77,10 +85,22 @@ fn normalize_inbound_value(val: &Value) -> Value {
                     .unwrap_or("");
                 serde_json::json!({
                     "event": "error",
-                    "message": msg_str.unwrap_or("channel error"),
-                    "channel": ch
+                    "message": resolved_err("channel error"),
+                    "channel": ch,
+                    "error_code": admit_code
                 })
             } else if let Some(d) = data.and_then(|v| v.as_object()) {
+                // A public snapshot (funding / volume / OI) or account replace is
+                // pushed as a second `op=subscribe` frame whose `data` is the
+                // server message. Collapsing that to a bare ack dropped the body.
+                if let Some(inner_type) = d.get("type").and_then(|v| v.as_str()) {
+                    if !d.contains_key("channel")
+                        && inner_type != "subscribe"
+                        && inner_type != "unsubscribe"
+                    {
+                        return Value::Object(d.clone());
+                    }
+                }
                 if d.contains_key("channel") {
                     serde_json::json!({ "event": op, "channel": d.get("channel") })
                 } else {
@@ -92,7 +112,11 @@ fn normalize_inbound_value(val: &Value) -> Value {
         }
         "logout" => {
             if code != 0 {
-                serde_json::json!({ "type": "error", "message": msg_str.unwrap_or("logout failed") })
+                serde_json::json!({
+                    "type": "error",
+                    "message": resolved_err("logout failed"),
+                    "error_code": admit_code
+                })
             } else {
                 serde_json::json!({ "type": "ack", "success": true })
             }
@@ -100,7 +124,11 @@ fn normalize_inbound_value(val: &Value) -> Value {
         "order.place" | "order.cancel" | "order.modify" | "order.mass_quote"
         | "order.batch_cancel" | "order.batch_modify" => {
             if code != 0 {
-                serde_json::json!({ "type": "error", "message": msg_str.unwrap_or("order error") })
+                serde_json::json!({
+                    "type": "error",
+                    "message": resolved_err("order error"),
+                    "error_code": admit_code
+                })
             } else if let Some(d) = data.and_then(|v| v.as_object()) {
                 if d.get("message_type").is_some()
                     && (d.contains_key("ciphertext") || d.contains_key("encrypted_body"))
@@ -171,6 +199,12 @@ pub enum TransportEvent {
     AuthResult(Value),
     RekeyRequired(Value),
     OrderUpdate(Value),
+    /// Cleartext `open_orders_snapshot` (orders-channel hydrate and later replaces).
+    OpenOrdersSnapshot(Value),
+    /// Cleartext `account_update` (quote risk + inventory).
+    AccountUpdate(Value),
+    /// Cleartext `system_health` / `health_report`.
+    SystemHealth(Value),
     EncryptedPush(Value),
     PublicMessage(Value),
     HpkeSetupReply {
@@ -610,9 +644,12 @@ impl EdgeTransport {
                     .await;
             }
             // Edge auto-fetches open orders on `orders` subscribe and pushes a
-            // cleartext snapshot. Fan rows out as order_update-shaped events so
-            // callers (and clear helpers) can cancel resting inventory.
+            // cleartext snapshot. Deliver the snapshot itself, and also fan rows
+            // as order_update-shaped events so callers can cancel resting inventory.
             "open_orders_snapshot" => {
+                let _ = event_tx
+                    .send(TransportEvent::OpenOrdersSnapshot(val.clone()))
+                    .await;
                 if let Some(rows) = val.get("rows").and_then(|r| r.as_array()) {
                     for row in rows {
                         let mut update = row.clone();
@@ -634,13 +671,45 @@ impl EdgeTransport {
                     .send(TransportEvent::EncryptedPush(val.clone()))
                     .await;
             }
+            "account_update" => {
+                let _ = event_tx
+                    .send(TransportEvent::AccountUpdate(val.clone()))
+                    .await;
+            }
+            "system_health" | "health_report" => {
+                let _ = event_tx
+                    .send(TransportEvent::SystemHealth(val.clone()))
+                    .await;
+            }
             "funding_rate_snapshot" | "volume_snapshot" | "open_interest_snapshot" => {
                 let _ = event_tx
                     .send(TransportEvent::PublicMessage(val.clone()))
                     .await;
             }
-            "ack" | "error" => {
+            "ack" => {
                 if let Some(cmd) = pending_cmd.take() {
+                    let _ = cmd.tx.send(val.clone());
+                }
+            }
+            // Live edge reports an unknown channel as `{type:"error"}` while a
+            // subscribe waiter is armed. Resolving only `pending_cmd` left
+            // `subscribe()` hanging until the command timeout.
+            "error" => {
+                let sub_armed = pending_sub
+                    .lock()
+                    .map(|slot| slot.is_some())
+                    .unwrap_or(false);
+                if sub_armed && pending_cmd.is_none() {
+                    if let Ok(mut slot) = pending_sub.lock() {
+                        if let Some(sub) = slot.take() {
+                            let msg = val
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("channel error");
+                            let _ = sub.tx.send(Err(GodarkError::Connection(msg.to_string())));
+                        }
+                    }
+                } else if let Some(cmd) = pending_cmd.take() {
                     let _ = cmd.tx.send(val.clone());
                 }
             }
@@ -1014,6 +1083,80 @@ mod tests {
             e => panic!("expected Connection error, got {e:?}"),
         }
         assert!(pending_sub.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_type_error_rejects_unknown_channel_fast() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let mut pending_cmd = None;
+        let mut pending_session = None;
+        let (sub_tx, sub_rx) = tokio::sync::oneshot::channel();
+        let pending_sub = make_sub_slot(Some(PendingSubscription {
+            remaining: 1,
+            op: "subscribe".to_string(),
+            tx: sub_tx,
+        }));
+
+        let val = json!({"type":"error","message":"unknown channel"});
+        EdgeTransport::dispatch(
+            &val,
+            &event_tx,
+            &mut pending_cmd,
+            &mut pending_session,
+            &pending_sub,
+        )
+        .await;
+
+        assert!(event_rx.try_recv().is_err());
+        let err = sub_rx
+            .await
+            .expect("unknown channel must reject the subscribe waiter")
+            .unwrap_err();
+        match err {
+            crate::error::GodarkError::Connection(msg) => assert_eq!(msg, "unknown channel"),
+            e => panic!("expected Connection error, got {e:?}"),
+        }
+        assert!(pending_sub.lock().unwrap().is_none());
+        assert!(pending_cmd.is_none());
+    }
+
+    #[test]
+    fn normalize_subscribe_snapshot_keeps_funding_body() {
+        let raw = json!({
+            "id": "1",
+            "op": "subscribe",
+            "code": 0,
+            "data": {
+                "type": "funding_rate_snapshot",
+                "rows": [{
+                    "symbol_id": 1,
+                    "funding_rate": "0.0001",
+                    "last_funding_rate": "0",
+                    "timestamp": 9
+                }]
+            }
+        });
+        let normalized = normalize_inbound_value(&raw);
+        assert_eq!(
+            normalized.get("type").and_then(|v| v.as_str()),
+            Some("funding_rate_snapshot")
+        );
+        assert_eq!(
+            normalized["rows"][0]["funding_rate"].as_str(),
+            Some("0.0001")
+        );
+
+        let ack = json!({
+            "op": "subscribe",
+            "code": 0,
+            "data": { "channel": "funding_rate" }
+        });
+        let ack_n = normalize_inbound_value(&ack);
+        assert_eq!(
+            ack_n.get("event").and_then(|v| v.as_str()),
+            Some("subscribe")
+        );
+        assert!(ack_n.get("type").is_none());
     }
 
     #[tokio::test]

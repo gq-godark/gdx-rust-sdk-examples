@@ -22,8 +22,9 @@ use crate::proto_bridge::{self, EdgeMessage};
 use crate::session::CryptoSession;
 use crate::transport::{EdgeTransport, TransportEvent};
 use crate::types::{
-    AccountMarginUpdate, BalanceUpdate, Confirmation, FundingRateUpdate, LeverageSettings,
-    OrderAck, OrderUpdate, PositionsSnapshot, ReconnectEvent, SystemHealthUpdate,
+    AccountId, AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, Confirmation,
+    FundingRateUpdate, LeverageSettings, OpenOrderRow, OpenOrdersSnapshot, OrderAck, OrderUpdate,
+    PositionsSnapshot, ReconnectEvent, SystemHealthUpdate,
 };
 use crate::wire;
 
@@ -46,13 +47,15 @@ pub struct GodarkClient {
     config: GodarkConfig,
     transport: Arc<AsyncMutex<EdgeTransport>>,
     session: Arc<Mutex<CryptoSession>>,
-    user_uuid: Arc<Mutex<Option<Uuid>>>,
+    account: Arc<Mutex<Option<AccountId>>>,
     connected: Arc<AtomicBool>,
     desired_channels: Arc<Mutex<HashSet<String>>>,
     order_tx: mpsc::Sender<OrderUpdate>,
     order_rx: Option<mpsc::Receiver<OrderUpdate>>,
     positions_snapshot_tx: mpsc::Sender<PositionsSnapshot>,
     positions_snapshot_rx: Option<mpsc::Receiver<PositionsSnapshot>>,
+    open_orders_snapshot_tx: mpsc::Sender<OpenOrdersSnapshot>,
+    open_orders_snapshot_rx: Option<mpsc::Receiver<OpenOrdersSnapshot>>,
     system_health_tx: mpsc::Sender<SystemHealthUpdate>,
     system_health_rx: Option<mpsc::Receiver<SystemHealthUpdate>>,
     balance_tx: mpsc::Sender<BalanceUpdate>,
@@ -76,6 +79,12 @@ pub struct GodarkClient {
     /// Serializes HPKE encrypt + WS send so ciphertext nonces hit the wire
     /// in order under concurrent place/cancel/modify.
     encrypted_send_lock: Arc<AsyncMutex<()>>,
+    /// JWT minted for WebSocket login. Used to register a client order id
+    /// after a successful WebSocket place.
+    access_token: Arc<Mutex<Option<String>>>,
+    /// `(client_order_id → order_id)` written only after
+    /// `POST /orders/_register_coid` returns HTTP 200.
+    coid_index: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl GodarkClient {
@@ -87,6 +96,7 @@ impl GodarkClient {
         let ws_url = config::ws_url(&config.base_url);
         let (order_tx, order_rx) = mpsc::channel(256);
         let (positions_snapshot_tx, positions_snapshot_rx) = mpsc::channel(64);
+        let (open_orders_snapshot_tx, open_orders_snapshot_rx) = mpsc::channel(64);
         let (system_health_tx, system_health_rx) = mpsc::channel(64);
         let (balance_tx, balance_rx) = mpsc::channel(64);
         let (funding_rate_tx, funding_rate_rx) = mpsc::channel(64);
@@ -100,13 +110,15 @@ impl GodarkClient {
                 config.transport.clone(),
             ))),
             session: Arc::new(Mutex::new(CryptoSession::new())),
-            user_uuid: Arc::new(Mutex::new(None)),
+            account: Arc::new(Mutex::new(None)),
             connected: Arc::new(AtomicBool::new(false)),
             desired_channels: Arc::new(Mutex::new(HashSet::new())),
             order_tx,
             order_rx: Some(order_rx),
             positions_snapshot_tx,
             positions_snapshot_rx: Some(positions_snapshot_rx),
+            open_orders_snapshot_tx,
+            open_orders_snapshot_rx: Some(open_orders_snapshot_rx),
             system_health_tx,
             system_health_rx: Some(system_health_rx),
             balance_tx,
@@ -127,12 +139,14 @@ impl GodarkClient {
             place_outcomes: Arc::new(Mutex::new(PlaceOutcomeState::default())),
             encrypted_ack_waiters: Arc::new(Mutex::new(HashMap::new())),
             encrypted_send_lock: Arc::new(AsyncMutex::new(())),
+            access_token: Arc::new(Mutex::new(None)),
+            coid_index: Arc::new(Mutex::new(HashMap::new())),
             config,
         }
     }
 
-    pub fn user_uuid(&self) -> Option<Uuid> {
-        self.user_uuid.lock().ok().and_then(|guard| *guard)
+    pub fn account(&self) -> Option<AccountId> {
+        self.account.lock().ok().and_then(|guard| *guard)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -149,6 +163,17 @@ impl GodarkClient {
         &mut self,
     ) -> Option<mpsc::Receiver<PositionsSnapshot>> {
         self.positions_snapshot_rx.take()
+    }
+
+    /// Receive full working-order snapshots (`open_orders_snapshot`).
+    ///
+    /// Delivered on `orders` subscribe (cleartext hydrate) and on later encrypted
+    /// pushes of the same message type. Latest snapshot replaces the previous one
+    /// on the caller side.
+    pub fn take_open_orders_snapshot_receiver(
+        &mut self,
+    ) -> Option<mpsc::Receiver<OpenOrdersSnapshot>> {
+        self.open_orders_snapshot_rx.take()
     }
 
     /// Receive sequencer / MPC node health pulses.
@@ -196,7 +221,18 @@ impl GodarkClient {
         if !self.config.explicit_symbol_map {
             let rest =
                 crate::rest_client::resolve_rest_base_url(Some(self.config.base_url.clone()));
-            self.config.symbol_map = crate::instruments::load_symbol_map_from_edge(&rest).await;
+            // In-process mock edges and localnet WS-only listeners share one port;
+            // an instruments GET would steal the accept() and break connect.
+            let local = rest.contains("127.0.0.1") || rest.contains("localhost");
+            if local {
+                let offline = crate::instruments::offline_catalog();
+                self.config.symbol_map = offline.symbol_map;
+                self.config.instrument_decimals = offline.decimals;
+            } else {
+                let catalog = crate::instruments::load_catalog_from_edge(&rest).await;
+                self.config.symbol_map = catalog.symbol_map;
+                self.config.instrument_decimals = catalog.decimals;
+            }
         }
         if let Some(h) = self.event_handle.take() {
             h.abort();
@@ -205,7 +241,8 @@ impl GodarkClient {
             &self.config,
             &self.transport,
             &self.session,
-            &self.user_uuid,
+            &self.account,
+            &self.access_token,
         )
         .await?;
         self.connected.store(true, Ordering::SeqCst);
@@ -235,8 +272,14 @@ impl GodarkClient {
         if let Ok(mut session) = self.session.lock() {
             session.reset();
         }
-        if let Ok(mut guard) = self.user_uuid.lock() {
+        if let Ok(mut guard) = self.account.lock() {
             *guard = None;
+        }
+        if let Ok(mut token) = self.access_token.lock() {
+            *token = None;
+        }
+        if let Ok(mut index) = self.coid_index.lock() {
+            index.clear();
         }
     }
 
@@ -273,11 +316,11 @@ impl GodarkClient {
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
-        price: Option<f64>,
+        quantity: &str,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
     ) -> Result<OrderAck, GodarkError> {
         self.place_order_with_confirmation(
@@ -296,17 +339,21 @@ impl GodarkClient {
     }
 
     /// Place an order with optional reduce-only / post-only / STP flags.
+    ///
+    /// Pass `None` for `quantity` and set
+    /// [`PlaceOrderOptions::quote_notional`](crate::types::PlaceOrderOptions::quote_notional)
+    /// to size in quote currency. Prices and sizes are human decimal strings.
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order_with_options(
         &self,
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
-        price: Option<f64>,
+        quantity: Option<&str>,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
         confirmation: Confirmation,
         options: crate::types::PlaceOrderOptions,
@@ -334,11 +381,11 @@ impl GodarkClient {
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
-        price: Option<f64>,
+        quantity: &str,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
         confirmation: Confirmation,
     ) -> Result<OrderAck, GodarkError> {
@@ -346,7 +393,7 @@ impl GodarkClient {
             symbol,
             side,
             order_type,
-            quantity,
+            Some(quantity),
             price,
             time_in_force,
             aon,
@@ -365,17 +412,20 @@ impl GodarkClient {
     ///   [`GodarkError::Order`] with code + `reject_text`/`msg`.
     /// * [`Confirmation::Ack`] — return as soon as the sequencer acknowledges;
     ///   the caller must consume order updates for later rejects/fills.
+    ///
+    /// Prices and sizes are human decimal strings validated against instrument
+    /// decimals (never converted from `f64`).
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order_with_confirmation_and_options(
         &self,
         symbol: &str,
         side: Side,
         order_type: OrderType,
-        quantity: f64,
-        price: Option<f64>,
+        quantity: Option<&str>,
+        price: Option<&str>,
         time_in_force: TimeInForce,
         aon: bool,
-        min_fill_size: Option<f64>,
+        min_fill_size: Option<&str>,
         expiry_time: Option<u64>,
         confirmation: Confirmation,
         options: crate::types::PlaceOrderOptions,
@@ -383,7 +433,8 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
+        let client_order_id = options.client_order_id.clone();
 
         let plaintext = proto_bridge::build_place_order_proto(
             symbol_id,
@@ -399,7 +450,8 @@ impl GodarkClient {
             &corr_id,
             options,
             timestamp_ns(),
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
 
         // Register before send so a terminal push that races the ack is not lost.
         let outcome = if confirmation == Confirmation::Book {
@@ -419,6 +471,21 @@ impl GodarkClient {
                 return Err(err);
             }
         };
+        if let Some(coid) = client_order_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Err(err) = self
+                .register_placed_client_order(coid, &ack.order_id, &corr_id)
+                .await
+            {
+                if let Some((token, _)) = outcome {
+                    self.cancel_place_outcome_waiter(token);
+                }
+                return Err(err);
+            }
+        }
         let Some((token, receiver)) = outcome else {
             return Ok(ack);
         };
@@ -448,7 +515,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let oid: u64 = order_id
             .parse()
@@ -465,14 +532,14 @@ impl GodarkClient {
         &self,
         order_id: &str,
         symbol: &str,
-        new_price: Option<f64>,
-        new_quantity: Option<f64>,
-        new_trigger_price: Option<f64>,
+        new_price: Option<&str>,
+        new_quantity: Option<&str>,
+        new_trigger_price: Option<&str>,
     ) -> Result<OrderAck, GodarkError> {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let oid: u64 = order_id
             .parse()
@@ -486,7 +553,8 @@ impl GodarkClient {
             new_quantity,
             new_trigger_price,
             &corr_id,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
 
         self.send_encrypted_order("modify", symbol_id, &plaintext, &corr_id)
             .await
@@ -500,7 +568,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let plaintext = proto_bridge::build_update_leverage_proto(
             uuid.as_bytes(),
             symbol_id,
@@ -524,7 +592,7 @@ impl GodarkClient {
         };
         let body_symbol_id = symbol.map(|sym| self.resolve_symbol(sym)).transpose()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let plaintext =
             proto_bridge::build_cancel_all_proto(body_symbol_id, uuid.as_bytes(), &corr_id);
         let response = self
@@ -546,7 +614,7 @@ impl GodarkClient {
         };
         let body_symbol_id = symbol.map(|sym| self.resolve_symbol(sym)).transpose()?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let plaintext =
             proto_bridge::build_close_all_proto(body_symbol_id, uuid.as_bytes(), &corr_id);
         let response = self
@@ -563,7 +631,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let plaintext = proto_bridge::build_reverse_proto(symbol_id, uuid.as_bytes(), &corr_id);
         let response = self
             .send_encrypted_command("reverse", symbol_id, &plaintext, &corr_id)
@@ -574,14 +642,15 @@ impl GodarkClient {
     /// Amend / attach TP-SL on a resting order or open position.
     ///
     /// Set `order_id` to `"0"` and supply `position_side` to attach TP/SL to an open
-    /// position leg with no existing attachment. Price fields: `None` = leave unchanged,
-    /// `Some(0.0)` = clear that leg, `Some(x)` where `x > 0` = set.
+    /// position leg with no existing attachment. Price fields are decimal strings:
+    /// `None` = leave unchanged, `Some("0")` = clear that leg, `Some(x)` where
+    /// `x` is a positive decimal = set.
     pub async fn amend_tpsl(
         &self,
         symbol: &str,
         order_id: &str,
-        take_profit_price: Option<f64>,
-        stop_loss_price: Option<f64>,
+        take_profit_price: Option<&str>,
+        stop_loss_price: Option<&str>,
         position_side: Option<crate::enums::Side>,
     ) -> Result<crate::types::TpslAck, GodarkError> {
         self.ensure_ready()?;
@@ -595,7 +664,7 @@ impl GodarkClient {
             ));
         }
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let body_symbol_id = if oid == 0 { Some(symbol_id) } else { None };
         let plaintext = proto_bridge::build_amend_tpsl_proto(
             uuid.as_bytes(),
@@ -605,7 +674,8 @@ impl GodarkClient {
             stop_loss_price,
             body_symbol_id,
             position_side,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
         let response = self
             .send_encrypted_command("amend_tpsl", symbol_id, &plaintext, &corr_id)
             .await?;
@@ -630,7 +700,7 @@ impl GodarkClient {
             ));
         }
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let body_symbol_id = if oid == 0 { Some(symbol_id) } else { None };
         let plaintext = proto_bridge::build_cancel_tpsl_proto(
             uuid.as_bytes(),
@@ -687,7 +757,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let plaintext = proto_bridge::build_mass_quote_proto(
             symbol_id,
@@ -695,7 +765,8 @@ impl GodarkClient {
             legs,
             &corr_id,
             post_only,
-        );
+            self.resolve_decimals(symbol_id),
+        )?;
         let response = self
             .send_encrypted_command("mass_quote", symbol_id, &plaintext, &corr_id)
             .await?;
@@ -715,7 +786,7 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
         let plaintext =
             proto_bridge::build_batch_cancel_proto(symbol_id, uuid.as_bytes(), order_ids, &corr_id);
@@ -748,10 +819,15 @@ impl GodarkClient {
         self.ensure_ready()?;
         let symbol_id = self.resolve_symbol(symbol)?;
         let corr_id = Uuid::new_v4().into_bytes().to_vec();
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
 
-        let plaintext =
-            proto_bridge::build_batch_modify_proto(symbol_id, uuid.as_bytes(), legs, &corr_id);
+        let plaintext = proto_bridge::build_batch_modify_proto(
+            symbol_id,
+            uuid.as_bytes(),
+            legs,
+            &corr_id,
+            self.resolve_decimals(symbol_id),
+        )?;
         let response = self
             .send_encrypted_command("batch_modify", symbol_id, &plaintext, &corr_id)
             .await?;
@@ -816,6 +892,67 @@ impl GodarkClient {
         self.parse_order_response(&response)
     }
 
+    /// Post the place-header correlation so the edge stores
+    /// `(client_order_id → order_id)`. The local cache is updated only after
+    /// HTTP 200. A 400 (`unknown place correlation` and any other non-200)
+    /// is returned to the caller.
+    async fn register_placed_client_order(
+        &self,
+        client_order_id: &str,
+        order_id: &str,
+        correlation_id: &[u8],
+    ) -> Result<(), GodarkError> {
+        if order_id.is_empty() || order_id == "0" {
+            return Err(GodarkError::Order {
+                message: "client_order_id registration requires a decimal order_id".into(),
+                error_code: None,
+                user_message: None,
+            });
+        }
+        let correlation =
+            crate::rest_client::decimal_correlation_id(correlation_id).ok_or_else(|| {
+                GodarkError::Config(
+                    "client_order_id registration requires a non-zero place correlation_id".into(),
+                )
+            })?;
+        let bearer = self
+            .access_token
+            .lock()
+            .map_err(|_| GodarkError::Session("access token mutex poisoned".into()))?
+            .clone()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                GodarkError::Authentication(
+                    "client_order_id registration requires the WebSocket access token".into(),
+                )
+            })?;
+        let rest = crate::rest_client::resolve_rest_base_url(Some(self.config.base_url.clone()));
+        let http = crate::rest_transport::RestTransport::new(rest);
+        http.register_client_order_mapping(&bearer, client_order_id, order_id, &correlation)
+            .await
+            .map_err(|err| {
+                GodarkError::Connection(format!(
+                    "placed {order_id}; client_order_id registration failed: {err}"
+                ))
+            })?;
+        let mut index = self
+            .coid_index
+            .lock()
+            .map_err(|_| GodarkError::Session("client order index mutex poisoned".into()))?;
+        if index
+            .get(client_order_id)
+            .is_some_and(|existing| existing != order_id)
+        {
+            tracing::warn!(
+                client_order_id,
+                order_id,
+                "client_order_id cache replaced after edge register"
+            );
+        }
+        index.insert(client_order_id.to_string(), order_id.to_string());
+        Ok(())
+    }
+
     /// Encrypts `plaintext`, sends it over the wire with the appropriate op for
     /// `request_type`, and returns the raw response `Value`. Shared by the
     /// single-order pipeline and the mass-quote / batch pipelines.
@@ -827,7 +964,7 @@ impl GodarkClient {
         correlation_id: &[u8],
     ) -> Result<Value, GodarkError> {
         let body_length = CryptoSession::body_length_for_plaintext(plaintext.len())?;
-        let uuid = self.current_user_uuid()?;
+        let uuid = self.current_account()?;
         let corr_u128 = if correlation_id.len() == 16 {
             let arr: [u8; 16] = correlation_id.try_into().unwrap();
             let v = u128::from_be_bytes(arr);
@@ -875,7 +1012,7 @@ impl GodarkClient {
             };
 
             let header = edge::OrderHeader {
-                user_uuid: uuid.as_bytes().to_vec(),
+                account: uuid.as_bytes().to_vec(),
                 symbol_id,
                 request_type: crate::enums::request_type_to_proto(request_type),
                 nonce: actual_nonce,
@@ -934,6 +1071,7 @@ impl GodarkClient {
                 Err(GodarkError::Order {
                     message: message.to_string(),
                     error_code: None,
+                    user_message: None,
                 })
             }
             "ack" => {
@@ -969,6 +1107,7 @@ impl GodarkClient {
             _ => Err(GodarkError::Order {
                 message: format!("Unexpected response type: {msg_type}"),
                 error_code: None,
+                user_message: None,
             }),
         }
     }
@@ -991,7 +1130,7 @@ impl GodarkClient {
                 .decode(ct_b64)
                 .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
             let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
-            let user_uuid_bytes = self.current_user_uuid_bytes();
+            let account_bytes = self.current_account_bytes();
             let message_type = msg
                 .get("message_type")
                 .and_then(|v| v.as_str())
@@ -1002,7 +1141,7 @@ impl GodarkClient {
                 .unwrap_or(0);
 
             let aad = proto_bridge::build_response_header_aad(
-                &user_uuid_bytes,
+                &account_bytes,
                 message_type,
                 ct.len() as u32,
                 nonce,
@@ -1050,6 +1189,7 @@ impl GodarkClient {
             _ => Err(GodarkError::Order {
                 message: "Expected ack response".to_string(),
                 error_code: None,
+                user_message: None,
             }),
         }
     }
@@ -1070,12 +1210,14 @@ impl GodarkClient {
             return Err(GodarkError::Order {
                 message: message.to_string(),
                 error_code: None,
+                user_message: None,
             });
         }
         if msg_type != "encrypted_push" {
             return Err(GodarkError::Order {
                 message: format!("Unexpected response type: {msg_type}"),
                 error_code: None,
+                user_message: None,
             });
         }
         if let Some(err) = msg.get("_decrypt_error").and_then(|v| v.as_str()) {
@@ -1095,7 +1237,7 @@ impl GodarkClient {
             .decode(ct_b64)
             .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
         let nonce = msg.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
-        let user_uuid_bytes = self.current_user_uuid_bytes();
+        let account_bytes = self.current_account_bytes();
         let message_type = msg
             .get("message_type")
             .and_then(|v| v.as_str())
@@ -1106,7 +1248,7 @@ impl GodarkClient {
             .unwrap_or(0);
 
         let aad = proto_bridge::build_response_header_aad(
-            &user_uuid_bytes,
+            &account_bytes,
             message_type,
             ct.len() as u32,
             nonce,
@@ -1272,6 +1414,7 @@ impl GodarkClient {
         let transport = Arc::clone(&self.transport);
         let order_tx = self.order_tx.clone();
         let positions_snapshot_tx = self.positions_snapshot_tx.clone();
+        let open_orders_snapshot_tx = self.open_orders_snapshot_tx.clone();
         let system_health_tx = self.system_health_tx.clone();
         let balance_tx = self.balance_tx.clone();
         let funding_rate_tx = self.funding_rate_tx.clone();
@@ -1279,7 +1422,7 @@ impl GodarkClient {
         let leverage_settings_tx = self.leverage_settings_tx.clone();
         let error_tx = self.error_tx.clone();
         let session = Arc::clone(&self.session);
-        let user_uuid = Arc::clone(&self.user_uuid);
+        let account = Arc::clone(&self.account);
         let connected = Arc::clone(&self.connected);
         let desired_channels = Arc::clone(&self.desired_channels);
         let reconnect_attempts = Arc::clone(&self.reconnect_attempts);
@@ -1287,14 +1430,37 @@ impl GodarkClient {
         let reconnect_tx = self.reconnect_tx.clone();
         let place_outcomes = Arc::clone(&self.place_outcomes);
         let encrypted_ack_waiters = Arc::clone(&self.encrypted_ack_waiters);
+        let access_token = Arc::clone(&self.access_token);
 
         self.event_handle = Some(tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
+                    TransportEvent::OpenOrdersSnapshot(val) => {
+                        if let Some(snap) = parse_cleartext_open_orders_snapshot(&val) {
+                            let _ = open_orders_snapshot_tx.send(snap).await;
+                        }
+                    }
                     TransportEvent::OrderUpdate(val) => {
                         if let Some(update) = parse_cleartext_order_update(&val) {
                             observe_place_order_update(&place_outcomes, &update);
                             let _ = order_tx.send(update).await;
+                        }
+                    }
+                    TransportEvent::SystemHealth(val) => {
+                        if let Some(health) = parse_cleartext_system_health(&val) {
+                            let _ = system_health_tx.send(health).await;
+                        }
+                    }
+                    TransportEvent::AccountUpdate(val) => {
+                        let acct = account
+                            .lock()
+                            .ok()
+                            .and_then(|guard| *guard)
+                            .unwrap_or_default();
+                        if let Some((balance, margin)) = parse_cleartext_account_update(&val, acct)
+                        {
+                            let _ = balance_tx.send(balance).await;
+                            let _ = account_margin_tx.send(margin).await;
                         }
                     }
                     TransportEvent::PublicMessage(val) => {
@@ -1306,7 +1472,7 @@ impl GodarkClient {
                         }
                     }
                     TransportEvent::EncryptedPush(val) => {
-                        match decrypt_push_plaintext(&session, &user_uuid, &val) {
+                        match decrypt_push_plaintext(&session, &account, &val) {
                             Ok(plaintext) => {
                                 let message_type = val
                                     .get("message_type")
@@ -1323,7 +1489,10 @@ impl GodarkClient {
                                     let wire_corr =
                                         json_u128(&val, "correlation_id").filter(|c| *c != 0);
                                     let plaintext_corr =
-                                        match proto_bridge::parse_node_response(&plaintext) {
+                                        match proto_bridge::parse_node_response_with_expected(
+                                            &plaintext,
+                                            Some(message_type),
+                                        ) {
                                             Ok(proto_bridge::NodeResponseKind::Ack {
                                                 correlation_id: raw,
                                                 ..
@@ -1366,6 +1535,9 @@ impl GodarkClient {
                                         }
                                         DecodedPush::PositionsSnapshot(snap) => {
                                             let _ = positions_snapshot_tx.send(snap).await;
+                                        }
+                                        DecodedPush::OpenOrdersSnapshot(snap) => {
+                                            let _ = open_orders_snapshot_tx.send(snap).await;
                                         }
                                         DecodedPush::SystemHealth(health) => {
                                             let _ = system_health_tx.send(health).await;
@@ -1432,7 +1604,7 @@ impl GodarkClient {
                             &encrypted_ack_waiters,
                             "session rekey in progress",
                         );
-                        let current_uuid = user_uuid.lock().ok().and_then(|guard| *guard);
+                        let current_uuid = account.lock().ok().and_then(|guard| *guard);
                         if let Some(uid) = current_uuid {
                             if let Err(err) = {
                                 let transport = transport.lock().await;
@@ -1474,7 +1646,8 @@ impl GodarkClient {
                             &config,
                             &transport,
                             &session,
-                            &user_uuid,
+                            &account,
+                            &access_token,
                             &desired_channels,
                             &connected,
                             &reconnect_attempts,
@@ -1506,7 +1679,8 @@ impl GodarkClient {
                             &config,
                             &transport,
                             &session,
-                            &user_uuid,
+                            &account,
+                            &access_token,
                             &desired_channels,
                             &connected,
                             &reconnect_attempts,
@@ -1542,13 +1716,7 @@ impl GodarkClient {
         if !self.connected.load(Ordering::SeqCst) {
             return Err(GodarkError::Connection("Not connected".into()));
         }
-        if self
-            .user_uuid
-            .lock()
-            .ok()
-            .and_then(|guard| *guard)
-            .is_none()
-        {
+        if self.account.lock().ok().and_then(|guard| *guard).is_none() {
             return Err(GodarkError::Connection("Not authenticated".into()));
         }
         let session = self
@@ -1561,15 +1729,15 @@ impl GodarkClient {
         Ok(())
     }
 
-    fn current_user_uuid(&self) -> Result<Uuid, GodarkError> {
-        self.user_uuid
+    fn current_account(&self) -> Result<AccountId, GodarkError> {
+        self.account
             .lock()
             .map_err(|_| GodarkError::Connection("User id mutex poisoned".into()))?
             .ok_or_else(|| GodarkError::Connection("Not authenticated".into()))
     }
 
-    fn current_user_uuid_bytes(&self) -> Vec<u8> {
-        self.user_uuid
+    fn current_account_bytes(&self) -> Vec<u8> {
+        self.account
             .lock()
             .ok()
             .and_then(|g| *g)
@@ -1585,6 +1753,14 @@ impl GodarkClient {
             ))
         })
     }
+
+    fn resolve_decimals(&self, symbol_id: u64) -> crate::decimals::InstrumentDecimals {
+        self.config
+            .instrument_decimals
+            .get(&symbol_id)
+            .copied()
+            .unwrap_or(crate::decimals::InstrumentDecimals::FALLBACK)
+    }
 }
 
 fn timestamp_ns() -> u64 {
@@ -1594,18 +1770,74 @@ fn timestamp_ns() -> u64 {
         .as_nanos() as u64
 }
 
+/// Mint a REST access token for key-triple auth, or return the legacy `api_key`.
+async fn resolve_ws_login_token(config: &GodarkConfig) -> Result<String, GodarkError> {
+    match (
+        config.api_key_id.as_deref(),
+        config.api_secret.as_deref(),
+        config.passphrase.as_deref(),
+    ) {
+        (Some(id), Some(secret), Some(pp)) => {
+            let rest = crate::rest_client::resolve_rest_base_url(Some(config.base_url.clone()));
+            let http = crate::rest_transport::RestTransport::new(rest);
+            let data = http
+                .auth_token_document_body("client_credentials", id, secret, pp)
+                .await?;
+            data.get("access_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    GodarkError::Authentication("auth/token missing access_token".into())
+                })
+        }
+        _ => {
+            if config.auth_token.is_empty() {
+                return Err(GodarkError::Config(
+                    "missing WebSocket login credentials".into(),
+                ));
+            }
+            Ok(config.auth_token.clone())
+        }
+    }
+}
+
 async fn establish_transport_connection(
     config: &GodarkConfig,
     transport: &Arc<AsyncMutex<EdgeTransport>>,
     session: &Arc<Mutex<CryptoSession>>,
-    user_uuid_slot: &Arc<Mutex<Option<Uuid>>>,
+    account_slot: &Arc<Mutex<Option<AccountId>>>,
+    access_token: &Arc<Mutex<Option<String>>>,
 ) -> Result<mpsc::Receiver<TransportEvent>, GodarkError> {
-    let mut transport = transport.lock().await;
-    transport.connect().await?;
+    let login_token = resolve_ws_login_token(config).await?;
+    {
+        let mut slot = access_token
+            .lock()
+            .map_err(|_| GodarkError::Session("access token mutex poisoned".into()))?;
+        *slot = Some(login_token.clone());
+    }
+    let clear_token = || {
+        if let Ok(mut slot) = access_token.lock() {
+            *slot = None;
+        }
+    };
 
-    let auth_result = transport.authenticate(&config.auth_token).await?;
+    let mut transport = transport.lock().await;
+    if let Err(err) = transport.connect().await {
+        clear_token();
+        return Err(err);
+    }
+
+    let auth_result = match transport.authenticate(&login_token).await {
+        Ok(result) => result,
+        Err(err) => {
+            transport.disconnect().await;
+            clear_token();
+            return Err(err);
+        }
+    };
     if auth_result.get("success").and_then(|v| v.as_bool()) != Some(true) {
         transport.disconnect().await;
+        clear_token();
         let err = auth_result
             .get("error")
             .and_then(|v| v.as_str())
@@ -1613,18 +1845,19 @@ async fn establish_transport_connection(
         return Err(GodarkError::Authentication(err.to_string()));
     }
 
-    let uid = parse_user_uuid_from_auth(&auth_result).or_else(|_| {
-        config.user_uuid.ok_or_else(|| {
+    let uid = parse_account_from_auth(&auth_result).or_else(|_| {
+        config.account.ok_or_else(|| {
+            clear_token();
             GodarkError::Authentication(
-                "auth response has no user_uuid and none configured \
-                     (set GODARK_USER_UUID or pass .user_uuid() to the builder)"
+                "auth response has no account and none configured \
+                     (set GODARK_ACCOUNT or pass .account() to the builder)"
                     .into(),
             )
         })
     })?;
 
     {
-        let mut guard = user_uuid_slot
+        let mut guard = account_slot
             .lock()
             .map_err(|_| GodarkError::Connection("User id mutex poisoned".into()))?;
         *guard = Some(uid);
@@ -1632,7 +1865,7 @@ async fn establish_transport_connection(
 
     if let Err(err) = setup_hpke_session_with_transport(
         &uid,
-        parse_conn_id_from_auth(&auth_result)?,
+        parse_conn_id_from_auth(&auth_result).inspect_err(|_| clear_token())?,
         config,
         &transport,
         session,
@@ -1640,19 +1873,26 @@ async fn establish_transport_connection(
     .await
     {
         transport.disconnect().await;
-        if let Ok(mut guard) = user_uuid_slot.lock() {
+        clear_token();
+        if let Ok(mut guard) = account_slot.lock() {
             *guard = None;
         }
         return Err(err);
     }
 
-    transport
-        .take_event_receiver()
-        .ok_or_else(|| GodarkError::Session("No event receiver after connect".into()))
+    match transport.take_event_receiver() {
+        Some(rx) => Ok(rx),
+        None => {
+            clear_token();
+            Err(GodarkError::Session(
+                "No event receiver after connect".into(),
+            ))
+        }
+    }
 }
 
 async fn setup_hpke_session_with_transport(
-    user_uuid: &Uuid,
+    account: &AccountId,
     conn_id: u64,
     config: &GodarkConfig,
     transport: &EdgeTransport,
@@ -1668,9 +1908,9 @@ async fn setup_hpke_session_with_transport(
         let mut sess = session
             .lock()
             .map_err(|_| GodarkError::Session("Session mutex poisoned".into()))?;
-        sess.setup(&remote_static, *user_uuid, conn_id)?
+        sess.setup(&remote_static, *account, conn_id)?
     };
-    let frame = wire::encode_hpke_setup(user_uuid.as_bytes(), conn_id, &encapped);
+    let frame = wire::encode_hpke_setup(account.as_bytes(), conn_id, &encapped);
     let reply =
         match tokio::time::timeout(HPKE_SETUP_TIMEOUT, transport.send_hpke_setup(frame)).await {
             Ok(Ok(reply)) => reply,
@@ -1759,7 +1999,8 @@ async fn reconnect_transport(
     config: &GodarkConfig,
     transport: &Arc<AsyncMutex<EdgeTransport>>,
     session: &Arc<Mutex<CryptoSession>>,
-    user_uuid_slot: &Arc<Mutex<Option<Uuid>>>,
+    account_slot: &Arc<Mutex<Option<AccountId>>>,
+    access_token: &Arc<Mutex<Option<String>>>,
     desired_channels: &Arc<Mutex<HashSet<String>>>,
     connected: &Arc<AtomicBool>,
     reconnect_attempts: &Arc<AtomicU32>,
@@ -1796,7 +2037,9 @@ async fn reconnect_transport(
                 EdgeTransport::new(&config::ws_url(&config.base_url), config.transport.clone());
         }
 
-        match establish_transport_connection(config, transport, session, user_uuid_slot).await {
+        match establish_transport_connection(config, transport, session, account_slot, access_token)
+            .await
+        {
             Ok(rx) => {
                 if let Err(err) = resubscribe_desired_channels(transport, desired_channels).await {
                     connected.store(false, Ordering::SeqCst);
@@ -1830,6 +2073,7 @@ async fn reconnect_transport(
 enum DecodedPush {
     Order(OrderUpdate),
     PositionsSnapshot(PositionsSnapshot),
+    OpenOrdersSnapshot(OpenOrdersSnapshot),
     SystemHealth(SystemHealthUpdate),
     Balance(BalanceUpdate),
     FundingRate(FundingRateUpdate),
@@ -1844,7 +2088,7 @@ enum DecodedPush {
 
 fn decrypt_push_plaintext(
     session: &Arc<Mutex<CryptoSession>>,
-    user_uuid_slot: &Arc<Mutex<Option<Uuid>>>,
+    account_slot: &Arc<Mutex<Option<AccountId>>>,
     msg: &Value,
 ) -> Result<Vec<u8>, GodarkError> {
     let ct_b64 = msg
@@ -1856,7 +2100,7 @@ fn decrypt_push_plaintext(
         .map_err(|e| GodarkError::Encryption(format!("base64 decode: {e}")))?;
     let nonce =
         json_u64(msg, "nonce").ok_or_else(|| GodarkError::Encryption("missing nonce".into()))?;
-    let user_uuid_bytes = user_uuid_slot
+    let account_bytes = account_slot
         .lock()
         .ok()
         .and_then(|g| *g)
@@ -1878,7 +2122,7 @@ fn decrypt_push_plaintext(
     let corr_bytes = response_correlation_id_bytes(msg);
     let session_seq = json_u64(msg, "session_seq").unwrap_or_default();
     let aad = proto_bridge::build_response_header_aad(
-        &user_uuid_bytes,
+        &account_bytes,
         message_type,
         ct.len() as u32,
         nonce,
@@ -1901,14 +2145,14 @@ fn decode_decrypted_push(message_type: &str, plaintext: &[u8]) -> Result<Decoded
     }
 
     if message_type == "open_orders_snapshot" {
-        if let Ok(proto_bridge::NodeResponseKind::OpenOrdersSnapshot(_)) =
-            proto_bridge::parse_node_response(plaintext)
+        if let Ok(proto_bridge::NodeResponseKind::OpenOrdersSnapshot(snapshot)) =
+            proto_bridge::parse_node_response_with_expected(plaintext, Some("open_orders_snapshot"))
         {
-            return Ok(DecodedPush::Ignored);
+            return Ok(DecodedPush::OpenOrdersSnapshot(snapshot));
         }
     }
 
-    match proto_bridge::parse_sequencer_to_edge_message(plaintext)? {
+    match proto_bridge::parse_sequencer_to_edge_message(plaintext, message_type)? {
         EdgeMessage::OrderUpdate(update) => Ok(DecodedPush::Order(update)),
         EdgeMessage::PositionsSnapshot(snap) => Ok(DecodedPush::PositionsSnapshot(snap)),
         EdgeMessage::SystemHealth(h) => Ok(DecodedPush::SystemHealth(h)),
@@ -1985,10 +2229,129 @@ fn observe_place_order_update(state: &Arc<Mutex<PlaceOutcomeState>>, update: &Or
     }
 }
 
+fn parse_cleartext_system_health(msg: &Value) -> Option<SystemHealthUpdate> {
+    let kind = msg.get("type").and_then(Value::as_str)?;
+    if kind != "system_health" && kind != "health_report" {
+        return None;
+    }
+    Some(SystemHealthUpdate {
+        component_id: json_str(msg, "component_id").unwrap_or(kind).to_string(),
+        state: msg.get("state").and_then(Value::as_i64).unwrap_or(0) as i32,
+        serving: msg.get("serving").and_then(Value::as_bool).unwrap_or(true),
+        cause: json_str(msg, "cause").unwrap_or("").to_string(),
+        updated_at_nanos: json_u64(msg, "updated_at_nanos")
+            .or_else(|| json_u64(msg, "timestamp"))
+            .unwrap_or(0),
+        sequence: json_u64(msg, "sequence").unwrap_or(0),
+        schema_version: json_u64(msg, "schema_version").unwrap_or(0) as u32,
+    })
+}
+
+fn json_str<'a>(msg: &'a Value, key: &str) -> Option<&'a str> {
+    msg.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Map the public plaintext `account_update` onto the balance and margin receivers.
+fn parse_cleartext_account_update(
+    msg: &Value,
+    account: AccountId,
+) -> Option<(BalanceUpdate, AccountMarginUpdate)> {
+    if msg.get("type").and_then(Value::as_str) != Some("account_update") {
+        return None;
+    }
+    let risk = msg.get("risk")?;
+    let wallet = json_str(risk, "wallet_balance").unwrap_or("0").to_string();
+    let available = json_str(risk, "available").unwrap_or("0").to_string();
+    let timestamp = json_u64(msg, "timestamp").unwrap_or_default();
+    let summary = AccountMarginSummary {
+        total_collateral: wallet.clone(),
+        position_margin: json_str(risk, "isolated_margin").unwrap_or("0").to_string(),
+        reserved_order_margin: json_str(risk, "order_margin").unwrap_or("0").to_string(),
+        free_collateral: available,
+        isolated_margin: json_str(risk, "isolated_margin").unwrap_or("0").to_string(),
+        isolated_equity: json_str(risk, "isolated_equity").unwrap_or("0").to_string(),
+        cross_im: json_str(risk, "cross_im").unwrap_or("0").to_string(),
+    };
+    Some((
+        BalanceUpdate {
+            account,
+            balance_raw: 0,
+            timestamp,
+            balance: wallet,
+            signed_balance_8dp: 0,
+            free_collateral_8dp: 0,
+        },
+        AccountMarginUpdate {
+            account,
+            server_timestamp: timestamp,
+            summary: Some(summary),
+        },
+    ))
+}
+
+fn parse_cleartext_open_orders_snapshot(msg: &Value) -> Option<OpenOrdersSnapshot> {
+    let rows = msg.get("rows").and_then(Value::as_array)?;
+    Some(OpenOrdersSnapshot {
+        rows: rows.iter().map(parse_open_order_row_json).collect(),
+        server_timestamp: json_u64(msg, "server_timestamp").unwrap_or_default(),
+        correlation_id: json_u128(msg, "correlation_id").unwrap_or_default(),
+    })
+}
+
+fn parse_open_order_row_json(msg: &Value) -> OpenOrderRow {
+    OpenOrderRow {
+        order_id: json_string(msg, "order_id", "0"),
+        symbol_id: json_u64(msg, "symbol_id").unwrap_or_default(),
+        side: parse_side(msg.get("side").and_then(Value::as_str).unwrap_or("BUY")),
+        order_type: parse_order_type(
+            msg.get("order_type")
+                .and_then(Value::as_str)
+                .unwrap_or("LIMIT"),
+        ),
+        price: json_string(msg, "price", "0"),
+        quantity: json_string(msg, "quantity", "0"),
+        filled_qty: json_string(msg, "filled_qty", "0"),
+        remaining_qty: json_string(msg, "remaining_qty", "0"),
+        order_status: parse_order_status(
+            msg.get("order_status")
+                .or_else(|| msg.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("NEW"),
+        ),
+        time_in_force: parse_time_in_force(
+            msg.get("time_in_force")
+                .and_then(Value::as_str)
+                .unwrap_or("GTC"),
+        ),
+        leverage: json_u64(msg, "leverage").unwrap_or(1) as u32,
+        timestamp: json_u64(msg, "timestamp").unwrap_or_default(),
+        correlation_id: json_u128(msg, "correlation_id").unwrap_or_default(),
+        expiry_time: json_u64(msg, "expiry_time"),
+        reduce_only: msg
+            .get("reduce_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        post_only: msg
+            .get("post_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        take_profit: msg
+            .get("take_profit")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        stop_loss: msg
+            .get("stop_loss")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
 fn parse_cleartext_order_update(msg: &Value) -> Option<OrderUpdate> {
     Some(OrderUpdate {
         order_id: json_string(msg, "order_id", ""),
-        user_uuid: json_uuid(msg),
+        account: json_account(msg),
         symbol_id: json_u64(msg, "symbol_id").unwrap_or_default(),
         side: parse_side(msg.get("side").and_then(Value::as_str).unwrap_or("BUY")),
         status: parse_order_status(
@@ -2035,35 +2398,23 @@ fn parse_cleartext_order_update(msg: &Value) -> Option<OrderUpdate> {
     })
 }
 
-/// Parse UUID from auth_result JSON — tries `user_uuid` (string) first, falls back to `user_id`.
-fn parse_user_uuid_from_auth(msg: &Value) -> Result<Uuid, GodarkError> {
-    if let Some(s) = msg.get("user_uuid").and_then(|v| v.as_str()) {
-        return Uuid::parse_str(s).map_err(|e| {
-            GodarkError::Authentication(format!("invalid user_uuid in auth_result: {e}"))
-        });
-    }
-    if let Some(s) = msg.get("user_id").and_then(|v| v.as_str()) {
-        return Uuid::parse_str(s).map_err(|e| {
-            GodarkError::Authentication(format!("invalid user_id UUID in auth_result: {e}"))
+/// Parse the base58 account from an authenticated login result.
+fn parse_account_from_auth(msg: &Value) -> Result<AccountId, GodarkError> {
+    if let Some(s) = msg.get("account").and_then(|v| v.as_str()) {
+        return s.parse().map_err(|e| {
+            GodarkError::Authentication(format!("invalid account in auth_result: {e}"))
         });
     }
     Err(GodarkError::Authentication(
-        "authentication succeeded but user_uuid missing".into(),
+        "authentication succeeded but account missing".into(),
     ))
 }
 
-/// Parse a UUID from the `user_uuid` or `user_id` JSON field.
-fn json_uuid(msg: &Value) -> Uuid {
-    if let Some(s) = msg
-        .get("user_uuid")
-        .or_else(|| msg.get("user_id"))
-        .and_then(|v| v.as_str())
-    {
-        if let Ok(u) = Uuid::parse_str(s) {
-            return u;
-        }
-    }
-    Uuid::nil()
+fn json_account(msg: &Value) -> AccountId {
+    msg.get("account")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default()
 }
 
 fn json_string(msg: &Value, key: &str, default: &str) -> String {
@@ -2111,6 +2462,25 @@ fn parse_side(raw: &str) -> Side {
     match raw {
         "SELL" => Side::Sell,
         _ => Side::Buy,
+    }
+}
+
+fn parse_order_type(raw: &str) -> OrderType {
+    match raw {
+        "MARKET" => OrderType::Market,
+        "PEG" => OrderType::Peg,
+        "STOP_MARKET" | "STOP" => OrderType::StopMarket,
+        "STOP_LIMIT" => OrderType::StopLimit,
+        _ => OrderType::Limit,
+    }
+}
+
+fn parse_time_in_force(raw: &str) -> TimeInForce {
+    match raw {
+        "IOC" => TimeInForce::Ioc,
+        "FOK" => TimeInForce::Fok,
+        "GTD" => TimeInForce::Gtd,
+        _ => TimeInForce::Gtc,
     }
 }
 
@@ -2177,7 +2547,7 @@ mod tests {
     fn test_new_client_not_connected() {
         let client = GodarkClient::new(test_config());
         assert!(!client.is_connected());
-        assert!(client.user_uuid().is_none());
+        assert!(client.account().is_none());
     }
 
     #[tokio::test]
@@ -2186,7 +2556,7 @@ mod tests {
         let (token, receiver) = client.register_place_outcome_waiter().unwrap();
         let update = OrderUpdate {
             order_id: "42".into(),
-            user_uuid: Uuid::nil(),
+            account: AccountId::default(),
             symbol_id: 1,
             side: Side::Buy,
             status: OrderStatus::New,
@@ -2226,7 +2596,7 @@ mod tests {
                 .order_id = Some("99".into());
             state.recent.push_back(OrderUpdate {
                 order_id: "99".into(),
-                user_uuid: Uuid::nil(),
+                account: AccountId::default(),
                 symbol_id: 1,
                 side: Side::Buy,
                 status: OrderStatus::New,
@@ -2281,7 +2651,7 @@ mod tests {
     fn test_is_terminal_place_update_covers_fill_states() {
         let base = OrderUpdate {
             order_id: "1".into(),
-            user_uuid: Uuid::nil(),
+            account: AccountId::default(),
             symbol_id: 1,
             side: Side::Buy,
             status: OrderStatus::New,
@@ -2327,7 +2697,7 @@ mod tests {
     fn test_parse_cleartext_order_update_reject_text() {
         let msg = json!({
             "order_id": "7",
-            "user_uuid": "00000000-0000-0000-0000-000000000001",
+            "account": "11111111111111111111111111111111",
             "symbol_id": 1,
             "side": "BUY",
             "status": "REJECTED",
@@ -2355,8 +2725,8 @@ mod tests {
                 "BTC-USDC-PERP",
                 Side::Buy,
                 OrderType::Limit,
-                1.0,
-                Some(100.0),
+                "1",
+                Some("100"),
                 TimeInForce::Gtc,
                 false,
                 None,
@@ -2401,6 +2771,67 @@ mod tests {
         assert!(client.take_positions_snapshot_receiver().is_none());
     }
 
+    #[test]
+    fn test_take_open_orders_snapshot_receiver() {
+        let mut client = GodarkClient::new(test_config());
+        assert!(client.take_open_orders_snapshot_receiver().is_some());
+        assert!(client.take_open_orders_snapshot_receiver().is_none());
+    }
+
+    #[test]
+    fn test_decode_open_orders_snapshot_is_delivered() {
+        use crate::generated::sequencer::v1 as sequencer;
+        use prost::Message;
+
+        let row = sequencer::OpenOrderRow {
+            order_id: 42,
+            symbol_id: 7,
+            side: Side::Buy.to_proto(),
+            order_type: OrderType::Limit.to_proto(),
+            price: "100".into(),
+            quantity: "1.5".into(),
+            filled_qty: "0".into(),
+            remaining_qty: "1.5".into(),
+            order_status: OrderStatus::New.to_proto(),
+            time_in_force: TimeInForce::Gtc.to_proto(),
+            leverage: 5,
+            timestamp: 9,
+            correlation_id: vec![],
+            expiry_time: None,
+            reduce_only: false,
+            post_only: true,
+            take_profit: Some("110".into()),
+            stop_loss: Some("90".into()),
+            tpsl_status: None,
+            close_reason: None,
+            peg_offset_bps: None,
+            trigger_price: None,
+        };
+        let snap = sequencer::OpenOrdersSnapshot {
+            rows: vec![row],
+            server_timestamp: 99,
+            correlation_id: 7u128.to_le_bytes().to_vec(),
+            decimal_places: 0,
+            error_code: None,
+            reject_text: None,
+        };
+        match decode_decrypted_push("open_orders_snapshot", &snap.encode_to_vec())
+            .expect("decode snapshot")
+        {
+            DecodedPush::OpenOrdersSnapshot(parsed) => {
+                assert_eq!(parsed.server_timestamp, 99);
+                assert_eq!(parsed.rows.len(), 1);
+                assert_eq!(parsed.rows[0].order_id, "42");
+                assert_eq!(parsed.rows[0].price, "100");
+                assert_eq!(parsed.rows[0].take_profit.as_deref(), Some("110"));
+                assert_eq!(parsed.rows[0].stop_loss.as_deref(), Some("90"));
+                assert!(parsed.rows[0].post_only);
+            }
+            DecodedPush::Ignored => panic!("open_orders_snapshot was parsed and dropped"),
+            _ => panic!("expected OpenOrdersSnapshot"),
+        }
+    }
+
     #[tokio::test]
     async fn test_place_order_when_disconnected() {
         let client = GodarkClient::new(test_config());
@@ -2409,7 +2840,7 @@ mod tests {
                 "BTC-USDC-PERP",
                 Side::Buy,
                 OrderType::Market,
-                0.1,
+                "0.1",
                 None,
                 TimeInForce::Ioc,
                 false,
@@ -2438,7 +2869,7 @@ mod tests {
     async fn test_modify_order_when_disconnected() {
         let client = GodarkClient::new(test_config());
         let err = client
-            .modify_order("12345", "BTC-USDC-PERP", Some(100.0), None, None)
+            .modify_order("12345", "BTC-USDC-PERP", Some("100"), None, None)
             .await
             .unwrap_err();
         assert!(matches!(err, GodarkError::Connection(_)));
@@ -2455,7 +2886,7 @@ mod tests {
             .send(TransportEvent::OrderUpdate(json!({
                 "type": "order_update",
                 "order_id": "42",
-                "user_uuid": "00000000-0000-0000-0000-000000000007",
+                "account": "11111111111111111111111111111111",
                 "symbol_id": 1,
                 "side": "SELL",
                 "order_status": "PARTIALLY_FILLED",
@@ -2478,10 +2909,7 @@ mod tests {
             .expect("order update");
 
         assert_eq!(update.order_id, "42");
-        assert_eq!(
-            update.user_uuid,
-            Uuid::parse_str("00000000-0000-0000-0000-000000000007").unwrap()
-        );
+        assert_eq!(update.account, AccountId::default());
         assert_eq!(update.symbol_id, 1);
         assert_eq!(update.side, Side::Sell);
         assert_eq!(update.status, OrderStatus::PartiallyFilled);
@@ -2489,6 +2917,117 @@ mod tests {
         assert_eq!(update.cancel_reason, Some(CancelReason::UserRequested));
         assert_eq!(update.correlation_id, 99);
         assert_eq!(update.timestamp, 123);
+    }
+
+    #[tokio::test]
+    async fn test_start_event_loop_routes_open_orders_snapshot() {
+        let mut client = GodarkClient::new(test_config());
+        let mut snap_rx = client
+            .take_open_orders_snapshot_receiver()
+            .expect("snapshot receiver");
+        let (event_tx, event_rx) = mpsc::channel(8);
+        client.start_event_loop(event_rx);
+        event_tx
+            .send(TransportEvent::OpenOrdersSnapshot(json!({
+                "type": "open_orders_snapshot",
+                "server_timestamp": 11,
+                "correlation_id": "7",
+                "rows": [{
+                    "order_id": "42",
+                    "symbol_id": 1,
+                    "side": "BUY",
+                    "order_type": "LIMIT",
+                    "price": "100",
+                    "quantity": "1",
+                    "filled_qty": "0",
+                    "remaining_qty": "1",
+                    "order_status": "NEW",
+                    "time_in_force": "GTC",
+                    "leverage": 2,
+                    "timestamp": 3,
+                    "correlation_id": "8",
+                    "take_profit": "120",
+                    "stop_loss": "80",
+                    "post_only": true
+                }]
+            })))
+            .await
+            .expect("send event");
+
+        let snap = tokio::time::timeout(Duration::from_millis(200), snap_rx.recv())
+            .await
+            .expect("receive timeout")
+            .expect("snapshot");
+        assert_eq!(snap.server_timestamp, 11);
+        assert_eq!(snap.correlation_id, 7);
+        assert_eq!(snap.rows.len(), 1);
+        assert_eq!(snap.rows[0].order_id, "42");
+        assert_eq!(snap.rows[0].take_profit.as_deref(), Some("120"));
+        assert_eq!(snap.rows[0].stop_loss.as_deref(), Some("80"));
+        assert!(snap.rows[0].post_only);
+    }
+
+    #[tokio::test]
+    async fn test_start_event_loop_routes_account_update() {
+        let mut client = GodarkClient::new(test_config());
+        let mut bal_rx = client.take_balance_receiver().expect("balance");
+        let mut mar_rx = client.take_account_margin_receiver().expect("margin");
+        let (event_tx, event_rx) = mpsc::channel(8);
+        client.start_event_loop(event_rx);
+        event_tx
+            .send(TransportEvent::AccountUpdate(json!({
+                "type": "account_update",
+                "timestamp": "42",
+                "risk": {
+                    "wallet_balance": "10.5",
+                    "available": "7",
+                    "isolated_margin": "2",
+                    "isolated_equity": "2.1",
+                    "order_margin": "1",
+                    "cross_im": "0.4"
+                }
+            })))
+            .await
+            .expect("send");
+        let bal = tokio::time::timeout(Duration::from_millis(200), bal_rx.recv())
+            .await
+            .expect("balance timeout")
+            .expect("balance");
+        let mar = tokio::time::timeout(Duration::from_millis(200), mar_rx.recv())
+            .await
+            .expect("margin timeout")
+            .expect("margin");
+        assert_eq!(bal.balance, "10.5");
+        assert_eq!(bal.timestamp, 42);
+        let summary = mar.summary.expect("summary");
+        assert_eq!(summary.free_collateral, "7");
+        assert_eq!(summary.reserved_order_margin, "1");
+        assert_eq!(summary.cross_im, "0.4");
+        assert_eq!(mar.server_timestamp, 42);
+    }
+
+    #[tokio::test]
+    async fn test_start_event_loop_routes_system_health() {
+        let mut client = GodarkClient::new(test_config());
+        let mut rx = client.take_system_health_receiver().expect("health");
+        let (event_tx, event_rx) = mpsc::channel(4);
+        client.start_event_loop(event_rx);
+        event_tx
+            .send(TransportEvent::SystemHealth(json!({
+                "type": "system_health",
+                "component_id": "sequencer",
+                "serving": true,
+                "timestamp": "77"
+            })))
+            .await
+            .expect("send");
+        let health = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("health");
+        assert_eq!(health.component_id, "sequencer");
+        assert!(health.serving);
+        assert_eq!(health.updated_at_nanos, 77);
     }
 
     #[tokio::test]

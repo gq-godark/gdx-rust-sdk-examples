@@ -108,7 +108,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ---- verify upstream is at the pinned ref ---------------------------------
-if [[ ! -d "$UPSTREAM_SRC/.git" ]]; then
+if [[ ! -e "$UPSTREAM_SRC/.git" ]]; then
   echo "error: '$UPSTREAM_SRC' is not a git checkout - cannot verify pin" >&2
   exit 1
 fi
@@ -221,39 +221,14 @@ fi
 
 # Remove internal maintainer markers from shipped SDK sources (repo copy stays
 # parity-checked against upstream; recipients see cleaned comments only).
-python3 - "$DEST/sdk/src/order_error_code.rs" "$DEST/sdk/src/transport.rs" <<'PY'
+python3 - "$DEST/sdk/src/transport.rs" <<'PY'
 import pathlib, sys
 replacements = [
     (pathlib.Path(sys.argv[1]), [
         (
-            "//! Mirror of the canonical `OrderErrorCode` enum from\n"
-            "//! `gdx-protocol/src/order_error.rs` so the Rust SDK can produce informative\n"
-            "//! messages for protobuf-encoded ACK rejections (which carry only a numeric\n"
-            "//! `error_code` on the wire).\n"
-            "//!\n"
-            "//! The protocol crate is internal to the trading core; clients embed this\n"
-            "//! standalone copy so adding a new variant on the sequencer side requires\n"
-            "//! appending a row to [`ORDER_ERROR_CODES`] (preserving numeric codes; the\n"
-            "//! Rust enum in `gdx-protocol` is the source of truth).\n",
-            "//! Mirror of the canonical `OrderErrorCode` enum so the Rust SDK can produce\n"
-            "//! informative messages for protobuf-encoded ACK rejections (which carry only a\n"
-            "//! numeric `error_code` on the wire).\n"
-            "//!\n"
-            "//! Clients embed this standalone copy so adding a new variant on the sequencer\n"
-            "//! side requires appending a row to [`ORDER_ERROR_CODES`] (preserving numeric\n"
-            "//! codes; the canonical protocol schema is the source of truth).\n",
+            "a fast ack (as gdx-core PR #203 enabled)",
+            "a fast ack",
         ),
-        (
-            "    /// Wire code from `gdx-protocol::OrderErrorCode::raw()`.",
-            "    /// Wire code from the canonical order-error schema.",
-        ),
-        (
-            "/// All canonical order-error codes the sequencer can emit. Keep in sync with\n"
-            "/// `gdx-protocol/src/order_error.rs`.",
-            "/// All canonical order-error codes the sequencer can emit.",
-        ),
-    ]),
-    (pathlib.Path(sys.argv[2]), [
         (
             "    // Regression test for the gdx-rust-sdk subscribe race fixed alongside\n"
             "    // gdx-core PR #203. We",

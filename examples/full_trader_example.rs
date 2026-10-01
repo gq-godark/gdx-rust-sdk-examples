@@ -3,7 +3,7 @@
 //! Demonstrates:
 //!   1. Load credentials from `.env` / environment
 //!   2. Connect and authenticate (HPKE WebSocket session)
-//!   3. Take receivers for order, position, and all 6 sequencer push streams
+//!   3. Take receivers for orders, positions, and the other sequencer pushes
 //!   4. Subscribe to the private order + position channels
 //!   5. Place, modify, and cancel `MARKET` / `LIMIT` orders
 //!   6. Mass-quote / batch-cancel ladder demo
@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use godark::{
-    Confirmation, Environment, GodarkClient, GodarkRestClient, MassQuoteLegInput, OrderType,
-    PlaceOrderOptions, Side, TimeInForce, TransportConfig,
+    Confirmation, Environment, GodarkClient, MassQuoteLegInput, OrderType, PlaceOrderOptions, Side,
+    TimeInForce, TransportConfig,
 };
 
 #[path = "dotenv.rs"]
@@ -28,12 +28,17 @@ mod dotenv;
 
 const SYMBOL: &str = "BTC-USDC-PERP";
 
-fn live_mark_price() -> f64 {
-    std::env::var("GDX_LIVE_PRICE")
-        .or_else(|_| std::env::var("GODARK_E2E_PRICE"))
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(79_000.0)
+/// Decimal-string prices for the public API (never f64).
+fn price_env(keys: &[&str], default: &str) -> String {
+    for key in keys {
+        if let Ok(v) = std::env::var(key) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+    }
+    default.to_string()
 }
 
 #[tokio::main]
@@ -72,8 +77,8 @@ async fn main() {
         .transport(transport);
     if let Some(legacy) = legacy_key {
         builder = builder.api_key(legacy);
-        if let Some(uid) = dotenv::env_first(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
-            builder = builder.user_uuid(uid);
+        if let Some(account) = dotenv::env_first(&["GODARK_ACCOUNT", "GDX_ACCOUNT"]) {
+            builder = builder.account(account);
         }
     } else {
         let Some(api_key_id) = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]) else {
@@ -140,13 +145,16 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let user = client
-        .user_uuid()
-        .map(|u| u.to_string())
+    let account = client
+        .account()
+        .map(|id| id.to_string())
         .unwrap_or_default();
-    println!("Authenticated as user_uuid={user}  (HPKE session)");
+    println!("Authenticated as account={account}  (HPKE session)");
 
-    if let Err(e) = client.subscribe(&["orders", "positions", "funding_rate"]).await {
+    if let Err(e) = client
+        .subscribe(&["orders", "positions", "funding_rate"])
+        .await
+    {
         eprintln!("Subscribe failed: {e}");
         client.disconnect().await;
         std::process::exit(1);
@@ -155,8 +163,8 @@ async fn main() {
 
     // Drain the initial PositionsSnapshot the sequencer pushes right after subscribe.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    // BTC-USDC-PERP is symbol_id 1; capture its live mark for mass-quote ladder.
-    let mut last_mark_btc: Option<f64> = None;
+    // BTC-USDC-PERP is symbol_id 1; capture mark as a decimal string for display.
+    let mut last_mark_btc: Option<String> = None;
     while let Ok(snap) = positions_snapshot_rx.try_recv() {
         println!(
             "SNAP   source={:?}  rows={}  ts={}",
@@ -166,8 +174,8 @@ async fn main() {
         );
         for row in &snap.rows {
             if row.symbol_id == 1 {
-                if let Some(m) = row.mark_price.as_deref().and_then(|s| s.parse::<f64>().ok()) {
-                    last_mark_btc = Some(m);
+                if let Some(m) = row.mark_price.as_deref().filter(|s| !s.is_empty()) {
+                    last_mark_btc = Some(m.to_string());
                 }
             }
             println!(
@@ -195,16 +203,17 @@ async fn main() {
         dotenv::print_order_error("update_leverage rejected", &e);
     }
 
-    let mark = live_mark_price();
-    let buy_px = (mark * 0.997 * 10.0).round() / 10.0;
-    println!("Placing limit BUY @ {buy_px} (mark={mark})...");
+    let buy_px = price_env(&["GODARK_E2E_BUY_PRICE", "GDX_LIVE_PRICE", "GODARK_E2E_PRICE"], "78763");
+    let modify_px = price_env(&["GODARK_E2E_MODIFY_PRICE"], "78684");
+    let sell_px = price_env(&["GODARK_E2E_SELL_PRICE"], "81370");
+    println!("Placing limit BUY @ {buy_px}...");
     let buy_ack = match client
         .place_order(
             SYMBOL,
             Side::Buy,
             OrderType::Limit,
-            0.1,
-            Some(buy_px),
+            "0.1",
+            Some(buy_px.as_str()),
             TimeInForce::Gtc,
             false,
             None,
@@ -217,40 +226,73 @@ async fn main() {
                 "BUY placed: order_id={}  sequence={}",
                 ack.order_id, ack.sequence
             );
-            ack
+            Some(ack)
         }
         Err(e) => {
-            dotenv::print_order_error("BUY rejected", &e);
-            client.disconnect().await;
-            std::process::exit(1);
+            dotenv::print_order_error("BUY rejected (continuing to market Place)", &e);
+            None
         }
     };
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     drain_orders(&mut order_rx, "after BUY");
 
-    let modify_px = (mark * 0.996 * 10.0).round() / 10.0;
-    println!("Modifying order price to {modify_px}...");
+    if let Some(ref buy_ack) = buy_ack {
+        println!("Modifying order price to {modify_px}...");
+        match client
+            .modify_order(
+                &buy_ack.order_id,
+                SYMBOL,
+                Some(modify_px.as_str()),
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(ack) => println!("Modified: order_id={}", ack.order_id),
+            Err(e) => dotenv::print_order_error("Modify rejected", &e),
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        drain_orders(&mut order_rx, "after MODIFY");
+    }
+
+    // Market IOC with explicit walk cap: 50 bps = 0.5% of mark (UI default).
+    // Omit slippage_bps → venue max (localnet 5%).
+    println!("Placing market IOC BUY qty=0.01 with slippage_bps=50 (0.5% walk)...");
     match client
-        .modify_order(&buy_ack.order_id, SYMBOL, Some(modify_px), None, None)
+        .place_order_with_options(
+            SYMBOL,
+            Side::Buy,
+            OrderType::Market,
+            Some("0.01"),
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            Confirmation::Book,
+            PlaceOrderOptions {
+                slippage_bps: Some(50),
+                ..Default::default()
+            },
+        )
         .await
     {
-        Ok(ack) => println!("Modified: order_id={}", ack.order_id),
-        Err(e) => dotenv::print_order_error("Modify rejected", &e),
+        Ok(ack) => println!("MARKET BUY placed: order_id={}", ack.order_id),
+        Err(e) => dotenv::print_order_error("Market BUY rejected (continuing)", &e),
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
-    drain_orders(&mut order_rx, "after MODIFY");
+    drain_orders(&mut order_rx, "after MARKET BUY");
 
-    let sell_px = (mark * 1.03 * 10.0).round() / 10.0;
     println!("Placing limit SELL @ {sell_px}...");
     match client
         .place_order_with_options(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
-            0.05,
-            Some(sell_px),
+            Some("0.05"),
+            Some(sell_px.as_str()),
             TimeInForce::Gtc,
             false,
             None,
@@ -286,27 +328,21 @@ async fn main() {
     // Pass `Some(false)` for the relaxed path, where a crossing leg takes
     // liquidity up to its limit and rests the remainder (the number of taker
     // fills is reported per leg as `fill_count`).
-    // Anchor to live BTC mark from the snapshot; fall back to GDX_BASE.
-    let base: f64 = last_mark_btc.unwrap_or_else(|| {
-        std::env::var("GDX_BASE")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(64_000.0)
-    });
-    let round1 = |p: f64| (p * 10.0).round() / 10.0;
-    let mk = |price: f64, qty: f64| MassQuoteLegInput {
+    // Ladder prices are decimal strings (optional GODARK_E2E_LADDER_* / mark string).
+    let _mark_hint = last_mark_btc.as_deref().unwrap_or("unknown");
+    let mk = |price: &str, qty: &str| MassQuoteLegInput {
         side: Side::Buy,
-        price: round1(price),
-        quantity: qty,
+        price: price.to_string(),
+        quantity: qty.to_string(),
         cancel_order_id: None,
         time_in_force: None,
         expiry_time: None,
     };
-    println!("Mass-quoting a 3-level BUY ladder (post-only), base={base:.2}...");
+    println!("Mass-quoting a 3-level BUY ladder (post-only), mark_hint={_mark_hint}...");
     let ladder = vec![
-        mk(base * (1.0 - 0.003), 0.02),
-        mk(base * (1.0 - 0.006), 0.02),
-        mk(base * (1.0 - 0.009), 0.02),
+        mk(&price_env(&["GODARK_E2E_LADDER_1"], "78763"), "0.02"),
+        mk(&price_env(&["GODARK_E2E_LADDER_2"], "78526"), "0.02"),
+        mk(&price_env(&["GODARK_E2E_LADDER_3"], "78289"), "0.02"),
     ];
     let mut resting_ids: Vec<u64> = Vec::new();
     match client.mass_quote(SYMBOL, &ladder, None).await {
@@ -327,7 +363,11 @@ async fn main() {
                     r.error_code
                 );
                 if r.status == "open" {
-                    if let Some(id) = r.new_order_id.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(id) = r
+                        .new_order_id
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         resting_ids.push(id);
                     }
                 }
@@ -342,21 +382,18 @@ async fn main() {
     if !resting_ids.is_empty() {
         println!("cancel_all_orders (ladder cleanup)...");
         match client.cancel_all_orders(Some(SYMBOL)).await {
-            Ok(ca) => println!(
-                "  cancel_all: count={}  ids={:?}",
-                ca.count, ca.order_ids
-            ),
+            Ok(ca) => println!("  cancel_all: count={}  ids={:?}", ca.count, ca.order_ids),
             Err(e) => dotenv::print_order_error("cancel_all rejected", &e),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
         drain_orders(&mut order_rx, "after CANCEL ALL");
     }
 
-    // Crossing BUY ~5% above mark (within oracle band): post_only true vs false.
-    let cross_px = base * 1.05;
+    // Crossing BUY string (within oracle band): post_only true vs false.
+    let cross_px = price_env(&["GODARK_E2E_CROSS_PRICE"], "82950");
     println!("Mass-quoting a crossing BUY with post_only=true (expect rejected/2018)...");
     match client
-        .mass_quote(SYMBOL, &[mk(cross_px, 0.001)], Some(true))
+        .mass_quote(SYMBOL, &[mk(&cross_px, "0.001")], Some(true))
         .await
     {
         Ok(mq) => {
@@ -375,7 +412,7 @@ async fn main() {
     // Crossing BUY with post_only=false (relaxed): leg takes liquidity, fills>0.
     println!("Mass-quoting a crossing BUY with post_only=false (expect filled, fills>0)...");
     match client
-        .mass_quote(SYMBOL, &[mk(cross_px, 0.003)], Some(false))
+        .mass_quote(SYMBOL, &[mk(&cross_px, "0.003")], Some(false))
         .await
     {
         Ok(mq) => {
@@ -390,7 +427,11 @@ async fn main() {
                     r.error_code
                 );
                 if r.status == "open" {
-                    if let Some(id) = r.new_order_id.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(id) = r
+                        .new_order_id
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         stray_ids.push(id);
                     }
                 }
@@ -398,10 +439,7 @@ async fn main() {
             if !stray_ids.is_empty() {
                 println!("cancel_all_orders (post_only=false remainder cleanup)...");
                 match client.cancel_all_orders(Some(SYMBOL)).await {
-                    Ok(ca) => println!(
-                        "  cancel_all: count={}  ids={:?}",
-                        ca.count, ca.order_ids
-                    ),
+                    Ok(ca) => println!("  cancel_all: count={}  ids={:?}", ca.count, ca.order_ids),
                     Err(e) => dotenv::print_order_error(
                         "post_only=false remainder cancel_all rejected",
                         &e,
@@ -414,10 +452,12 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     drain_orders(&mut order_rx, "after post_only=false");
 
-    println!("Cancelling original BUY (cleanup)...");
-    match client.cancel_order(&buy_ack.order_id, SYMBOL).await {
-        Ok(_) => println!("Original BUY cancelled"),
-        Err(_) => println!("Original BUY already filled or cancelled"),
+    if let Some(ref buy_ack) = buy_ack {
+        println!("Cancelling original BUY (cleanup)...");
+        match client.cancel_order(&buy_ack.order_id, SYMBOL).await {
+            Ok(_) => println!("Original BUY cancelled"),
+            Err(_) => println!("Original BUY already filled or cancelled"),
+        }
     }
 
     // Drain any sequencer pushes that arrived during the session.
@@ -448,14 +488,14 @@ async fn main() {
     while let Ok(a) = account_margin_rx.try_recv() {
         margin_count += 1;
         println!(
-            "MARGIN user={}  ts={}  isolated_margin={}  cross_im={}",
-            a.user_uuid,
+            "MARGIN account={}  ts={}  isolated_margin={}  cross_im={}",
+            a.account,
             a.server_timestamp,
-            a.account
+            a.summary
                 .as_ref()
                 .map(|s| s.isolated_margin.as_str())
                 .unwrap_or(""),
-            a.account
+            a.summary
                 .as_ref()
                 .map(|s| s.cross_im.as_str())
                 .unwrap_or("")

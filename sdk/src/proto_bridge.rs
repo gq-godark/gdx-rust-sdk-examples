@@ -3,6 +3,9 @@
 use prost::Message;
 use uuid::Uuid;
 
+use crate::decimals::{
+    normalize_decimal, normalize_opt_price, normalize_opt_quantity, InstrumentDecimals,
+};
 use crate::enums::{
     self, CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce,
 };
@@ -11,10 +14,10 @@ use crate::generated::edge::v1 as edge;
 use crate::generated::health::v1 as health;
 use crate::generated::sequencer::v1 as sequencer;
 use crate::types::{
-    AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, CountAck, FundingRateUpdate,
-    LeverageSetting, LeverageSettings, OpenOrderRow, OpenOrdersSnapshot, OrderUpdate,
-    PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource, SystemHealthUpdate,
-    TpslAck,
+    AccountId, AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, CountAck,
+    FundingRateUpdate, LeverageSetting, LeverageSettings, OpenOrderRow, OpenOrdersSnapshot,
+    OrderUpdate, PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource,
+    SystemHealthUpdate, TpslAck,
 };
 
 /// Encode a correlation id (16 raw UUID bytes, big-endian layout) as the
@@ -48,12 +51,8 @@ fn correlation_id_to_u128(raw: &[u8]) -> u128 {
     u128::from_le_bytes(buf)
 }
 
-fn uuid_from_bytes(raw: &[u8]) -> Uuid {
-    if raw.len() == 16 {
-        Uuid::from_bytes(raw.try_into().unwrap())
-    } else {
-        Uuid::nil()
-    }
+fn account_from_bytes(raw: &[u8]) -> Result<AccountId, GodarkError> {
+    AccountId::try_from_slice(raw).map_err(GodarkError::Encryption)
 }
 
 // ---------------------------------------------------------------------------
@@ -65,50 +64,67 @@ pub fn build_place_order_proto(
     symbol_id: u64,
     side: Side,
     order_type: crate::enums::OrderType,
-    quantity: f64,
-    user_uuid: &[u8],
-    price: Option<f64>,
+    quantity: Option<&str>,
+    account: &[u8],
+    price: Option<&str>,
     time_in_force: crate::enums::TimeInForce,
     aon: bool,
-    min_fill_size: Option<f64>,
+    min_fill_size: Option<&str>,
     expiry_time: Option<u64>,
     correlation_id_bytes: &[u8],
     options: PlaceOrderOptions,
     _timestamp: u64,
-) -> Vec<u8> {
+    decimals: InstrumentDecimals,
+) -> Result<Vec<u8>, GodarkError> {
+    if quantity.is_some() == options.quote_notional.is_some() {
+        return Err(GodarkError::Config(
+            "exactly one of quantity or options.quote_notional is required".into(),
+        ));
+    }
+    if aon && quantity.is_none() {
+        return Err(GodarkError::Config(
+            "aon requires base quantity, not quote_notional".into(),
+        ));
+    }
     let min_fill_size = if aon && min_fill_size.is_none() {
-        Some(quantity)
+        quantity
     } else {
         min_fill_size
     };
+    // quote_notional is quote-currency; use price_decimals for its fraction limit.
+    let quote_notional = options
+        .quote_notional
+        .as_deref()
+        .map(|v| normalize_decimal(v, decimals.price_decimals))
+        .transpose()?;
     let place = sequencer::PlaceOrderInput {
         symbol_id,
         side: side.to_proto(),
         order_type: order_type.to_proto(),
-        quantity,
+        quantity: normalize_opt_quantity(quantity, decimals)?,
+        quote_notional,
         time_in_force: time_in_force.to_proto(),
-        price,
-        min_fill_size,
+        price: normalize_opt_price(price, decimals)?,
+        min_fill_size: normalize_opt_quantity(min_fill_size, decimals)?,
         expiry_time,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         stp_mode: options.stp_mode.to_proto(),
         post_only: options.post_only,
         reduce_only: options.reduce_only,
-        stop_loss_price: options.stop_loss_price,
-        take_profit_price: options.take_profit_price,
+        stop_loss_price: normalize_opt_price(options.stop_loss_price.as_deref(), decimals)?,
+        take_profit_price: normalize_opt_price(options.take_profit_price.as_deref(), decimals)?,
         peg_offset_bps: options.peg_offset_bps,
-        trigger_price: options.trigger_price,
+        trigger_price: normalize_opt_price(options.trigger_price.as_deref(), decimals)?,
+        slippage_bps: options.slippage_bps,
     };
-    let req = sequencer::EdgeSequencerRequest {
-        inner: Some(sequencer::edge_sequencer_request::Inner::Place(place)),
-    };
-    req.encode_to_vec()
+    // HPKE body is the bare inner proto (PlaceOrderInput), not EdgeSequencerRequest.
+    Ok(place.encode_to_vec())
 }
 
 pub fn build_cancel_order_proto(
     order_id: u64,
-    _user_uuid: &[u8],
+    _account: &[u8],
     symbol_id: u64,
     correlation_id_bytes: &[u8],
 ) -> Vec<u8> {
@@ -116,229 +132,203 @@ pub fn build_cancel_order_proto(
         order_id,
         symbol_id,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid: _user_uuid.to_vec(),
+        account: _account.to_vec(),
         cancel_reason: None,
     };
-    let req = sequencer::EdgeSequencerRequest {
-        inner: Some(sequencer::edge_sequencer_request::Inner::Cancel(cancel)),
-    };
-    req.encode_to_vec()
+    cancel.encode_to_vec()
 }
 
 pub fn build_cancel_all_proto(
     symbol_id: Option<u64>,
-    user_uuid: &[u8],
+    account: &[u8],
     correlation_id_bytes: &[u8],
 ) -> Vec<u8> {
     let cancel_all = sequencer::CancelAllInput {
         symbol_id,
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
     };
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::CancelAll(
-        cancel_all,
-    ))
+    cancel_all.encode_to_vec()
 }
 
 pub fn build_close_all_proto(
     symbol_id: Option<u64>,
-    user_uuid: &[u8],
+    account: &[u8],
     correlation_id_bytes: &[u8],
 ) -> Vec<u8> {
     let close_all = sequencer::CloseAllInput {
         symbol_id,
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
     };
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::CloseAll(
-        close_all,
-    ))
+    close_all.encode_to_vec()
 }
 
-pub fn build_reverse_proto(
-    symbol_id: u64,
-    user_uuid: &[u8],
-    correlation_id_bytes: &[u8],
-) -> Vec<u8> {
+pub fn build_reverse_proto(symbol_id: u64, account: &[u8], correlation_id_bytes: &[u8]) -> Vec<u8> {
     let reverse = sequencer::ReverseInput {
         symbol_id,
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
     };
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::Reverse(reverse))
+    reverse.encode_to_vec()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_amend_tpsl_proto(
-    user_uuid: &[u8],
+    account: &[u8],
     order_id: u64,
     correlation_id_bytes: &[u8],
-    take_profit_price: Option<f64>,
-    stop_loss_price: Option<f64>,
+    take_profit_price: Option<&str>,
+    stop_loss_price: Option<&str>,
     symbol_id: Option<u64>,
     position_side: Option<crate::enums::Side>,
-) -> Vec<u8> {
+    decimals: InstrumentDecimals,
+) -> Result<Vec<u8>, GodarkError> {
     let amend = sequencer::AmendTpslRequest {
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         order_id,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        take_profit_price,
-        stop_loss_price,
+        take_profit_price: normalize_opt_price(take_profit_price, decimals)?,
+        stop_loss_price: normalize_opt_price(stop_loss_price, decimals)?,
         symbol_id,
         position_side: position_side.map(crate::enums::Side::to_proto),
     };
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::AmendTpsl(amend))
+    Ok(amend.encode_to_vec())
 }
 
 pub fn build_cancel_tpsl_proto(
-    user_uuid: &[u8],
+    account: &[u8],
     order_id: u64,
     correlation_id_bytes: &[u8],
     symbol_id: Option<u64>,
     position_side: Option<crate::enums::Side>,
 ) -> Vec<u8> {
     let cancel = sequencer::CancelTpslRequest {
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         order_id,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
         symbol_id,
         position_side: position_side.map(crate::enums::Side::to_proto),
     };
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::CancelTpsl(cancel))
+    cancel.encode_to_vec()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_modify_order_proto(
     order_id: u64,
-    user_uuid: &[u8],
+    account: &[u8],
     symbol_id: u64,
-    new_price: Option<f64>,
-    new_quantity: Option<f64>,
-    new_trigger_price: Option<f64>,
+    new_price: Option<&str>,
+    new_quantity: Option<&str>,
+    new_trigger_price: Option<&str>,
     correlation_id_bytes: &[u8],
-) -> Vec<u8> {
+    decimals: InstrumentDecimals,
+) -> Result<Vec<u8>, GodarkError> {
     let modify = sequencer::ModifyOrderInput {
         order_id,
         symbol_id,
-        new_price,
-        new_quantity,
+        new_price: normalize_opt_price(new_price, decimals)?,
+        new_quantity: normalize_opt_quantity(new_quantity, decimals)?,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid: user_uuid.to_vec(),
-        new_trigger_price,
+        account: account.to_vec(),
+        new_trigger_price: normalize_opt_price(new_trigger_price, decimals)?,
     };
-    let req = sequencer::EdgeSequencerRequest {
-        inner: Some(sequencer::edge_sequencer_request::Inner::Modify(modify)),
-    };
-    req.encode_to_vec()
+    Ok(modify.encode_to_vec())
 }
 
 pub fn build_update_leverage_proto(
-    user_uuid: &[u8],
+    account: &[u8],
     symbol_id: u64,
     leverage: u32,
     correlation_id_bytes: &[u8],
 ) -> Vec<u8> {
     let leverage = leverage.max(1);
     let update = sequencer::UpdateLeverageRequest {
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         symbol_id,
         leverage,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
     };
-    let req = sequencer::EdgeSequencerRequest {
-        inner: Some(sequencer::edge_sequencer_request::Inner::UpdateLeverage(
-            update,
-        )),
-    };
-    req.encode_to_vec()
+    update.encode_to_vec()
 }
 
-fn encode_edge_request(inner: sequencer::edge_sequencer_request::Inner) -> Vec<u8> {
-    sequencer::EdgeSequencerRequest { inner: Some(inner) }.encode_to_vec()
-}
-
-fn user_corr_body(user_uuid: &[u8], correlation_id_bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+fn user_corr_body(account: &[u8], correlation_id_bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (
-        user_uuid.to_vec(),
+        account.to_vec(),
         correlation_id_body_bytes(correlation_id_bytes),
     )
 }
 
-pub fn build_get_open_orders_proto(user_uuid: &[u8], correlation_id_bytes: &[u8]) -> Vec<u8> {
-    let (user_uuid, correlation_id) = user_corr_body(user_uuid, correlation_id_bytes);
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::GetOpenOrders(
-        sequencer::GetOpenOrdersRequest {
-            user_uuid,
-            correlation_id,
-        },
-    ))
+pub fn build_get_open_orders_proto(account: &[u8], correlation_id_bytes: &[u8]) -> Vec<u8> {
+    let (account, correlation_id) = user_corr_body(account, correlation_id_bytes);
+    sequencer::GetOpenOrdersRequest {
+        account,
+        correlation_id,
+    }
+    .encode_to_vec()
 }
 
-pub fn build_get_positions_proto(user_uuid: &[u8], correlation_id_bytes: &[u8]) -> Vec<u8> {
-    let (user_uuid, correlation_id) = user_corr_body(user_uuid, correlation_id_bytes);
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::GetPositions(
-        sequencer::GetPositionsRequest {
-            user_uuid,
-            correlation_id,
-        },
-    ))
+pub fn build_get_positions_proto(account: &[u8], correlation_id_bytes: &[u8]) -> Vec<u8> {
+    let (account, correlation_id) = user_corr_body(account, correlation_id_bytes);
+    sequencer::GetPositionsRequest {
+        account,
+        correlation_id,
+    }
+    .encode_to_vec()
 }
 
-pub fn build_get_account_proto(user_uuid: &[u8], correlation_id_bytes: &[u8]) -> Vec<u8> {
-    let (user_uuid, correlation_id) = user_corr_body(user_uuid, correlation_id_bytes);
-    encode_edge_request(sequencer::edge_sequencer_request::Inner::GetAccount(
-        sequencer::GetAccountRequest {
-            user_uuid,
-            correlation_id,
-        },
-    ))
+pub fn build_get_account_proto(account: &[u8], correlation_id_bytes: &[u8]) -> Vec<u8> {
+    let (account, correlation_id) = user_corr_body(account, correlation_id_bytes);
+    sequencer::GetAccountRequest {
+        account,
+        correlation_id,
+    }
+    .encode_to_vec()
 }
 
-/// Build a `MassQuoteInput` (bulk cancel-replace) wrapped in an
-/// `EdgeSequencerRequest`. Each leg becomes its own order and carries a unique
-/// 16-byte correlation id (the wire requires exactly 16 bytes per leg).
+/// Build bare `MassQuoteInput` bytes for HPKE sealing. Each leg becomes its own
+/// order and carries a unique 16-byte correlation id (the wire requires exactly
+/// 16 bytes per leg).
 pub fn build_mass_quote_proto(
     symbol_id: u64,
-    user_uuid: &[u8],
+    account: &[u8],
     legs: &[crate::types::MassQuoteLegInput],
     correlation_id_bytes: &[u8],
     post_only: Option<bool>,
-) -> Vec<u8> {
-    let pb_legs = legs
-        .iter()
-        .map(|leg| {
-            let tif = leg.time_in_force.unwrap_or(crate::enums::TimeInForce::Gtc);
-            sequencer::MassQuoteLeg {
-                // 0 means "pure place" (no cancel target).
-                cancel_order_id: leg.cancel_order_id.unwrap_or(0),
-                side: leg.side.to_proto(),
-                price: leg.price,
-                quantity: leg.quantity,
-                time_in_force: tif.to_proto(),
-                expiry_time: leg.expiry_time,
-                correlation_id: Uuid::new_v4().into_bytes().to_vec(),
-            }
-        })
-        .collect();
+    decimals: InstrumentDecimals,
+) -> Result<Vec<u8>, GodarkError> {
+    let mut pb_legs = Vec::with_capacity(legs.len());
+    for leg in legs {
+        let tif = leg.time_in_force.unwrap_or(crate::enums::TimeInForce::Gtc);
+        pb_legs.push(sequencer::MassQuoteLeg {
+            // 0 means "pure place" (no cancel target).
+            cancel_order_id: leg.cancel_order_id.unwrap_or(0),
+            side: leg.side.to_proto(),
+            price: normalize_decimal(&leg.price, decimals.price_decimals)?,
+            quantity: normalize_decimal(&leg.quantity, decimals.quantity_decimals)?,
+            time_in_force: tif.to_proto(),
+            expiry_time: leg.expiry_time,
+            correlation_id: Uuid::new_v4().into_bytes().to_vec(),
+        });
+    }
     let mq = sequencer::MassQuoteInput {
         symbol_id,
         legs: pb_legs,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         stp_mode: 0,
         // Sequencer requires post_only on the wire; default to post-only when unset.
         // Some(false) enables the relaxed path where a crossing leg takes liquidity.
         post_only: Some(post_only.unwrap_or(true)),
     };
-    let req = sequencer::EdgeSequencerRequest {
-        inner: Some(sequencer::edge_sequencer_request::Inner::MassQuote(mq)),
-    };
-    req.encode_to_vec()
+    Ok(mq.encode_to_vec())
 }
 
-/// Build a `BatchCancelInput` (cancel up to 20 resting orders on one symbol)
-/// wrapped in an `EdgeSequencerRequest`.
+/// Build bare `BatchCancelInput` bytes (cancel up to 20 resting orders on one
+/// symbol) for HPKE sealing.
 pub fn build_batch_cancel_proto(
     symbol_id: u64,
-    user_uuid: &[u8],
+    account: &[u8],
     order_ids: &[u64],
     correlation_id_bytes: &[u8],
 ) -> Vec<u8> {
@@ -346,42 +336,37 @@ pub fn build_batch_cancel_proto(
         symbol_id,
         order_ids: order_ids.to_vec(),
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
     };
-    let req = sequencer::EdgeSequencerRequest {
-        inner: Some(sequencer::edge_sequencer_request::Inner::BatchCancel(bc)),
-    };
-    req.encode_to_vec()
+    bc.encode_to_vec()
 }
 
-/// Build a `BatchModifyInput` (post-only amend up to 20 resting orders on one
-/// symbol) wrapped in an `EdgeSequencerRequest`. Each leg carries a unique
-/// 16-byte correlation id.
+/// Build bare `BatchModifyInput` bytes (post-only amend up to 20 resting orders
+/// on one symbol) for HPKE sealing. Each leg carries a unique 16-byte
+/// correlation id.
 pub fn build_batch_modify_proto(
     symbol_id: u64,
-    user_uuid: &[u8],
+    account: &[u8],
     legs: &[crate::types::BatchModifyLegInput],
     correlation_id_bytes: &[u8],
-) -> Vec<u8> {
-    let pb_legs = legs
-        .iter()
-        .map(|leg| sequencer::BatchModifyLeg {
+    decimals: InstrumentDecimals,
+) -> Result<Vec<u8>, GodarkError> {
+    let mut pb_legs = Vec::with_capacity(legs.len());
+    for leg in legs {
+        pb_legs.push(sequencer::BatchModifyLeg {
             order_id: leg.order_id,
-            new_price: leg.new_price,
-            new_quantity: leg.new_quantity,
+            new_price: normalize_opt_price(leg.new_price.as_deref(), decimals)?,
+            new_quantity: normalize_opt_quantity(leg.new_quantity.as_deref(), decimals)?,
             correlation_id: Uuid::new_v4().into_bytes().to_vec(),
-        })
-        .collect();
+        });
+    }
     let bm = sequencer::BatchModifyInput {
         symbol_id,
         legs: pb_legs,
         correlation_id: correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
     };
-    let req = sequencer::EdgeSequencerRequest {
-        inner: Some(sequencer::edge_sequencer_request::Inner::BatchModify(bm)),
-    };
-    req.encode_to_vec()
+    Ok(bm.encode_to_vec())
 }
 
 fn mass_quote_leg_status_str(status: i32) -> &'static str {
@@ -459,6 +444,7 @@ pub fn parse_mass_quote_ack(data: &[u8]) -> Result<crate::types::MassQuoteAck, G
         return Err(GodarkError::Order {
             message: format!("Expected mass_quote_ack, got {variant}"),
             error_code: None,
+            user_message: None,
         });
     }
     let ack = sequencer::MassQuoteAck::decode(payload.as_slice())
@@ -491,6 +477,7 @@ pub fn parse_batch_cancel_ack(data: &[u8]) -> Result<crate::types::BatchCancelAc
         return Err(GodarkError::Order {
             message: format!("Expected batch_cancel_ack, got {variant}"),
             error_code: None,
+            user_message: None,
         });
     }
     let ack = sequencer::BatchCancelAck::decode(payload.as_slice())
@@ -519,6 +506,7 @@ pub fn parse_batch_modify_ack(data: &[u8]) -> Result<crate::types::BatchModifyAc
         return Err(GodarkError::Order {
             message: format!("Expected batch_modify_ack, got {variant}"),
             error_code: None,
+            user_message: None,
         });
     }
     let ack = sequencer::BatchModifyAck::decode(payload.as_slice())
@@ -676,13 +664,13 @@ fn decode_node_response_variant(
         "positions_snapshot" => {
             let s = sequencer::PositionsSnapshot::decode(payload)?;
             Ok(NodeResponseKind::PositionsSnapshot(
-                parse_positions_snapshot(s),
+                parse_positions_snapshot(s)?,
             ))
         }
         "account_margin_update" | "account_update" => {
             let s = sequencer::AccountMarginUpdate::decode(payload)?;
             Ok(NodeResponseKind::AccountMarginUpdate(
-                parse_account_margin_update(s),
+                parse_account_margin_update(s)?,
             ))
         }
         "mass_quote_ack" => {
@@ -750,7 +738,7 @@ fn ack_from_proto(ack: sequencer::AckMessage) -> NodeResponseKind {
 }
 
 pub fn build_order_header_aad(
-    user_uuid: &[u8],
+    account: &[u8],
     symbol_id: u64,
     request_type: &str,
     nonce: u64,
@@ -759,7 +747,7 @@ pub fn build_order_header_aad(
     conn_id: u64,
 ) -> Vec<u8> {
     let header = edge::OrderHeader {
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         symbol_id,
         request_type: enums::request_type_to_proto(request_type),
         nonce,
@@ -772,7 +760,7 @@ pub fn build_order_header_aad(
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_response_header_aad(
-    user_uuid: &[u8],
+    account: &[u8],
     message_type: &str,
     body_length: u32,
     nonce: u64,
@@ -782,7 +770,7 @@ pub fn build_response_header_aad(
     conn_id: u64,
 ) -> Vec<u8> {
     let header = edge::ResponseHeader {
-        user_uuid: user_uuid.to_vec(),
+        account: account.to_vec(),
         message_type: enums::response_message_type_to_proto(message_type),
         body_length,
         nonce,
@@ -887,6 +875,7 @@ pub fn parse_tpsl_ack(data: &[u8]) -> Result<TpslAck, GodarkError> {
         other => Err(GodarkError::Order {
             message: format!("Expected tpsl_ack, got {other:?}"),
             error_code: None,
+            user_message: None,
         }),
     }
 }
@@ -949,6 +938,7 @@ pub fn parse_count_ack(data: &[u8], expected: &str) -> Result<CountAck, GodarkEr
         other => Err(GodarkError::Order {
             message: format!("Expected count ack, got {other:?}"),
             error_code: None,
+            user_message: None,
         }),
     }
 }
@@ -957,7 +947,7 @@ pub fn parse_order_update(data: &[u8]) -> Result<OrderUpdate, GodarkError> {
     let msg = sequencer::OrderUpdateMessage::decode(data)?;
     Ok(OrderUpdate {
         order_id: msg.order_id.to_string(),
-        user_uuid: uuid_from_bytes(&msg.user_uuid),
+        account: account_from_bytes(&msg.account)?,
         symbol_id: msg.symbol_id,
         side: Side::from_proto(msg.side),
         status: OrderStatus::from_proto(msg.order_status),
@@ -1055,14 +1045,16 @@ fn parse_position_row(row: sequencer::PositionRow) -> PositionRow {
     }
 }
 
-pub fn parse_positions_snapshot(msg: sequencer::PositionsSnapshot) -> PositionsSnapshot {
-    PositionsSnapshot {
-        user_uuid: uuid_from_bytes(&msg.user_uuid),
+pub fn parse_positions_snapshot(
+    msg: sequencer::PositionsSnapshot,
+) -> Result<PositionsSnapshot, GodarkError> {
+    Ok(PositionsSnapshot {
+        account: account_from_bytes(&msg.account)?,
         rows: msg.rows.into_iter().map(parse_position_row).collect(),
         server_timestamp: msg.server_timestamp,
         source: parse_positions_snapshot_source(msg.source),
         correlation_id: msg.correlation_id.as_deref().map(correlation_id_to_u128),
-    }
+    })
 }
 
 pub fn parse_system_health(msg: health::HealthReport) -> SystemHealthUpdate {
@@ -1077,15 +1069,17 @@ pub fn parse_system_health(msg: health::HealthReport) -> SystemHealthUpdate {
     }
 }
 
-pub fn parse_balance_update(msg: sequencer::BalanceUpdateMessage) -> BalanceUpdate {
-    BalanceUpdate {
-        user_uuid: uuid_from_bytes(&msg.user_uuid),
+pub fn parse_balance_update(
+    msg: sequencer::BalanceUpdateMessage,
+) -> Result<BalanceUpdate, GodarkError> {
+    Ok(BalanceUpdate {
+        account: account_from_bytes(&msg.account)?,
         balance_raw: msg.balance_raw,
         timestamp: msg.timestamp,
         balance: msg.balance,
         signed_balance_8dp: msg.signed_balance_8dp,
         free_collateral_8dp: msg.free_collateral_8dp,
-    }
+    })
 }
 
 pub fn parse_funding_rate_update(msg: sequencer::FundingRateUpdateMessage) -> FundingRateUpdate {
@@ -1133,11 +1127,13 @@ pub fn parse_funding_rate_snapshot_json(val: &serde_json::Value) -> Vec<FundingR
     out
 }
 
-pub fn parse_account_margin_update(msg: sequencer::AccountMarginUpdate) -> AccountMarginUpdate {
-    AccountMarginUpdate {
-        user_uuid: uuid_from_bytes(&msg.user_uuid),
+pub fn parse_account_margin_update(
+    msg: sequencer::AccountMarginUpdate,
+) -> Result<AccountMarginUpdate, GodarkError> {
+    Ok(AccountMarginUpdate {
+        account: account_from_bytes(&msg.account)?,
         server_timestamp: msg.server_timestamp,
-        account: msg.account.map(|a| AccountMarginSummary {
+        summary: msg.summary.map(|a| AccountMarginSummary {
             total_collateral: a.total_collateral,
             position_margin: a.position_margin,
             reserved_order_margin: a.reserved_order_margin,
@@ -1146,11 +1142,13 @@ pub fn parse_account_margin_update(msg: sequencer::AccountMarginUpdate) -> Accou
             isolated_equity: a.isolated_equity,
             cross_im: a.cross_im,
         }),
-    }
+    })
 }
 
-pub fn parse_leverage_settings(msg: sequencer::LeverageSettings) -> LeverageSettings {
-    LeverageSettings {
+pub fn parse_leverage_settings(
+    msg: sequencer::LeverageSettings,
+) -> Result<LeverageSettings, GodarkError> {
+    Ok(LeverageSettings {
         settings: msg
             .settings
             .into_iter()
@@ -1159,71 +1157,86 @@ pub fn parse_leverage_settings(msg: sequencer::LeverageSettings) -> LeverageSett
                 leverage: row.leverage,
             })
             .collect(),
-        user_uuid: (!msg.user_uuid.is_empty()).then(|| uuid_from_bytes(&msg.user_uuid)),
+        account: (!msg.account.is_empty())
+            .then(|| account_from_bytes(&msg.account))
+            .transpose()?,
         server_timestamp: Some(msg.server_timestamp).filter(|ts| *ts != 0),
-    }
+    })
 }
 
-pub fn parse_sequencer_to_edge_message(data: &[u8]) -> Result<EdgeMessage, GodarkError> {
-    let msg = sequencer::SequencerToEdgeMessage::decode(data)?;
-    match msg.inner {
-        Some(sequencer::sequencer_to_edge_message::Inner::OrderUpdate(ou)) => {
-            let bytes = ou.encode_to_vec();
-            Ok(EdgeMessage::OrderUpdate(parse_order_update(&bytes)?))
+/// Decode an HPKE-decrypted push body.
+///
+/// Ciphertext plaintext is the **bare** inner sequencer proto selected by the
+/// cleartext JSON ``message_type`` — not a `SequencerToEdgeMessage` oneof wrapper.
+pub fn parse_sequencer_to_edge_message(
+    data: &[u8],
+    message_type: &str,
+) -> Result<EdgeMessage, GodarkError> {
+    let mt = message_type.replace('-', "_");
+    match mt.as_str() {
+        "order_update" => Ok(EdgeMessage::OrderUpdate(parse_order_update(data)?)),
+        "positions_snapshot" => {
+            let ps = sequencer::PositionsSnapshot::decode(data)?;
+            Ok(EdgeMessage::PositionsSnapshot(parse_positions_snapshot(
+                ps,
+            )?))
         }
-        Some(sequencer::sequencer_to_edge_message::Inner::PositionsSnapshot(ps)) => {
-            Ok(EdgeMessage::PositionsSnapshot(parse_positions_snapshot(ps)))
-        }
-        Some(sequencer::sequencer_to_edge_message::Inner::HealthReport(h)) => {
+        "system_health" | "health_report" => {
+            let h = health::HealthReport::decode(data)?;
             Ok(EdgeMessage::SystemHealth(parse_system_health(h)))
         }
-
-        Some(sequencer::sequencer_to_edge_message::Inner::BalanceUpdate(b)) => {
-            Ok(EdgeMessage::BalanceUpdate(parse_balance_update(b)))
+        "balance_update" => {
+            let b = sequencer::BalanceUpdateMessage::decode(data)?;
+            Ok(EdgeMessage::BalanceUpdate(parse_balance_update(b)?))
         }
-        Some(sequencer::sequencer_to_edge_message::Inner::FundingRateUpdate(f)) => {
+        "funding_rate_update" => {
+            let f = sequencer::FundingRateUpdateMessage::decode(data)?;
             Ok(EdgeMessage::FundingRateUpdate(parse_funding_rate_update(f)))
         }
-        Some(sequencer::sequencer_to_edge_message::Inner::AccountMarginUpdate(a)) => Ok(
-            EdgeMessage::AccountMarginUpdate(parse_account_margin_update(a)),
-        ),
-        Some(sequencer::sequencer_to_edge_message::Inner::BalanceAndPosition(bp)) => {
+        "account_margin_update" | "account_update" => {
+            let a = sequencer::AccountMarginUpdate::decode(data)?;
+            Ok(EdgeMessage::AccountMarginUpdate(
+                parse_account_margin_update(a)?,
+            ))
+        }
+        "balance_and_position" => {
+            let bp = sequencer::BalanceAndPosition::decode(data)?;
             Ok(EdgeMessage::BalanceAndPosition {
-                balance: bp.bal_data.map(parse_balance_update),
-                positions: bp.pos_data.map(parse_positions_snapshot),
+                balance: bp.bal_data.map(parse_balance_update).transpose()?,
+                positions: bp.pos_data.map(parse_positions_snapshot).transpose()?,
             })
         }
-        Some(sequencer::sequencer_to_edge_message::Inner::TpslUpdate(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::InstrumentUpdate(_)) => {
-            Ok(EdgeMessage::Unknown)
+        "tpsl_update"
+        | "instrument_update"
+        | "order_history_insert"
+        | "open_interest_update"
+        | "funding_payment" => Ok(EdgeMessage::Unknown),
+        "leverage_settings" => {
+            let ls = sequencer::LeverageSettings::decode(data)?;
+            Ok(EdgeMessage::LeverageSettings(parse_leverage_settings(ls)?))
         }
-        Some(sequencer::sequencer_to_edge_message::Inner::LeverageSettings(ls)) => {
-            Ok(EdgeMessage::LeverageSettings(parse_leverage_settings(ls)))
-        }
-        Some(sequencer::sequencer_to_edge_message::Inner::OrderHistoryInsert(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::OpenInterestUpdate(_))
-        | Some(sequencer::sequencer_to_edge_message::Inner::FundingPayment(_)) => {
-            Ok(EdgeMessage::Unknown)
-        }
-        None => Ok(EdgeMessage::Unknown),
+        _ => Ok(EdgeMessage::Unknown),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use prost::Message;
-    use uuid::Uuid;
-
     use crate::enums::{CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, TimeInForce};
     use crate::generated::health::v1 as health;
     use crate::generated::sequencer::v1 as sequencer;
+    use prost::Message;
 
     use super::*;
 
-    const TEST_UUID: [u8; 16] = [
+    const TEST_CORR: [u8; 16] = [
         0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00,
         0x00,
     ];
+    const TEST_ACCOUNT: [u8; AccountId::LEN] = [0x42; AccountId::LEN];
+    const TEST_DECIMALS: InstrumentDecimals = InstrumentDecimals {
+        price_decimals: 8,
+        quantity_decimals: 8,
+    };
 
     #[test]
     fn test_build_place_order_roundtrip() {
@@ -1231,34 +1244,45 @@ mod tests {
             42,
             Side::Buy,
             OrderType::Limit,
-            10.5,
-            &TEST_UUID,
-            Some(1.25),
+            Some("10.5"),
+            &TEST_ACCOUNT,
+            Some("1.25"),
             TimeInForce::Gtc,
             true,
-            Some(0.5),
+            Some("0.5"),
             Some(999),
-            &TEST_UUID,
+            &TEST_CORR,
             PlaceOrderOptions::default(),
             1_234_567_890,
-        );
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let place = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::Place(p)) => p,
-            other => panic!("expected Place, got {:?}", other),
-        };
+            TEST_DECIMALS,
+        )
+        .expect("build");
+        let place =
+            sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode PlaceOrderInput");
         assert_eq!(place.symbol_id, 42);
+        let wrapped = sequencer::EdgeSequencerRequest {
+            inner: Some(sequencer::edge_sequencer_request::Inner::Place(
+                place.clone(),
+            )),
+        }
+        .encode_to_vec();
+        if let Ok(misread) = sequencer::PlaceOrderInput::decode(wrapped.as_slice()) {
+            assert_ne!(
+                misread.symbol_id, 42,
+                "wrapped EdgeSequencerRequest must not look like Place with symbol_id=42"
+            );
+        }
         assert_eq!(place.side, Side::Buy.to_proto());
         assert_eq!(place.order_type, OrderType::Limit.to_proto());
-        assert_eq!(place.quantity, 10.5);
-        assert_eq!(place.user_uuid, TEST_UUID.as_slice());
-        assert_eq!(place.price, Some(1.25));
+        assert_eq!(place.quantity.as_deref(), Some("10.5"));
+        assert_eq!(place.account, TEST_ACCOUNT.as_slice());
+        assert_eq!(place.price.as_deref(), Some("1.25"));
         assert_eq!(place.time_in_force, TimeInForce::Gtc.to_proto());
-        assert_eq!(place.min_fill_size, Some(0.5));
+        assert_eq!(place.min_fill_size.as_deref(), Some("0.5"));
         assert_eq!(place.expiry_time, Some(999));
         assert_eq!(
             place.correlation_id,
-            u128::from_be_bytes(TEST_UUID).to_le_bytes()
+            u128::from_be_bytes(TEST_CORR).to_le_bytes()
         );
     }
 
@@ -1268,31 +1292,32 @@ mod tests {
             reduce_only: true,
             post_only: true,
             stp_mode: crate::enums::StpMode::CancelAggressor,
+            quote_notional: None,
             peg_offset_bps: None,
             trigger_price: None,
             take_profit_price: None,
             stop_loss_price: None,
+            slippage_bps: None,
+            client_order_id: None,
         };
         let bytes = build_place_order_proto(
             42,
             Side::Buy,
             OrderType::Limit,
-            1.0,
-            &TEST_UUID,
-            Some(100.0),
+            Some("1"),
+            &TEST_ACCOUNT,
+            Some("100"),
             TimeInForce::Gtc,
             false,
             None,
             None,
-            &TEST_UUID,
+            &TEST_CORR,
             options,
             0,
-        );
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let place = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::Place(p)) => p,
-            other => panic!("expected Place, got {:?}", other),
-        };
+            TEST_DECIMALS,
+        )
+        .expect("build");
+        let place = sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode");
         assert!(place.reduce_only);
         assert!(place.post_only);
         assert_eq!(
@@ -1307,46 +1332,352 @@ mod tests {
             reduce_only: false,
             post_only: false,
             stp_mode: crate::enums::StpMode::Unspecified,
+            quote_notional: None,
             peg_offset_bps: Some(12),
-            trigger_price: Some(95.5),
-            take_profit_price: Some(110.0),
-            stop_loss_price: Some(90.0),
+            trigger_price: Some("95.5".into()),
+            take_profit_price: Some("110".into()),
+            stop_loss_price: Some("90".into()),
+            slippage_bps: None,
+            client_order_id: None,
         };
         let bytes = build_place_order_proto(
             42,
             Side::Buy,
             OrderType::Peg,
-            1.0,
-            &TEST_UUID,
+            Some("1"),
+            &TEST_ACCOUNT,
             None,
             TimeInForce::Gtc,
             false,
             None,
             None,
-            &TEST_UUID,
+            &TEST_CORR,
             options,
             0,
-        );
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let place = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::Place(p)) => p,
-            other => panic!("expected Place, got {:?}", other),
-        };
+            TEST_DECIMALS,
+        )
+        .expect("build");
+        let place = sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(place.peg_offset_bps, Some(12));
-        assert_eq!(place.trigger_price, Some(95.5));
-        assert_eq!(place.take_profit_price, Some(110.0));
-        assert_eq!(place.stop_loss_price, Some(90.0));
+        assert_eq!(place.trigger_price.as_deref(), Some("95.5"));
+        assert_eq!(place.take_profit_price.as_deref(), Some("110"));
+        assert_eq!(place.stop_loss_price.as_deref(), Some("90"));
+    }
+
+    #[test]
+    fn test_build_place_order_slippage_bps() {
+        let omit = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            Some("1"),
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            PlaceOrderOptions::default(),
+            0,
+            TEST_DECIMALS,
+        )
+        .expect("build");
+        let place =
+            sequencer::PlaceOrderInput::decode(omit.as_slice()).expect("decode PlaceOrderInput");
+        assert_eq!(place.slippage_bps, None);
+
+        let options = PlaceOrderOptions {
+            slippage_bps: Some(200),
+            client_order_id: None,
+            ..Default::default()
+        };
+        let bytes = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            Some("1"),
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            options,
+            0,
+            TEST_DECIMALS,
+        )
+        .expect("build");
+        let place =
+            sequencer::PlaceOrderInput::decode(bytes.as_slice()).expect("decode PlaceOrderInput");
+        assert_eq!(place.slippage_bps, Some(200));
+    }
+
+    #[test]
+    fn test_build_place_order_quote_notional_is_exclusive_with_quantity() {
+        let base = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            Some("1"),
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            PlaceOrderOptions::default(),
+            0,
+            TEST_DECIMALS,
+        )
+        .expect("base-sized place");
+        let base = sequencer::PlaceOrderInput::decode(base.as_slice()).expect("decode");
+        assert_eq!(base.quantity.as_deref(), Some("1"));
+        assert_eq!(base.quote_notional, None);
+
+        let options = PlaceOrderOptions {
+            quote_notional: Some("250".into()),
+            slippage_bps: Some(100),
+            client_order_id: None,
+            ..Default::default()
+        };
+        let quote = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            None,
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            options.clone(),
+            0,
+            TEST_DECIMALS,
+        )
+        .expect("quote-sized place");
+        let quote = sequencer::PlaceOrderInput::decode(quote.as_slice()).expect("decode");
+        assert_eq!(quote.quantity, None);
+        assert_eq!(quote.quote_notional.as_deref(), Some("250"));
+        assert_eq!(quote.slippage_bps, Some(100));
+
+        let both = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            Some("1"),
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            options.clone(),
+            0,
+            TEST_DECIMALS,
+        );
+        assert!(both.unwrap_err().to_string().contains("exactly one"));
+
+        let neither = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            None,
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            PlaceOrderOptions::default(),
+            0,
+            TEST_DECIMALS,
+        );
+        assert!(neither.unwrap_err().to_string().contains("exactly one"));
+
+        let aon_quote = build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Market,
+            None,
+            &TEST_ACCOUNT,
+            None,
+            TimeInForce::Ioc,
+            true,
+            None,
+            None,
+            &TEST_CORR,
+            options,
+            0,
+            TEST_DECIMALS,
+        );
+        assert!(aon_quote.unwrap_err().to_string().contains("aon requires"));
     }
 
     #[test]
     fn test_build_modify_order_new_trigger_price() {
-        let bytes = build_modify_order_proto(7, &TEST_UUID, 9, None, None, Some(88.25), &TEST_UUID);
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let modify = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::Modify(m)) => m,
-            other => panic!("expected Modify, got {:?}", other),
+        let bytes = build_modify_order_proto(
+            7,
+            &TEST_ACCOUNT,
+            9,
+            None,
+            None,
+            Some("88.25"),
+            &TEST_CORR,
+            TEST_DECIMALS,
+        )
+        .unwrap();
+        let modify = sequencer::ModifyOrderInput::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(modify.new_trigger_price.as_deref(), Some("88.25"));
+    }
+
+    #[test]
+    fn test_build_place_order_rejects_invalid_decimal_strings() {
+        let tight = InstrumentDecimals {
+            price_decimals: 1,
+            quantity_decimals: 3,
         };
-        assert_eq!(modify.new_trigger_price, Some(88.25));
+        for (qty, px, label) in [
+            (Some("1e2"), Some("100"), "qty exponent"),
+            (Some("-1"), Some("100"), "qty negative"),
+            (Some("abc"), Some("100"), "qty non-numeric"),
+            (Some("0.01"), Some("100.55"), "price over precision"),
+            (Some("0.0001"), Some("100"), "qty over precision"),
+            (Some(""), Some("100"), "empty qty"),
+        ] {
+            let err = build_place_order_proto(
+                42,
+                Side::Buy,
+                OrderType::Limit,
+                qty,
+                &TEST_ACCOUNT,
+                px,
+                TimeInForce::Gtc,
+                false,
+                None,
+                None,
+                &TEST_CORR,
+                PlaceOrderOptions::default(),
+                0,
+                tight,
+            )
+            .expect_err(label);
+            assert!(
+                matches!(err, crate::error::GodarkError::Config(_)),
+                "{label}: {err}"
+            );
+        }
+
+        let bad_opts = PlaceOrderOptions {
+            quote_notional: Some("1e3".into()),
+            trigger_price: Some("-1".into()),
+            take_profit_price: Some("NaN".into()),
+            stop_loss_price: Some("90.123".into()),
+            ..Default::default()
+        };
+        assert!(build_place_order_proto(
+            42,
+            Side::Buy,
+            OrderType::Limit,
+            None,
+            &TEST_ACCOUNT,
+            Some("100"),
+            TimeInForce::Gtc,
+            false,
+            None,
+            None,
+            &TEST_CORR,
+            bad_opts,
+            0,
+            tight,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_build_modify_mass_quote_tpsl_reject_bad_strings() {
+        let d = InstrumentDecimals {
+            price_decimals: 1,
+            quantity_decimals: 2,
+        };
+        assert!(build_modify_order_proto(
+            1,
+            &TEST_ACCOUNT,
+            1,
+            Some("100.12"),
+            None,
+            None,
+            &TEST_CORR,
+            d,
+        )
+        .is_err());
+        assert!(build_modify_order_proto(
+            1,
+            &TEST_ACCOUNT,
+            1,
+            None,
+            Some("0.001"),
+            None,
+            &TEST_CORR,
+            d,
+        )
+        .is_err());
+        assert!(build_modify_order_proto(
+            1,
+            &TEST_ACCOUNT,
+            1,
+            None,
+            None,
+            Some("1e2"),
+            &TEST_CORR,
+            d,
+        )
+        .is_err());
+        assert!(build_amend_tpsl_proto(
+            &TEST_ACCOUNT,
+            1,
+            &TEST_CORR,
+            Some("bad"),
+            None,
+            None,
+            None,
+            d,
+        )
+        .is_err());
+        assert!(build_mass_quote_proto(
+            1,
+            &TEST_ACCOUNT,
+            &[crate::types::MassQuoteLegInput {
+                side: Side::Buy,
+                price: "1.23".into(),
+                quantity: "1".into(),
+                cancel_order_id: None,
+                time_in_force: None,
+                expiry_time: None,
+            }],
+            &TEST_CORR,
+            None,
+            d,
+        )
+        .is_err());
+        assert!(build_batch_modify_proto(
+            1,
+            &TEST_ACCOUNT,
+            &[crate::types::BatchModifyLegInput {
+                order_id: 1,
+                new_price: Some("-5".into()),
+                new_quantity: None,
+            }],
+            &TEST_CORR,
+            d,
+        )
+        .is_err());
     }
 
     #[test]
@@ -1392,6 +1723,7 @@ mod tests {
             correlation_id: vec![9u8; 16],
             pool_ack: None,
             reject_text: Some("no open orders".into()),
+            rest_error_code: None,
             ack_outcome: Some(sequencer::AckOutcomeWire {
                 kind: sequencer::AckOutcomeKind::SystemFailed as i32,
                 business_error_code: Some(1234),
@@ -1447,117 +1779,89 @@ mod tests {
 
     #[test]
     fn test_build_cancel_all_roundtrip() {
-        let bytes = build_cancel_all_proto(Some(7), &TEST_UUID, &TEST_UUID);
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let cancel_all = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::CancelAll(c)) => c,
-            other => panic!("expected CancelAll, got {:?}", other),
-        };
+        let bytes = build_cancel_all_proto(Some(7), &TEST_ACCOUNT, &TEST_CORR);
+        let cancel_all = sequencer::CancelAllInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(cancel_all.symbol_id, Some(7));
     }
 
     #[test]
     fn test_build_cancel_order_roundtrip() {
-        let bytes = build_cancel_order_proto(10, &TEST_UUID, 30, &TEST_UUID);
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let cancel = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::Cancel(c)) => c,
-            other => panic!("expected Cancel, got {:?}", other),
-        };
+        let bytes = build_cancel_order_proto(10, &TEST_ACCOUNT, 30, &TEST_CORR);
+        let cancel = sequencer::CancelOrderInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(cancel.order_id, 10);
         assert_eq!(cancel.symbol_id, 30);
         assert_eq!(
             cancel.correlation_id,
-            u128::from_be_bytes(TEST_UUID).to_le_bytes()
+            u128::from_be_bytes(TEST_CORR).to_le_bytes()
         );
     }
 
     #[test]
     fn test_build_modify_order_roundtrip() {
-        let bytes =
-            build_modify_order_proto(7, &TEST_UUID, 9, Some(2.25), Some(3.5), None, &TEST_UUID);
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let modify = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::Modify(m)) => m,
-            other => panic!("expected Modify, got {:?}", other),
-        };
+        let bytes = build_modify_order_proto(
+            7,
+            &TEST_ACCOUNT,
+            9,
+            Some("2.25"),
+            Some("3.5"),
+            None,
+            &TEST_CORR,
+            TEST_DECIMALS,
+        )
+        .unwrap();
+        let modify = sequencer::ModifyOrderInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(modify.order_id, 7);
-        assert_eq!(modify.user_uuid, TEST_UUID.as_slice());
+        assert_eq!(modify.account, TEST_ACCOUNT.as_slice());
         assert_eq!(modify.symbol_id, 9);
-        assert_eq!(modify.new_price, Some(2.25));
-        assert_eq!(modify.new_quantity, Some(3.5));
+        assert_eq!(modify.new_price.as_deref(), Some("2.25"));
+        assert_eq!(modify.new_quantity.as_deref(), Some("3.5"));
         assert_eq!(
             modify.correlation_id,
-            u128::from_be_bytes(TEST_UUID).to_le_bytes()
+            u128::from_be_bytes(TEST_CORR).to_le_bytes()
         );
     }
 
-    type InnerUserCorr = fn(sequencer::edge_sequencer_request::Inner) -> Option<(Vec<u8>, Vec<u8>)>;
-
-    fn assert_user_corr_rpc(bytes: &[u8], expected: InnerUserCorr) {
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes).expect("decode");
-        let inner = decoded.inner.expect("inner");
-        let (user_uuid, correlation_id) = expected(inner).expect("wrong inner");
-        assert_eq!(user_uuid, TEST_UUID.as_slice());
-        assert_eq!(correlation_id, u128::from_be_bytes(TEST_UUID).to_le_bytes());
+    fn assert_user_corr(account: &[u8], correlation_id: &[u8]) {
+        assert_eq!(account, TEST_ACCOUNT.as_slice());
+        assert_eq!(correlation_id, u128::from_be_bytes(TEST_CORR).to_le_bytes());
     }
 
     #[test]
     fn test_build_get_snapshot_rpcs_roundtrip() {
-        assert_user_corr_rpc(
-            &build_get_open_orders_proto(&TEST_UUID, &TEST_UUID),
-            |inner| match inner {
-                sequencer::edge_sequencer_request::Inner::GetOpenOrders(r) => {
-                    Some((r.user_uuid, r.correlation_id))
-                }
-                _ => None,
-            },
-        );
-        assert_user_corr_rpc(
-            &build_get_positions_proto(&TEST_UUID, &TEST_UUID),
-            |inner| match inner {
-                sequencer::edge_sequencer_request::Inner::GetPositions(r) => {
-                    Some((r.user_uuid, r.correlation_id))
-                }
-                _ => None,
-            },
-        );
-        assert_user_corr_rpc(
-            &build_get_account_proto(&TEST_UUID, &TEST_UUID),
-            |inner| match inner {
-                sequencer::edge_sequencer_request::Inner::GetAccount(r) => {
-                    Some((r.user_uuid, r.correlation_id))
-                }
-                _ => None,
-            },
-        );
+        let oo = sequencer::GetOpenOrdersRequest::decode(
+            build_get_open_orders_proto(&TEST_ACCOUNT, &TEST_CORR).as_slice(),
+        )
+        .expect("decode");
+        assert_user_corr(&oo.account, &oo.correlation_id);
+        let pos = sequencer::GetPositionsRequest::decode(
+            build_get_positions_proto(&TEST_ACCOUNT, &TEST_CORR).as_slice(),
+        )
+        .expect("decode");
+        assert_user_corr(&pos.account, &pos.correlation_id);
+        let acct = sequencer::GetAccountRequest::decode(
+            build_get_account_proto(&TEST_ACCOUNT, &TEST_CORR).as_slice(),
+        )
+        .expect("decode");
+        assert_user_corr(&acct.account, &acct.correlation_id);
     }
 
     #[test]
     fn test_build_update_leverage_roundtrip() {
-        let bytes = build_update_leverage_proto(&TEST_UUID, 42, 5, &TEST_UUID);
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let update = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::UpdateLeverage(u)) => u,
-            other => panic!("expected UpdateLeverage, got {:?}", other),
-        };
-        assert_eq!(update.user_uuid, TEST_UUID.as_slice());
+        let bytes = build_update_leverage_proto(&TEST_ACCOUNT, 42, 5, &TEST_CORR);
+        let update = sequencer::UpdateLeverageRequest::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(update.account, TEST_ACCOUNT.as_slice());
         assert_eq!(update.symbol_id, 42);
         assert_eq!(update.leverage, 5);
         assert_eq!(
             update.correlation_id,
-            u128::from_be_bytes(TEST_UUID).to_le_bytes()
+            u128::from_be_bytes(TEST_CORR).to_le_bytes()
         );
     }
 
     #[test]
     fn test_build_update_leverage_clamped_to_one() {
-        let bytes = build_update_leverage_proto(&TEST_UUID, 1, 0, b"");
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let update = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::UpdateLeverage(u)) => u,
-            other => panic!("expected UpdateLeverage, got {:?}", other),
-        };
+        let bytes = build_update_leverage_proto(&TEST_ACCOUNT, 1, 0, b"");
+        let update = sequencer::UpdateLeverageRequest::decode(bytes.as_slice()).expect("decode");
         assert_eq!(update.leverage, 1);
     }
 
@@ -1566,36 +1870,34 @@ mod tests {
         let legs = vec![
             crate::types::MassQuoteLegInput {
                 side: Side::Buy,
-                price: 100.5,
-                quantity: 1.0,
+                price: "100.5".into(),
+                quantity: "1".into(),
                 cancel_order_id: Some(42),
                 time_in_force: None,
                 expiry_time: None,
             },
             crate::types::MassQuoteLegInput {
                 side: Side::Sell,
-                price: 200.0,
-                quantity: 2.0,
+                price: "200".into(),
+                quantity: "2".into(),
                 cancel_order_id: None,
                 time_in_force: Some(TimeInForce::Gtc),
                 expiry_time: None,
             },
         ];
-        let bytes = build_mass_quote_proto(7, &TEST_UUID, &legs, &TEST_UUID, None);
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let mq = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::MassQuote(m)) => m,
-            other => panic!("expected MassQuote, got {:?}", other),
-        };
+        let bytes =
+            build_mass_quote_proto(7, &TEST_ACCOUNT, &legs, &TEST_CORR, None, TEST_DECIMALS)
+                .unwrap();
+        let mq = sequencer::MassQuoteInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(mq.symbol_id, 7);
-        assert_eq!(mq.user_uuid, TEST_UUID.as_slice());
+        assert_eq!(mq.account, TEST_ACCOUNT.as_slice());
         assert_eq!(
             mq.correlation_id,
-            u128::from_be_bytes(TEST_UUID).to_le_bytes()
+            u128::from_be_bytes(TEST_CORR).to_le_bytes()
         );
         assert_eq!(mq.legs.len(), 2);
         assert_eq!(mq.legs[0].cancel_order_id, 42);
-        assert_eq!(mq.legs[0].price, 100.5);
+        assert_eq!(mq.legs[0].price, "100.5");
         // Pure-place leg defaults the cancel target to 0.
         assert_eq!(mq.legs[1].cancel_order_id, 0);
         // Each leg carries a unique 16-byte correlation id.
@@ -1609,35 +1911,35 @@ mod tests {
     fn test_build_mass_quote_proto_relaxed_post_only() {
         let legs = vec![crate::types::MassQuoteLegInput {
             side: Side::Buy,
-            price: 100.0,
-            quantity: 1.0,
+            price: "100".into(),
+            quantity: "1".into(),
             cancel_order_id: None,
             time_in_force: None,
             expiry_time: None,
         }];
-        let bytes = build_mass_quote_proto(1, &TEST_UUID, &legs, &[0u8; 16], Some(false));
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let mq = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::MassQuote(m)) => m,
-            other => panic!("expected MassQuote, got {:?}", other),
-        };
+        let bytes = build_mass_quote_proto(
+            1,
+            &TEST_ACCOUNT,
+            &legs,
+            &[0u8; 16],
+            Some(false),
+            TEST_DECIMALS,
+        )
+        .unwrap();
+        let mq = sequencer::MassQuoteInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(mq.post_only, Some(false));
     }
 
     #[test]
     fn test_build_batch_cancel_proto_roundtrip() {
-        let bytes = build_batch_cancel_proto(9, &TEST_UUID, &[11, 22, 33], &TEST_UUID);
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let bc = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::BatchCancel(b)) => b,
-            other => panic!("expected BatchCancel, got {:?}", other),
-        };
+        let bytes = build_batch_cancel_proto(9, &TEST_ACCOUNT, &[11, 22, 33], &TEST_CORR);
+        let bc = sequencer::BatchCancelInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(bc.symbol_id, 9);
-        assert_eq!(bc.user_uuid, TEST_UUID.as_slice());
+        assert_eq!(bc.account, TEST_ACCOUNT.as_slice());
         assert_eq!(bc.order_ids, vec![11, 22, 33]);
         assert_eq!(
             bc.correlation_id,
-            u128::from_be_bytes(TEST_UUID).to_le_bytes()
+            u128::from_be_bytes(TEST_CORR).to_le_bytes()
         );
     }
 
@@ -1646,31 +1948,28 @@ mod tests {
         let legs = vec![
             crate::types::BatchModifyLegInput {
                 order_id: 5,
-                new_price: Some(101.0),
+                new_price: Some("101".into()),
                 new_quantity: None,
             },
             crate::types::BatchModifyLegInput {
                 order_id: 6,
                 new_price: None,
-                new_quantity: Some(4.0),
+                new_quantity: Some("4".into()),
             },
         ];
-        let bytes = build_batch_modify_proto(9, &TEST_UUID, &legs, &TEST_UUID);
-        let decoded = sequencer::EdgeSequencerRequest::decode(bytes.as_slice()).expect("decode");
-        let bm = match decoded.inner {
-            Some(sequencer::edge_sequencer_request::Inner::BatchModify(b)) => b,
-            other => panic!("expected BatchModify, got {:?}", other),
-        };
+        let bytes =
+            build_batch_modify_proto(9, &TEST_ACCOUNT, &legs, &TEST_CORR, TEST_DECIMALS).unwrap();
+        let bm = sequencer::BatchModifyInput::decode(bytes.as_slice()).expect("decode");
         assert_eq!(bm.symbol_id, 9);
         assert_eq!(
             bm.correlation_id,
-            u128::from_be_bytes(TEST_UUID).to_le_bytes()
+            u128::from_be_bytes(TEST_CORR).to_le_bytes()
         );
         assert_eq!(bm.legs.len(), 2);
         assert_eq!(bm.legs[0].order_id, 5);
-        assert_eq!(bm.legs[0].new_price, Some(101.0));
+        assert_eq!(bm.legs[0].new_price.as_deref(), Some("101"));
         assert_eq!(bm.legs[0].new_quantity, None);
-        assert_eq!(bm.legs[1].new_quantity, Some(4.0));
+        assert_eq!(bm.legs[1].new_quantity.as_deref(), Some("4"));
         assert_eq!(bm.legs[0].correlation_id.len(), 16);
     }
 
@@ -1780,18 +2079,18 @@ mod tests {
 
     #[test]
     fn test_build_order_header_aad_deterministic() {
-        let a = build_order_header_aad(&TEST_UUID, 2, "place", 3, 400, b"", 7);
-        let b = build_order_header_aad(&TEST_UUID, 2, "place", 3, 400, b"", 7);
+        let a = build_order_header_aad(&TEST_ACCOUNT, 2, "place", 3, 400, b"", 7);
+        let b = build_order_header_aad(&TEST_ACCOUNT, 2, "place", 3, 400, b"", 7);
         assert_eq!(a, b);
     }
 
     #[test]
     fn test_build_response_header_aad_deterministic() {
-        let a = build_response_header_aad(&TEST_UUID, "ack", 100, 11, 12, &TEST_UUID, 42, 7);
-        let b = build_response_header_aad(&TEST_UUID, "ack", 100, 11, 12, &TEST_UUID, 42, 7);
+        let a = build_response_header_aad(&TEST_ACCOUNT, "ack", 100, 11, 12, &TEST_CORR, 42, 7);
+        let b = build_response_header_aad(&TEST_ACCOUNT, "ack", 100, 11, 12, &TEST_CORR, 42, 7);
         assert_eq!(a, b);
         let header = edge::ResponseHeader::decode(a.as_slice()).expect("decode");
-        assert_eq!(header.correlation_id, TEST_UUID);
+        assert_eq!(header.correlation_id, TEST_CORR);
         assert_eq!(header.session_seq, 42);
     }
 
@@ -1827,6 +2126,38 @@ mod tests {
                 assert!(reject_text.is_none());
                 assert_eq!(correlation_id, vec![1, 2, 3]);
                 assert_eq!(order_status, Some(OrderStatus::New));
+            }
+            other => panic!("expected Ack, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_node_response_ack_bare_hotpath() {
+        let ack = sequencer::AckMessage {
+            sequence: 8,
+            order_id: 9,
+            correlation_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            ack_outcome: Some(sequencer::AckOutcomeWire {
+                kind: sequencer::AckOutcomeKind::Applied as i32,
+                order_status: Some(OrderStatus::New.to_proto()),
+                business_error_code: None,
+                system_error_code: None,
+            }),
+            ..Default::default()
+        };
+        let bytes = ack.encode_to_vec();
+        match parse_node_response(&bytes).expect("parse bare AckMessage") {
+            NodeResponseKind::Ack {
+                sequence,
+                order_id,
+                success,
+                correlation_id,
+                ..
+            } => {
+                assert_eq!(sequence, 8);
+                assert_eq!(order_id, 9);
+                assert!(success);
+                assert_eq!(correlation_id.len(), 16);
             }
             other => panic!("expected Ack, got {:?}", other),
         }
@@ -1904,7 +2235,7 @@ mod tests {
         let msg = sequencer::OrderUpdateMessage {
             message_type: OrderUpdateType::Cancelled.to_proto(),
             order_id: 4242,
-            user_uuid: TEST_UUID.to_vec(),
+            account: TEST_ACCOUNT.to_vec(),
             symbol_id: 200,
             order_status: OrderStatus::Cancelled.to_proto(),
             price: "1.5".to_string(),
@@ -1914,6 +2245,7 @@ mod tests {
             remaining_qty: "8".to_string(),
             cum_fill: "3".to_string(),
             cancel_reason: Some(CancelReason::Expired.to_proto()),
+            close_reason: None,
             reject_reason_code: Some(42),
             correlation_id: vec![1, 2, 3, 4],
             timestamp: 1_700_000_000,
@@ -1934,7 +2266,7 @@ mod tests {
         let bytes = msg.encode_to_vec();
         let u = parse_order_update(&bytes).expect("parse");
         assert_eq!(u.order_id, "4242");
-        assert_eq!(u.user_uuid, Uuid::from_bytes(TEST_UUID));
+        assert_eq!(u.account, AccountId::from_bytes(TEST_ACCOUNT));
         assert_eq!(u.symbol_id, 200);
         assert_eq!(u.side, Side::Sell);
         assert_eq!(u.status, OrderStatus::Cancelled);
@@ -1957,7 +2289,7 @@ mod tests {
         let inner = sequencer::OrderUpdateMessage {
             message_type: OrderUpdateType::Open.to_proto(),
             order_id: 1,
-            user_uuid: TEST_UUID.to_vec(),
+            account: TEST_ACCOUNT.to_vec(),
             symbol_id: 3,
             order_status: OrderStatus::New.to_proto(),
             price: "1".to_string(),
@@ -1967,6 +2299,7 @@ mod tests {
             remaining_qty: "2".to_string(),
             cum_fill: "0".to_string(),
             cancel_reason: None,
+            close_reason: None,
             reject_reason_code: None,
             correlation_id: vec![],
             timestamp: 100,
@@ -1984,16 +2317,11 @@ mod tests {
             reduce_only: false,
             post_only: true,
         };
-        let msg = sequencer::SequencerToEdgeMessage {
-            inner: Some(sequencer::sequencer_to_edge_message::Inner::OrderUpdate(
-                inner,
-            )),
-        };
-        let bytes = msg.encode_to_vec();
-        match parse_sequencer_to_edge_message(&bytes).expect("parse") {
+        let bytes = inner.encode_to_vec();
+        match parse_sequencer_to_edge_message(&bytes, "order_update").expect("parse") {
             EdgeMessage::OrderUpdate(u) => {
                 assert_eq!(u.order_id, "1");
-                assert_eq!(u.user_uuid, Uuid::from_bytes(TEST_UUID));
+                assert_eq!(u.account, AccountId::from_bytes(TEST_ACCOUNT));
                 assert_eq!(u.symbol_id, 3);
                 assert_eq!(u.update_type, OrderUpdateType::Open);
             }
@@ -2014,13 +2342,8 @@ mod tests {
             sequence: 2,
             schema_version: 1,
         };
-        let msg = sequencer::SequencerToEdgeMessage {
-            inner: Some(sequencer::sequencer_to_edge_message::Inner::HealthReport(
-                health,
-            )),
-        };
-        let bytes = msg.encode_to_vec();
-        match parse_sequencer_to_edge_message(&bytes).expect("parse") {
+        let bytes = health.encode_to_vec();
+        match parse_sequencer_to_edge_message(&bytes, "system_health").expect("parse") {
             EdgeMessage::SystemHealth(h) => {
                 assert_eq!(h.component_id, "sequencer-1");
                 assert_eq!(h.state, 4);
@@ -2057,18 +2380,17 @@ mod tests {
             tpsl_parent_order_id: None,
         };
         let snap = sequencer::PositionsSnapshot {
-            user_uuid: TEST_UUID.to_vec(),
+            account: TEST_ACCOUNT.to_vec(),
             rows: vec![row],
             server_timestamp: 1_700_000_001,
             source: 2, // Periodic
             correlation_id: Some(vec![0xde, 0xad, 0xbe, 0xef]),
         };
-        let msg = sequencer::SequencerToEdgeMessage {
-            inner: Some(sequencer::sequencer_to_edge_message::Inner::PositionsSnapshot(snap)),
-        };
-        match parse_sequencer_to_edge_message(&msg.encode_to_vec()).expect("parse") {
+        match parse_sequencer_to_edge_message(&snap.encode_to_vec(), "positions_snapshot")
+            .expect("parse")
+        {
             EdgeMessage::PositionsSnapshot(p) => {
-                assert_eq!(p.user_uuid, Uuid::from_bytes(TEST_UUID));
+                assert_eq!(p.account, AccountId::from_bytes(TEST_ACCOUNT));
                 assert_eq!(p.source, PositionsSnapshotSource::Periodic);
                 assert_eq!(p.server_timestamp, 1_700_000_001);
                 assert_eq!(p.correlation_id, Some(0xefbe_adde));
@@ -2085,21 +2407,18 @@ mod tests {
     #[test]
     fn test_parse_balance_update_round_trip() {
         let bal = sequencer::BalanceUpdateMessage {
-            user_uuid: TEST_UUID.to_vec(),
+            account: TEST_ACCOUNT.to_vec(),
             balance_raw: 123_456_789,
             timestamp: 1_700_000_002,
             balance: "123.456789".to_string(),
             signed_balance_8dp: 0,
             free_collateral_8dp: 0,
         };
-        let msg = sequencer::SequencerToEdgeMessage {
-            inner: Some(sequencer::sequencer_to_edge_message::Inner::BalanceUpdate(
-                bal,
-            )),
-        };
-        match parse_sequencer_to_edge_message(&msg.encode_to_vec()).expect("parse") {
+        match parse_sequencer_to_edge_message(&bal.encode_to_vec(), "balance_update")
+            .expect("parse")
+        {
             EdgeMessage::BalanceUpdate(b) => {
-                assert_eq!(b.user_uuid, Uuid::from_bytes(TEST_UUID));
+                assert_eq!(b.account, AccountId::from_bytes(TEST_ACCOUNT));
                 assert_eq!(b.balance_raw, 123_456_789);
                 assert_eq!(b.timestamp, 1_700_000_002);
             }
@@ -2115,10 +2434,9 @@ mod tests {
             last_funding_rate: "0.0002".to_string(),
             timestamp: 1_700_000_004,
         };
-        let msg = sequencer::SequencerToEdgeMessage {
-            inner: Some(sequencer::sequencer_to_edge_message::Inner::FundingRateUpdate(f)),
-        };
-        match parse_sequencer_to_edge_message(&msg.encode_to_vec()).expect("parse") {
+        match parse_sequencer_to_edge_message(&f.encode_to_vec(), "funding_rate_update")
+            .expect("parse")
+        {
             EdgeMessage::FundingRateUpdate(u) => {
                 assert_eq!(u.symbol_id, 1);
                 assert_eq!(u.funding_rate, "0.0001");
@@ -2132,7 +2450,7 @@ mod tests {
     #[test]
     fn test_parse_leverage_settings_roundtrip() {
         let ls = sequencer::LeverageSettings {
-            user_uuid: TEST_UUID.to_vec(),
+            account: TEST_ACCOUNT.to_vec(),
             server_timestamp: 1_700_000_005,
             settings: vec![
                 sequencer::LeverageSettingRow {
@@ -2146,17 +2464,16 @@ mod tests {
             ],
             margin_mode_settings: vec![],
         };
-        let msg = sequencer::SequencerToEdgeMessage {
-            inner: Some(sequencer::sequencer_to_edge_message::Inner::LeverageSettings(ls)),
-        };
-        match parse_sequencer_to_edge_message(&msg.encode_to_vec()).expect("parse") {
+        match parse_sequencer_to_edge_message(&ls.encode_to_vec(), "leverage_settings")
+            .expect("parse")
+        {
             EdgeMessage::LeverageSettings(settings) => {
                 assert_eq!(settings.settings.len(), 2);
                 assert_eq!(settings.settings[0].symbol_id, 42);
                 assert_eq!(settings.settings[0].leverage, 5);
                 assert_eq!(settings.settings[1].symbol_id, 7);
                 assert_eq!(settings.server_timestamp, Some(1_700_000_005));
-                assert_eq!(settings.user_uuid, Some(Uuid::from_bytes(TEST_UUID)));
+                assert_eq!(settings.account, Some(AccountId::from_bytes(TEST_ACCOUNT)));
             }
             other => panic!("expected LeverageSettings, got {other:?}"),
         }
@@ -2179,7 +2496,7 @@ mod tests {
     fn test_correlation_id_body_roundtrip_le() {
         // Builders take raw UUID bytes (big-endian layout) and must emit the
         // canonical little-endian body encoding; decoding it must round-trip.
-        let uuid_bytes = TEST_UUID;
+        let uuid_bytes = TEST_CORR;
         let body = super::correlation_id_body_bytes(&uuid_bytes);
         assert_eq!(body.len(), 16);
         assert_eq!(body, u128::from_be_bytes(uuid_bytes).to_le_bytes());

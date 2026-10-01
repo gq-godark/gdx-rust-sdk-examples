@@ -44,9 +44,14 @@ JSON text frames are control only: `login`, `subscribe`/`unsubscribe`, `ping`,
 `TradingWsBinaryFrame` (`HpkeSetup` → `HpkeSetupReply` → `EncryptedOrder` /
 `EncryptedPush`).
 
-Login returns `conn_id`. HPKE info is `gdx-hpke/v1\0 ‖ user_uuid ‖ conn_id_be`.
+Login returns `conn_id`. HPKE info is `gdx-hpke/v1\0 ‖ account ‖ conn_id_be`.
 Send nonces start at **0** (sequencer `last_recv_nonce` is unset until the first
 request). Wire `version = 2`.
+
+Authenticated identity is a 32-byte [`AccountId`](src/types.rs), encoded as a
+Solana-style base58 string in JSON and as raw bytes in protobuf. The edge
+normally returns `account` during authentication (and in JWT `sub`). Local
+static-key setups can provide `.account(...)` or `GODARK_ACCOUNT`.
 
 Pin the sequencer static public key (64 hex):
 
@@ -74,11 +79,19 @@ or `GDX_HPKE_STATIC_PUBLIC_KEY`.
 Balances come from sequencer `BalanceUpdateMessage` / encrypted
 `balance_and_position` (trading collateral `balance_raw`).
 
+Prices and sizes on place / modify / mass-quote / batch-modify / TP-SL /
+`quote_notional` / `min_fill_size` / triggers are **decimal strings only**
+(for example `"0.01"`, `Some("67500.5")`). There is no public `f64` / `f32` /
+integer price or size input; invalid strings are rejected by
+`normalize_decimal`. `place_order_with_options` also accepts
+`PlaceOrderOptions::slippage_bps` for market and stop-market orders (max walk
+from mark in basis points; `None` → venue limit).
+
 ## REST
 
 `POST /api/v1/auth/token`, then encrypted `POST/PATCH/DELETE /api/v1/orders`
 with JSON `{ header, encrypted_body, encapped_key, request_id }`. Each call is
-a fresh HPKE setup (`info = gdx-hpke/v1/rest\0 ‖ user_uuid ‖ request_id_be`,
+a fresh HPKE setup (`info = gdx-hpke/v1/rest\0 ‖ account ‖ request_id_be`,
 `conn_id = 0`).
 
 Live snapshot reads (same envelope, `request_type` snake_case in the header):

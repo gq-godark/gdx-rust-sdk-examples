@@ -6,13 +6,16 @@
 mod access_token;
 mod client;
 mod config;
+mod decimals;
 mod enums;
 mod error;
 mod generated;
 mod heartbeat;
 mod hpke;
 mod instruments;
+mod order_error_catalog;
 mod order_error_code;
+mod order_error_reasons;
 mod proto_bridge;
 mod rest_client;
 mod rest_transport;
@@ -20,6 +23,9 @@ mod session;
 mod transport;
 mod types;
 mod wire;
+mod ws_admit_error_catalog;
+mod ws_admit_error_code;
+mod ws_admit_error_reasons;
 mod ws_connect;
 
 /// Raw protobuf types (`gdx.sequencer.v1`, `gdx.edge.v1`).
@@ -57,6 +63,7 @@ pub use client::GodarkClient;
 pub use config::{
     resolve_passphrase, Environment, GodarkConfig, GodarkConfigBuilder, TransportConfig,
 };
+pub use decimals::{normalize_decimal, InstrumentDecimals};
 pub use enums::{
     CancelReason, OrderStatus, OrderType, OrderUpdateType, Side, StpMode, TimeInForce,
 };
@@ -64,10 +71,13 @@ pub use error::GodarkError;
 pub use order_error_code::{find as find_order_error, OrderErrorEntry, ORDER_ERROR_CODES};
 pub use rest_client::{GodarkRestClient, GodarkRestClientBuilder};
 pub use types::{
-    AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, BatchCancelAck, BatchCancelLegResult,
-    BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation, CountAck,
-    FundingRateUpdate, LeverageSetting, LeverageSettings, MassQuoteAck, MassQuoteLegInput,
-    MassQuoteLegResult, MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck, OrderUpdate,
-    PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource, ReconnectEvent,
-    SystemHealthUpdate, TpslAck,
+    AccountId, AccountMarginSummary, AccountMarginUpdate, BalanceUpdate, BatchCancelAck,
+    BatchCancelLegResult, BatchModifyAck, BatchModifyLegInput, BatchModifyLegResult, Confirmation,
+    CountAck, FundingRateUpdate, LeverageSetting, LeverageSettings, MassQuoteAck,
+    MassQuoteLegInput, MassQuoteLegResult, MeProfile, OpenOrderRow, OpenOrdersSnapshot, OrderAck,
+    OrderUpdate, PlaceOrderOptions, PositionRow, PositionsSnapshot, PositionsSnapshotSource,
+    ReconnectEvent, SystemHealthUpdate, TpslAck,
+};
+pub use ws_admit_error_code::{
+    find as find_ws_admit_error, WsAdmitErrorEntry, WS_ADMIT_ERROR_CODES,
 };
