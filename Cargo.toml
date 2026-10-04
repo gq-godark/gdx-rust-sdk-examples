@@ -12,11 +12,11 @@ name = "gdx-rust-sdk-examples"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Two MM-facing darkpool trading examples for the GoDark Rust SDK."
+description = "MM-facing darkpool trading examples for the GoDark Rust SDK."
 license = "MIT"
 
 # Cargo's auto-discovery would otherwise try to compile the shared
-# `examples/dotenv.rs` helper as its own example binary; the two real
+# `examples/dotenv.rs` helper as its own example binary; the runnable
 # examples are listed explicitly in the `[[example]]` blocks below.
 autoexamples = false
 

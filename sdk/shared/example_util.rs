@@ -105,32 +105,27 @@ pub async fn issue_ws_token(
         })
 }
 
+/// Human decimal price string for examples (override with `GODARK_E2E_PRICE`).
 #[allow(dead_code)]
-pub fn sample_mark_price() -> f64 {
+pub fn sample_mark_price() -> String {
     if let Some(raw) = env_first_many(&["GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE"]) {
-        if let Ok(v) = raw.parse::<f64>() {
-            return v;
-        }
+        return raw;
     }
     match env_first("GODARK_SYMBOL", "GDX_SYMBOL")
         .unwrap_or_else(|| "BTC-USDC-PERP".into())
         .to_uppercase()
         .as_str()
     {
-        s if s.starts_with("ETH") => 1930.0,
-        s if s.starts_with("SOL") => 180.0,
-        _ => 68_000.0,
+        s if s.starts_with("ETH") => "1930".into(),
+        s if s.starts_with("SOL") => "180".into(),
+        _ => "68000".into(),
     }
 }
 
+/// Human decimal quantity string for examples (override with `GODARK_E2E_QTY`).
 #[allow(dead_code)]
-pub fn sample_qty() -> f64 {
-    if let Some(raw) = env_first_many(&["GODARK_E2E_QTY", "GDX_E2E_QTY"]) {
-        if let Ok(v) = raw.parse::<f64>() {
-            return v;
-        }
-    }
-    0.01
+pub fn sample_qty() -> String {
+    env_first_many(&["GODARK_E2E_QTY", "GDX_E2E_QTY"]).unwrap_or_else(|| "0.01".into())
 }
 
 pub fn apply_hpke_pin(mut builder: GodarkConfigBuilder) -> GodarkConfigBuilder {
@@ -152,8 +147,8 @@ pub async fn local_trading_config(transport: TransportConfig) -> Result<GodarkCo
     // Legacy static key (localnet test-key-1) wins when set — matches examples repos
     // and avoids devnet id+secret in the shell overriding a local .env api_key.
     if let Some(legacy) = env_first_many(&["GODARK_API_KEY", "GDX_API_KEY"]) {
-        if let Some(uid) = env_first_many(&["GODARK_USER_UUID", "GDX_USER_UUID"]) {
-            builder = builder.user_uuid(uid);
+        if let Some(account) = env_first_many(&["GODARK_ACCOUNT", "GDX_ACCOUNT"]) {
+            builder = builder.account(account);
         }
         return builder.api_key(legacy).build();
     }
@@ -162,8 +157,8 @@ pub async fn local_trading_config(transport: TransportConfig) -> Result<GodarkCo
     let api_secret = env_first("GODARK_API_SECRET", "GDX_API_SECRET");
     let passphrase = env_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE");
     if let (Some(id), Some(sec), Some(pass)) = (api_key_id, api_secret, passphrase) {
-        // WS login takes `key_id:secret:passphrase`. Do not send a REST JWT —
-        // `/auth/token` succeeds but the trading socket rejects that bearer.
+        // GodarkClient::connect mints POST /api/v1/auth/token and logs the
+        // WebSocket in with that access_token. Do not send key:secret:passphrase.
         return builder
             .api_key_id(id)
             .api_secret(sec)
