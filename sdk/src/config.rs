@@ -167,7 +167,7 @@ pub struct GodarkConfigBuilder {
     auto_reconnect: bool,
     symbol_map: HashMap<String, u64>,
     transport: TransportConfig,
-    account: Option<AccountId>,
+    account_input: Option<String>,
     hpke_static_public_key_hex: Option<String>,
     place_order_terminal_timeout: Option<Duration>,
     explicit_symbol_map: bool,
@@ -188,7 +188,7 @@ impl GodarkConfigBuilder {
             auto_reconnect: true,
             symbol_map: symbols,
             transport: TransportConfig::default(),
-            account: None,
+            account_input: None,
             hpke_static_public_key_hex: None,
             place_order_terminal_timeout: None,
             explicit_symbol_map: false,
@@ -249,7 +249,7 @@ impl GodarkConfigBuilder {
     /// not return `account` (e.g. localnet / static-key auth). Falls back to
     /// `GODARK_ACCOUNT` / `GDX_ACCOUNT` environment variables at build time.
     pub fn account(mut self, account: impl Into<String>) -> Self {
-        self.account = account.into().parse().ok();
+        self.account_input = Some(account.into());
         self
     }
 
@@ -311,7 +311,14 @@ impl GodarkConfigBuilder {
             self.environment.edge_base_url(),
         );
 
-        let account = self.account.or_else(resolve_account_env);
+        let account = match self.account_input {
+            Some(raw) => Some(
+                raw.trim()
+                    .parse()
+                    .map_err(|err| GodarkError::Config(format!("invalid account: {err}")))?,
+            ),
+            None => resolve_account_env(),
+        };
         let environment = self.environment;
         let pin_env = if self
             .base_url
@@ -872,6 +879,17 @@ mod tests {
         );
 
         std::env::remove_var("GDX_HPKE_STATIC_PUBLIC_KEY");
+    }
+
+    #[test]
+    fn test_builder_invalid_account_is_an_error() {
+        let err = GodarkConfigBuilder::new()
+            .api_key("k")
+            .account("not-a-base58-account")
+            .build()
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid account"), "{msg}");
     }
 
     #[test]

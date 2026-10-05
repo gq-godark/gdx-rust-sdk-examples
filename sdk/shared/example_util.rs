@@ -157,8 +157,8 @@ pub async fn local_trading_config(transport: TransportConfig) -> Result<GodarkCo
     let api_secret = env_first("GODARK_API_SECRET", "GDX_API_SECRET");
     let passphrase = env_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE");
     if let (Some(id), Some(sec), Some(pass)) = (api_key_id, api_secret, passphrase) {
-        // GodarkClient::connect mints POST /api/v1/auth/token and logs the
-        // WebSocket in with that access_token. Do not send key:secret:passphrase.
+        // WS login takes `key_id:secret:passphrase`. Do not send a REST JWT —
+        // `/auth/token` succeeds but the trading socket rejects that bearer.
         return builder
             .api_key_id(id)
             .api_secret(sec)
