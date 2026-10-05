@@ -43,23 +43,25 @@ async fn main() -> Result<(), GodarkError> {
     println!("connecting (REST auth/token)...");
     client.connect().await?;
 
-    match client.get_me().await {
-        Ok(me) => println!(
-            "me: id={} wallet={} tier={}",
-            me.id, me.wallet_address, me.tier
-        ),
-        Err(err) => println!("get_me skipped: {err}"),
-    }
-
-    match client.get_leverage().await {
-        Ok(lev) => {
-            println!("leverage settings: {} entries", lev.settings.len());
-            for row in lev.settings.iter().take(5) {
-                println!("  symbol_id={} leverage={}", row.symbol_id, row.leverage);
-            }
-        }
-        Err(err) => println!("get_leverage skipped: {err}"),
-    }
+    let positions = client.get_positions().await?;
+    let orders = client.get_open_orders().await?;
+    let account = client.get_account().await?;
+    let funding = client.get_funding_rates().await?;
+    let interest = client.get_open_interest().await?;
+    let volume = client.get_volume().await?;
+    println!("positions: {} rows", positions.rows.len());
+    println!("open_orders: {} rows", orders.rows.len());
+    println!(
+        "account total_collateral={}",
+        account
+            .summary
+            .as_ref()
+            .map(|s| s.total_collateral.as_str())
+            .unwrap_or("?")
+    );
+    println!("funding_rates: {funding}");
+    println!("open_interest: {interest}");
+    println!("volume: {volume}");
 
     println!("REST reads succeeded.");
     println!("For REST trading (place/modify/cancel), see full_trader_rest.");
