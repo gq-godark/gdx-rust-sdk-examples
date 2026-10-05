@@ -19,13 +19,13 @@ mod dotenv;
 async fn main() -> Result<(), GodarkError> {
     dotenv::load_dotenv();
 
-    let api_key_id = std::env::var("GODARK_API_KEY_ID").map_err(|_| {
+    let api_key_id = dotenv::env_first(&["GODARK_API_KEY_ID", "GDX_API_KEY_ID"]).ok_or_else(|| {
         GodarkError::Config("Set GODARK_API_KEY_ID in your environment or .env file".into())
     })?;
-    let api_secret = std::env::var("GODARK_API_SECRET").map_err(|_| {
+    let api_secret = dotenv::env_first(&["GODARK_API_SECRET", "GDX_API_SECRET"]).ok_or_else(|| {
         GodarkError::Config("Set GODARK_API_SECRET in your environment or .env file".into())
     })?;
-    let passphrase = std::env::var("GODARK_PASSPHRASE").map_err(|_| {
+    let passphrase = dotenv::env_first(&["GODARK_PASSPHRASE", "GDX_PASSPHRASE"]).ok_or_else(|| {
         GodarkError::Config("Set GODARK_PASSPHRASE in your environment or .env file".into())
     })?;
 
@@ -33,10 +33,13 @@ async fn main() -> Result<(), GodarkError> {
         .api_key_id(api_key_id)
         .api_secret(api_secret)
         .passphrase(passphrase);
-    if let Ok(rest) = std::env::var("GODARK_REST_URL") {
-        if !rest.trim().is_empty() {
-            builder = builder.rest_base_url(rest.trim());
-        }
+    if let Some(rest) = dotenv::env_first(&[
+        "GODARK_REST_URL",
+        "GDX_REST_URL",
+        "GODARK_EDGE_URL",
+        "GDX_EDGE_URL",
+    ]) {
+        builder = builder.rest_base_url(rest);
     }
     let mut client = builder.build()?;
 
