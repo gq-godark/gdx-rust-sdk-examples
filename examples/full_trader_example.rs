@@ -5,8 +5,8 @@
 //!   2. Connect and authenticate (HPKE WebSocket session)
 //!   3. Take receivers for orders, positions, and the other sequencer pushes
 //!   4. Subscribe to the private order + position channels
-//!   5. Place, modify, and cancel `MARKET` / `LIMIT` orders
-//!   6. Mass-quote / batch-cancel ladder demo
+//!   5. Place, modify, and cancel post-only `LIMIT` orders priced off the live mark
+//!   6. Mass-quote / cancel-by-id ladder demo
 //!   7. Drain queued updates between actions
 //!   8. Print a session summary including push-callback counts
 //!   9. Clean disconnect
@@ -19,27 +19,16 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use godark::{
-    Confirmation, Environment, GodarkClient, MassQuoteLegInput, OrderType, PlaceOrderOptions, Side,
+    Confirmation, Environment, GodarkClient, MassQuoteLegInput, OrderType, Side,
     TimeInForce, TransportConfig,
 };
 
 #[path = "dotenv.rs"]
 mod dotenv;
+#[path = "live_mark.rs"]
+mod live_mark;
 
-const SYMBOL: &str = "BTC-USDC-PERP";
-
-/// Decimal-string prices for the public API (never f64).
-fn price_env(keys: &[&str], default: &str) -> String {
-    for key in keys {
-        if let Ok(v) = std::env::var(key) {
-            let t = v.trim();
-            if !t.is_empty() {
-                return t.to_string();
-            }
-        }
-    }
-    default.to_string()
-}
+const SYMBOL: &str = live_mark::SYMBOL;
 
 #[tokio::main]
 async fn main() {
@@ -49,7 +38,7 @@ async fn main() {
     println!("{sep}");
     println!("  GoDark Rust SDK — Trader Reference Example");
     println!("{sep}");
-    println!("Order-type support in this distribution: MARKET, LIMIT");
+    println!("This sample places post-only LIMIT orders only");
 
     let legacy_key = dotenv::env_first(&["GODARK_API_KEY", "GDX_API_KEY"]);
     let edge_override = dotenv::env_first(&["GODARK_EDGE_URL", "GDX_EDGE_URL"]);
@@ -108,7 +97,7 @@ async fn main() {
             .passphrase(passphrase);
     }
     if let Some(base_url) = edge_override.as_deref() {
-        builder = builder.base_url(base_url);
+        builder = builder.base_url(dotenv::edge_ws_url(&base_url));
     }
     let config = match builder.build() {
         Ok(c) => c,
@@ -203,149 +192,191 @@ async fn main() {
         dotenv::print_order_error("update_leverage rejected", &e);
     }
 
-    let buy_px = price_env(&["GODARK_E2E_BUY_PRICE", "GDX_LIVE_PRICE", "GODARK_E2E_PRICE"], "78763");
-    let modify_px = price_env(&["GODARK_E2E_MODIFY_PRICE"], "78684");
-    let sell_px = price_env(&["GODARK_E2E_SELL_PRICE"], "81370");
-    println!("Placing limit BUY @ {buy_px}...");
-    let buy_ack = match client
-        .place_order(
+    let mut rest = match live_mark::connect_rest().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("REST connect failed: {e}");
+            client.disconnect().await;
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = live_mark::cancel_sample_leftovers(&mut rest).await {
+        eprintln!("{e}");
+        client.disconnect().await;
+        std::process::exit(1);
+    }
+    let before_ids = match live_mark::open_order_ids(&mut rest).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("{e}");
+            client.disconnect().await;
+            std::process::exit(1);
+        }
+    };
+    println!("open orders before: {}", before_ids.len());
+
+    let mut snapshot_marks = Vec::new();
+    if let Some(m) = last_mark_btc {
+        snapshot_marks.push(m);
+    }
+    if let Ok(snap) = rest.get_positions().await {
+        snapshot_marks.extend(live_mark::marks_from_positions(&snap));
+    }
+    let mark = match live_mark::resolve_mark(&rest, &snapshot_marks).await {
+        Ok(mark) => mark,
+        Err(e) => {
+            eprintln!("{e}");
+            client.disconnect().await;
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = live_mark::flatten_small_positions(&mut rest, mark).await {
+        eprintln!("{e}");
+        client.disconnect().await;
+        std::process::exit(1);
+    }
+
+    let Some(buy_px) = live_mark::buy_limit(mark) else {
+        eprintln!("mark too small for a post-only buy");
+        client.disconnect().await;
+        std::process::exit(1);
+    };
+    let Some(modify_px) = live_mark::buy_limit_deeper(mark, 500) else {
+        eprintln!("mark too small to modify the buy");
+        client.disconnect().await;
+        std::process::exit(1);
+    };
+    let sell_px = live_mark::sell_limit(mark);
+    let mut ours: Vec<String> = Vec::new();
+
+    println!(
+        "Placing post-only limit BUY qty={} @ {buy_px} (mark floor {})",
+        live_mark::QTY,
+        mark.floor
+    );
+    let buy_id = match client
+        .place_order_with_options(
             SYMBOL,
             Side::Buy,
             OrderType::Limit,
-            "0.1",
+            Some(live_mark::QTY),
             Some(buy_px.as_str()),
             TimeInForce::Gtc,
             false,
             None,
             None,
+            Confirmation::Book,
+            live_mark::post_only(),
         )
         .await
     {
-        Ok(ack) => {
+        Ok(ack) if ack.success => {
             println!(
                 "BUY placed: order_id={}  sequence={}",
                 ack.order_id, ack.sequence
             );
-            Some(ack)
+            ours.push(ack.order_id.clone());
+            ack.order_id
+        }
+        Ok(ack) => {
+            eprintln!("BUY rejected: {:?}", ack.error.or(ack.error_code));
+            client.disconnect().await;
+            std::process::exit(1);
         }
         Err(e) => {
-            dotenv::print_order_error("BUY rejected (continuing to market Place)", &e);
-            None
+            dotenv::print_order_error("BUY rejected", &e);
+            client.disconnect().await;
+            std::process::exit(1);
         }
     };
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     drain_orders(&mut order_rx, "after BUY");
 
-    if let Some(ref buy_ack) = buy_ack {
-        println!("Modifying order price to {modify_px}...");
-        match client
-            .modify_order(
-                &buy_ack.order_id,
-                SYMBOL,
-                Some(modify_px.as_str()),
-                None,
-                None,
-            )
-            .await
-        {
-            Ok(ack) => println!("Modified: order_id={}", ack.order_id),
-            Err(e) => dotenv::print_order_error("Modify rejected", &e),
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        drain_orders(&mut order_rx, "after MODIFY");
-    }
-
-    // Market IOC with explicit walk cap: 50 bps = 0.5% of mark (UI default).
-    // Omit slippage_bps → venue max (localnet 5%).
-    println!("Placing market IOC BUY qty=0.01 with slippage_bps=50 (0.5% walk)...");
+    println!("Modifying order price to {modify_px}...");
     match client
-        .place_order_with_options(
-            SYMBOL,
-            Side::Buy,
-            OrderType::Market,
-            Some("0.01"),
-            None,
-            TimeInForce::Ioc,
-            false,
-            None,
-            None,
-            Confirmation::Book,
-            PlaceOrderOptions {
-                slippage_bps: Some(50),
-                ..Default::default()
-            },
-        )
+        .modify_order(&buy_id, SYMBOL, Some(modify_px.as_str()), None, None)
         .await
     {
-        Ok(ack) => println!("MARKET BUY placed: order_id={}", ack.order_id),
-        Err(e) => dotenv::print_order_error("Market BUY rejected (continuing)", &e),
+        Ok(ack) if ack.success => println!("Modified: order_id={}", ack.order_id),
+        Ok(ack) => {
+            eprintln!("Modify rejected: {:?}", ack.error.or(ack.error_code));
+            abort_orders(&mut client, &mut rest, &before_ids, &ours, mark).await;
+        }
+        Err(e) => {
+            dotenv::print_order_error("Modify rejected", &e);
+            abort_orders(&mut client, &mut rest, &before_ids, &ours, mark).await;
+        }
     }
-
     tokio::time::sleep(Duration::from_secs(1)).await;
-    drain_orders(&mut order_rx, "after MARKET BUY");
+    drain_orders(&mut order_rx, "after MODIFY");
 
-    println!("Placing limit SELL @ {sell_px}...");
+    println!("Post-only limits only; this sample does not place market or IOC orders.");
+
+    println!(
+        "Placing post-only limit SELL qty={} @ {sell_px}",
+        live_mark::QTY
+    );
     match client
         .place_order_with_options(
             SYMBOL,
             Side::Sell,
             OrderType::Limit,
-            Some("0.05"),
+            Some(live_mark::QTY),
             Some(sell_px.as_str()),
             TimeInForce::Gtc,
             false,
             None,
             None,
             Confirmation::Book,
-            PlaceOrderOptions {
-                post_only: true,
-                ..Default::default()
-            },
+            live_mark::post_only(),
         )
         .await
     {
-        Ok(sell_ack) => {
+        Ok(sell_ack) if sell_ack.success => {
             println!("SELL placed: order_id={}", sell_ack.order_id);
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            match client.cancel_order(&sell_ack.order_id, SYMBOL).await {
-                Ok(cancel_ack) => {
-                    println!("SELL cancelled: order_id={}", cancel_ack.order_id)
-                }
-                Err(e) => dotenv::print_order_error("Cancel SELL rejected", &e),
-            }
+            ours.push(sell_ack.order_id);
         }
-        Err(e) => dotenv::print_order_error("SELL rejected", &e),
+        Ok(sell_ack) => {
+            eprintln!(
+                "SELL rejected: {:?}",
+                sell_ack.error.or(sell_ack.error_code)
+            );
+            abort_orders(&mut client, &mut rest, &before_ids, &ours, mark).await;
+        }
+        Err(e) => {
+            dotenv::print_order_error("SELL rejected", &e);
+            abort_orders(&mut client, &mut rest, &before_ids, &ours, mark).await;
+        }
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
-    drain_orders(&mut order_rx, "after SELL/CANCEL");
+    drain_orders(&mut order_rx, "after SELL");
 
-    // --- Bulk quote (mass quote) ---
-    // Place a whole ladder of resting quotes in one batched request. Passing
-    // `None` for post_only keeps the node default (post-only): a leg that would
-    // cross is rejected as "failed" so the batch fuses into a single MPC round.
-    // Pass `Some(false)` for the relaxed path, where a crossing leg takes
-    // liquidity up to its limit and rests the remainder (the number of taker
-    // fills is reported per leg as `fill_count`).
-    // Ladder prices are decimal strings (optional GODARK_E2E_LADDER_* / mark string).
-    let _mark_hint = last_mark_btc.as_deref().unwrap_or("unknown");
-    let mk = |price: &str, qty: &str| MassQuoteLegInput {
+    let Some(ladder_1) = live_mark::buy_limit(mark) else {
+        eprintln!("mark too small for quote leg");
+        abort_orders(&mut client, &mut rest, &before_ids, &ours, mark).await;
+    };
+    let Some(ladder_2) = live_mark::buy_limit_deeper(mark, 100) else {
+        eprintln!("mark too small for quote leg");
+        abort_orders(&mut client, &mut rest, &before_ids, &ours, mark).await;
+    };
+    let Some(ladder_3) = live_mark::buy_limit_deeper(mark, 200) else {
+        eprintln!("mark too small for quote leg");
+        abort_orders(&mut client, &mut rest, &before_ids, &ours, mark).await;
+    };
+    let mk = |price: &str| MassQuoteLegInput {
         side: Side::Buy,
         price: price.to_string(),
-        quantity: qty.to_string(),
+        quantity: live_mark::QTY.to_string(),
         cancel_order_id: None,
         time_in_force: None,
         expiry_time: None,
     };
-    println!("Mass-quoting a 3-level BUY ladder (post-only), mark_hint={_mark_hint}...");
-    let ladder = vec![
-        mk(&price_env(&["GODARK_E2E_LADDER_1"], "78763"), "0.02"),
-        mk(&price_env(&["GODARK_E2E_LADDER_2"], "78526"), "0.02"),
-        mk(&price_env(&["GODARK_E2E_LADDER_3"], "78289"), "0.02"),
-    ];
-    let mut resting_ids: Vec<u64> = Vec::new();
-    match client.mass_quote(SYMBOL, &ladder, None).await {
+    println!("Mass-quoting a 3-level post-only BUY ladder...");
+    let ladder = vec![mk(&ladder_1), mk(&ladder_2), mk(&ladder_3)];
+    let mut quote_failed = false;
+    match client.mass_quote(SYMBOL, &ladder, Some(true)).await {
         Ok(mq) => {
             println!(
                 "Mass quote: success={}  sequence={}  legs={}",
@@ -353,6 +384,9 @@ async fn main() {
                 mq.sequence,
                 mq.results.len()
             );
+            if !mq.success {
+                quote_failed = true;
+            }
             for r in &mq.results {
                 println!(
                     "  leg {}: status={}  new_order_id={}  fills={}  err={:?}",
@@ -362,103 +396,54 @@ async fn main() {
                     r.fill_count,
                     r.error_code
                 );
-                if r.status == "open" {
-                    if let Some(id) = r
-                        .new_order_id
-                        .as_deref()
-                        .and_then(|s| s.parse::<u64>().ok())
-                    {
-                        resting_ids.push(id);
+                if r.fill_count > 0 || !r.status.eq_ignore_ascii_case("open") {
+                    quote_failed = true;
+                }
+                if let Some(id) = r.new_order_id.as_deref() {
+                    if !id.is_empty() && id != "0" {
+                        ours.push(id.to_string());
                     }
                 }
             }
         }
-        Err(e) => dotenv::print_order_error("Mass quote rejected", &e),
-    }
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    drain_orders(&mut order_rx, "after MASS QUOTE");
-
-    if !resting_ids.is_empty() {
-        println!("cancel_all_orders (ladder cleanup)...");
-        match client.cancel_all_orders(Some(SYMBOL)).await {
-            Ok(ca) => println!("  cancel_all: count={}  ids={:?}", ca.count, ca.order_ids),
-            Err(e) => dotenv::print_order_error("cancel_all rejected", &e),
+        Err(e) => {
+            dotenv::print_order_error("Mass quote rejected", &e);
+            abort_orders(&mut client, &mut rest, &before_ids, &ours, mark).await;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        drain_orders(&mut order_rx, "after CANCEL ALL");
     }
 
-    // Crossing BUY string (within oracle band): post_only true vs false.
-    let cross_px = price_env(&["GODARK_E2E_CROSS_PRICE"], "82950");
-    println!("Mass-quoting a crossing BUY with post_only=true (expect rejected/2018)...");
-    match client
-        .mass_quote(SYMBOL, &[mk(&cross_px, "0.001")], Some(true))
-        .await
+    live_mark::wait_before_cancel().await;
+    if let Err(e) = live_mark::refresh_rest(&mut rest).await {
+        eprintln!("{e}");
+        client.disconnect().await;
+        std::process::exit(1);
+    }
+    drain_orders(&mut order_rx, "before cancel");
+    println!("Cancelling {} order(s) this process placed...", ours.len());
+    if let Err(e) = cancel_ours(&client, &ours).await {
+        eprintln!("{e}");
+        let _ = live_mark::flatten_small_positions(&mut rest, mark).await;
+        client.disconnect().await;
+        std::process::exit(1);
+    }
+    if let Err(e) = live_mark::flatten_small_positions(&mut rest, mark).await {
+        eprintln!("{e}");
+        client.disconnect().await;
+        std::process::exit(1);
+    }
+    if let Err(e) =
+        live_mark::assert_no_new_orders_or_positions(&mut rest, &before_ids, &ours).await
     {
-        Ok(mq) => {
-            for r in &mq.results {
-                println!(
-                    "  leg {}: status={}  fills={}  err={:?}",
-                    r.leg_index, r.status, r.fill_count, r.error_code
-                );
-            }
-        }
-        Err(e) => dotenv::print_order_error("post_only=true mass quote rejected", &e),
+        eprintln!("{e}");
+        client.disconnect().await;
+        std::process::exit(1);
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    drain_orders(&mut order_rx, "after post_only=true");
+    if quote_failed {
+        eprintln!("one or more mass-quote legs did not rest as post-only");
+        client.disconnect().await;
+        std::process::exit(1);
+    }
 
-    // Crossing BUY with post_only=false (relaxed): leg takes liquidity, fills>0.
-    println!("Mass-quoting a crossing BUY with post_only=false (expect filled, fills>0)...");
-    match client
-        .mass_quote(SYMBOL, &[mk(&cross_px, "0.003")], Some(false))
-        .await
-    {
-        Ok(mq) => {
-            let mut stray_ids: Vec<u64> = Vec::new();
-            for r in &mq.results {
-                println!(
-                    "  leg {}: status={}  new_order_id={}  fills={}  err={:?}",
-                    r.leg_index,
-                    r.status,
-                    r.new_order_id.as_deref().unwrap_or("—"),
-                    r.fill_count,
-                    r.error_code
-                );
-                if r.status == "open" {
-                    if let Some(id) = r
-                        .new_order_id
-                        .as_deref()
-                        .and_then(|s| s.parse::<u64>().ok())
-                    {
-                        stray_ids.push(id);
-                    }
-                }
-            }
-            if !stray_ids.is_empty() {
-                println!("cancel_all_orders (post_only=false remainder cleanup)...");
-                match client.cancel_all_orders(Some(SYMBOL)).await {
-                    Ok(ca) => println!("  cancel_all: count={}  ids={:?}", ca.count, ca.order_ids),
-                    Err(e) => dotenv::print_order_error(
-                        "post_only=false remainder cancel_all rejected",
-                        &e,
-                    ),
-                }
-            }
-        }
-        Err(e) => dotenv::print_order_error("post_only=false mass quote rejected", &e),
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    drain_orders(&mut order_rx, "after post_only=false");
-
-    if let Some(ref buy_ack) = buy_ack {
-        println!("Cancelling original BUY (cleanup)...");
-        match client.cancel_order(&buy_ack.order_id, SYMBOL).await {
-            Ok(_) => println!("Original BUY cancelled"),
-            Err(_) => println!("Original BUY already filled or cancelled"),
-        }
-    }
 
     // Drain any sequencer pushes that arrived during the session.
     let mut snap_count = 0usize;
@@ -563,5 +548,54 @@ fn drain_orders(rx: &mut tokio::sync::mpsc::Receiver<godark::OrderUpdate>, label
     }
     if count > 0 {
         println!("  ({count} order update(s) {label})");
+    }
+}
+
+async fn abort_orders(
+    client: &mut godark::GodarkClient,
+    rest: &mut godark::GodarkRestClient,
+    before_ids: &[String],
+    ours: &[String],
+    mark: live_mark::Mark,
+) -> ! {
+    live_mark::wait_before_cancel().await;
+    if let Err(e) = cancel_ours(client, ours).await {
+        eprintln!("{e}");
+    }
+    if let Err(e) = live_mark::flatten_small_positions(rest, mark).await {
+        eprintln!("{e}");
+    }
+    if let Err(e) =
+        live_mark::assert_no_new_orders_or_positions(rest, before_ids, ours).await
+    {
+        eprintln!("{e}");
+    }
+    client.disconnect().await;
+    std::process::exit(1);
+}
+
+async fn cancel_ours(client: &godark::GodarkClient, ids: &[String]) -> Result<(), String> {
+    let mut err = None;
+    for id in ids {
+        match client.cancel_order(id, SYMBOL).await {
+            Ok(ca) if ca.success => println!("  cancel order_id={}", ca.order_id),
+            Ok(ca) => {
+                let msg = format!(
+                    "cancel {id} rejected: {:?}",
+                    ca.error.or(ca.error_code)
+                );
+                eprintln!("{msg}");
+                err = Some(msg);
+            }
+            Err(e) => {
+                let msg = format!("cancel {id}: {e}");
+                eprintln!("{msg}");
+                err = Some(msg);
+            }
+        }
+    }
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
 }

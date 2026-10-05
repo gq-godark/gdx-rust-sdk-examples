@@ -7,9 +7,10 @@ The bundled `godark` crate provides two client surfaces:
   commands and snapshots, plaintext authenticated order lookup, and public
   market-data snapshots.
 
-The examples exercise `MARKET` and `LIMIT` placement. Other order variants in
-the public enum are protocol types, not a promise that every environment
-accepts them.
+The examples place post-only `LIMIT` orders priced from a live mark, and exit
+before sending if that mark is missing. They do not place `MARKET` orders.
+Other order variants in the public enum are protocol types, not a promise that
+every environment accepts them.
 
 ## Canonical account identity
 

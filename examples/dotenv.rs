@@ -63,6 +63,18 @@ pub fn env_first(keys: &[&str]) -> Option<String> {
     }
 }
 
+/// WebSocket clients need `ws`/`wss`. REST accepts the same host over `http`/`https`.
+pub fn edge_ws_url(url: &str) -> String {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        url.to_string()
+    }
+}
+
 pub fn load_dotenv() {
     let _ = OS_KEYS.get_or_init(|| {
         std::env::vars()

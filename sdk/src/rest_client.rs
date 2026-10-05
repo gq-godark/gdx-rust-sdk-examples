@@ -197,7 +197,7 @@ pub struct GodarkRestClientBuilder {
     rest_base_url: Option<String>,
     /// When unset, inferred from the resolved REST base URL for HPKE pin selection.
     environment: Option<Environment>,
-    account: Option<AccountId>,
+    account_input: Option<String>,
     hpke_static_public_key_hex: Option<String>,
     symbol_map: HashMap<String, u64>,
     explicit_symbol_map: bool,
@@ -214,7 +214,7 @@ impl GodarkRestClientBuilder {
             passphrase: None,
             rest_base_url: None,
             environment: None,
-            account: None,
+            account_input: None,
             hpke_static_public_key_hex: None,
             symbol_map,
             explicit_symbol_map: false,
@@ -256,7 +256,7 @@ impl GodarkRestClientBuilder {
 
     /// Fallback account when the edge auth response omits `account` (e.g. localnet).
     pub fn account(mut self, id: impl Into<String>) -> Self {
-        self.account = id.into().parse().ok();
+        self.account_input = Some(id.into());
         self
     }
 
@@ -318,16 +318,25 @@ impl GodarkRestClientBuilder {
                 .rest_base_url(),
         );
 
-        let account = self.account.or_else(|| {
-            for k in &["GODARK_ACCOUNT", "GDX_ACCOUNT"] {
-                if let Ok(v) = std::env::var(k) {
-                    if let Ok(account) = v.trim().parse() {
-                        return Some(account);
+        let account = match self.account_input {
+            Some(raw) => Some(
+                raw.trim()
+                    .parse()
+                    .map_err(|err| GodarkError::Config(format!("invalid account: {err}")))?,
+            ),
+            None => {
+                let mut from_env = None;
+                for k in &["GODARK_ACCOUNT", "GDX_ACCOUNT"] {
+                    if let Ok(v) = std::env::var(k) {
+                        if let Ok(account) = v.trim().parse() {
+                            from_env = Some(account);
+                            break;
+                        }
                     }
                 }
+                from_env
             }
-            None
-        });
+        };
 
         let environment = self
             .environment

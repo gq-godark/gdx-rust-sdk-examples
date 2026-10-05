@@ -3,9 +3,10 @@
 This package provides the GoDark Rust SDK and minimal examples for encrypted
 darkpool trading.
 
-Supported order types in this distribution: `MARKET`, `LIMIT`. Prices and
-sizes on the public trading API are **decimal strings only** (for example
-`"0.01"`, `Some("68000")`) — not `f64` / `f32` / integers.
+The bundled samples place post-only `LIMIT` orders priced from a live mark
+(at least 500 away, quantity at most `0.001`) and do not place `MARKET`
+orders. Prices and sizes on the public trading API are **decimal strings
+only** (for example `"0.001"`) — not `f64` / `f32` / integers.
 
 ## Package contents
 
@@ -106,9 +107,9 @@ Environment names only (values stay in `.env`): `GODARK_API_KEY_ID`,
    Take `take_open_orders_snapshot_receiver()` before `connect`; an
    `open_orders_snapshot` is delivered to that caller.
 4. **Place with strings.** Prices and sizes are `&str` / `String`
-   (`"0.01"`, `Some("68000")`). `slippage_bps` applies only to `MARKET` and
-   `STOP_MARKET`. A peg (`peg_offset_bps`) is not post-only unless you set
-   `post_only: true`.
+   (`"0.001"`, a post-only limit at least 500 away from the live mark).
+   `slippage_bps` applies only to `MARKET` and `STOP_MARKET`. A peg
+   (`peg_offset_bps`) is not post-only unless you set `post_only: true`.
 5. **Client order id.** Set `PlaceOrderOptions.client_order_id` on a
    WebSocket place. The SDK registers it only after that place succeeds, and
    caches the mapping only after `_register_coid` returns HTTP 200. A REST
@@ -139,13 +140,15 @@ async fn main() -> Result<(), GodarkError> {
         .subscribe(&["orders", "positions", "volume", "open_interest", "funding_rate"])
         .await?;
 
+    // Post-only sell at least 500 above the live mark. `live_mark_ceil` is that mark.
+    let sell_px = format!("{}", live_mark_ceil + 500);
     let ack = client
         .place_order(
             "BTC-USDC-PERP",
             Side::Sell,
             OrderType::Limit,
-            "0.01",
-            Some("68000"),
+            "0.001",
+            Some(&sell_px),
             TimeInForce::Gtc,
             false,
             None,

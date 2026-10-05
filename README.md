@@ -127,11 +127,14 @@ get fast incremental builds and IDE go-to-definition into the SDK source.
 | `full_trader_rest` | `examples/full_trader_rest.rs` | Development-only REST reference flow with account preflight and trading commands |
 | `rest_client_example` | `examples/rest_client_example.rs` | Bundle-safe REST auth, account reads, and public market-data queries |
 
-Order-type support in this MM distribution is limited to **`MARKET`** and
-**`LIMIT`**. Place / modify / mass-quote / batch-modify / TP-SL /
+The samples place **post-only `LIMIT`** orders only. They read a live mark
+(position snapshot, otherwise open interest) and exit before sending if none
+is available. Sells rest at least 500 above that mark and buys at least 500
+below it, with quantity at most `0.001`. They do not place `MARKET`, IOC, or
+non-post-only orders. Place / modify / mass-quote / batch-modify / TP-SL /
 `quote_notional` / `min_fill_size` / trigger prices and sizes are **decimal
-strings only** (for example `"0.01"`, `Some("67500.5")`). There is no public
-`f64` / `f32` / integer price or size input; invalid strings are rejected.
+strings only** (for example `"0.001"`). There is no public `f64` / `f32` /
+integer price or size input; invalid strings are rejected.
 
 ## Current SDK flow
 
@@ -152,8 +155,9 @@ order. Environment **names** (values live in `.env`):
    Call `take_open_orders_snapshot_receiver()` before `connect`. The SDK
    delivers `open_orders_snapshot` on that receiver (orders-channel hydrate
    and later replaces).
-5. **String place** — `quantity` and `price` are `&str` (`"0.01"`,
-   `Some("68000")`). `slippage_bps` is only for `MARKET` and `STOP_MARKET`.
+5. **String place** — `quantity` and `price` are `&str` (`"0.001"`, a
+   post-only limit at least 500 away from the live mark). `slippage_bps` is
+   only for `MARKET` and `STOP_MARKET`.
    `peg_offset_bps` does not imply post-only; set `post_only` yourself.
 6. **Client order id** — registered only after a successful WebSocket place.
    The local cache is written only after `POST /api/v1/orders/_register_coid`
