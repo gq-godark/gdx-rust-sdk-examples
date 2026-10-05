@@ -101,11 +101,8 @@ async fn main() -> Result<(), GodarkError> {
             );
             // Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let cancel = client.cancel_all_orders(Some(SYMBOL)).await?;
-            println!(
-                "cancel_all OK -- count={} ids={:?}",
-                cancel.count, cancel.order_ids
-            );
+            let cancel = client.cancel_order(&ack.order_id, SYMBOL).await?;
+            println!("cancel OK -- order_id={}", cancel.order_id);
         }
         Err(e) => {
             dotenv::print_order_error("Order rejected", &e);

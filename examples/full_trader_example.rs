@@ -256,34 +256,8 @@ async fn main() {
         drain_orders(&mut order_rx, "after MODIFY");
     }
 
-    // Market IOC with explicit walk cap: 50 bps = 0.5% of mark (UI default).
-    // Omit slippage_bps → venue max (localnet 5%).
-    println!("Placing market IOC BUY qty=0.01 with slippage_bps=50 (0.5% walk)...");
-    match client
-        .place_order_with_options(
-            SYMBOL,
-            Side::Buy,
-            OrderType::Market,
-            Some("0.01"),
-            None,
-            TimeInForce::Ioc,
-            false,
-            None,
-            None,
-            Confirmation::Book,
-            PlaceOrderOptions {
-                slippage_bps: Some(50),
-                ..Default::default()
-            },
-        )
-        .await
-    {
-        Ok(ack) => println!("MARKET BUY placed: order_id={}", ack.order_id),
-        Err(e) => dotenv::print_order_error("Market BUY rejected (continuing)", &e),
-    }
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    drain_orders(&mut order_rx, "after MARKET BUY");
+    // A market IOC can fill and leave a position. This sample does not send one.
+    println!("Skipping market IOC so the sample does not open a position.");
 
     println!("Placing limit SELL @ {sell_px}...");
     match client
@@ -380,10 +354,12 @@ async fn main() {
     drain_orders(&mut order_rx, "after MASS QUOTE");
 
     if !resting_ids.is_empty() {
-        println!("cancel_all_orders (ladder cleanup)...");
-        match client.cancel_all_orders(Some(SYMBOL)).await {
-            Ok(ca) => println!("  cancel_all: count={}  ids={:?}", ca.count, ca.order_ids),
-            Err(e) => dotenv::print_order_error("cancel_all rejected", &e),
+        println!("Cancelling {} ladder order(s) by id...", resting_ids.len());
+        for id in &resting_ids {
+            match client.cancel_order(&id.to_string(), SYMBOL).await {
+                Ok(ca) => println!("  cancel order_id={}", ca.order_id),
+                Err(e) => dotenv::print_order_error(&format!("cancel {id} rejected"), &e),
+            }
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
         drain_orders(&mut order_rx, "after CANCEL ALL");
@@ -409,10 +385,11 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     drain_orders(&mut order_rx, "after post_only=true");
 
-    // Crossing BUY with post_only=false (relaxed): leg takes liquidity, fills>0.
-    println!("Mass-quoting a crossing BUY with post_only=false (expect filled, fills>0)...");
+    // post_only=false still prices below the cross so the leg rests instead of filling.
+    let rest_px = price_env(&["GODARK_E2E_REST_PRICE"], "72000");
+    println!("Mass-quoting a resting BUY @ {rest_px} with post_only=false (cancelled by id)...");
     match client
-        .mass_quote(SYMBOL, &[mk(&cross_px, "0.003")], Some(false))
+        .mass_quote(SYMBOL, &[mk(&rest_px, "0.003")], Some(false))
         .await
     {
         Ok(mq) => {
@@ -437,13 +414,15 @@ async fn main() {
                 }
             }
             if !stray_ids.is_empty() {
-                println!("cancel_all_orders (post_only=false remainder cleanup)...");
-                match client.cancel_all_orders(Some(SYMBOL)).await {
-                    Ok(ca) => println!("  cancel_all: count={}  ids={:?}", ca.count, ca.order_ids),
-                    Err(e) => dotenv::print_order_error(
-                        "post_only=false remainder cancel_all rejected",
-                        &e,
-                    ),
+                println!("Cancelling {} resting remainder(s) by id...", stray_ids.len());
+                for id in &stray_ids {
+                    match client.cancel_order(&id.to_string(), SYMBOL).await {
+                        Ok(ca) => println!("  cancel order_id={}", ca.order_id),
+                        Err(e) => dotenv::print_order_error(
+                            &format!("remainder cancel {id} rejected"),
+                            &e,
+                        ),
+                    }
                 }
             }
         }
