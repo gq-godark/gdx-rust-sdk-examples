@@ -841,20 +841,19 @@ impl GodarkClient {
     pub async fn subscribe(&mut self, channels: &[&str]) -> Result<(), GodarkError> {
         self.ensure_ready()?;
         let ch_list: Vec<String> = channels.iter().map(|c| c.to_string()).collect();
-        {
-            let mut desired = self
-                .desired_channels
-                .lock()
-                .map_err(|_| GodarkError::Connection("Desired channel mutex poisoned".into()))?;
-            for c in &ch_list {
-                desired.insert(c.clone());
-            }
-        }
         self.transport
             .lock()
             .await
             .send_subscribe(&ch_list, "subscribe")
-            .await
+            .await?;
+        let mut desired = self
+            .desired_channels
+            .lock()
+            .map_err(|_| GodarkError::Connection("Desired channel mutex poisoned".into()))?;
+        for c in &ch_list {
+            desired.insert(c.clone());
+        }
+        Ok(())
     }
 
     pub async fn unsubscribe(&mut self, channels: &[&str]) -> Result<(), GodarkError> {
